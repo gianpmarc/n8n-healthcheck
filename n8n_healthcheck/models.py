@@ -51,7 +51,10 @@ class Snapshot:
     # {"deployments": [{"name": str, "replicas": int, "ready_replicas": int,
     #   "containers": [{"name": str, "image": str, "command": [str], "env": {str: str},
     #     "requests": {"cpu": str, "memory": str}, "limits": {"cpu": str, "memory": str},
-    #     "liveness_probe": bool, "readiness_probe": bool}]}]}
+    #     "liveness_probe": bool, "readiness_probe": bool, "env_complete": bool}]}]}
+    # Container env: a value taken from a Secret is "<valueFrom>" (set, value unknown).
+    # env_complete is False when part of the environment could not be read (e.g. envFrom
+    # a Secret), so an absent variable there does not prove the n8n default applies.
     kubernetes: Optional[dict] = None
     n8n_version: Optional[str] = None
 
