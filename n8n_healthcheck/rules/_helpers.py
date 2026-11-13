@@ -45,6 +45,15 @@ def container_env(deployment: dict, container: dict) -> Env:
     return env
 
 
+def worker_envs(kubernetes: dict) -> list:
+    """The environment of every n8n worker container."""
+    return [
+        container_env(deployment, container)
+        for deployment, container, role in n8n_containers(kubernetes)
+        if role == "worker"
+    ]
+
+
 def effective_env(snapshot: Snapshot) -> Optional[Env]:
     """The environment of the n8n main process, or None when it is not known.
 
@@ -121,6 +130,11 @@ def shown(env: dict, name: str) -> str:
     if unknown(env, name):
         return f"{name} is set, value not readable" if name in env else f"{name} not readable"
     return f"{name}={env[name]}" if name in env else f"{name} is not set"
+
+
+def shown_each(envs: list, name: str) -> str:
+    """shown() for several Kubernetes containers, each prefixed with where it runs."""
+    return "; ".join(f"{env.source}: {shown(env, name)}" for env in envs)
 
 
 def image_tag(image: str) -> Optional[str]:

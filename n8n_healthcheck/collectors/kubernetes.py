@@ -41,10 +41,10 @@ def parse_configmaps(output: str) -> dict:
 def parse_deployments(output: str, configmaps: dict | None = None) -> dict:
     """`configmaps` is the parse_configmaps() result, or None when they could not be read."""
     items = json.loads(output)["items"]
-    return {"deployments": [_deployment(item, configmaps or {}) for item in items]}
+    return {"deployments": [_deployment(item, configmaps) for item in items]}
 
 
-def _deployment(item: dict, configmaps: dict) -> dict:
+def _deployment(item: dict, configmaps: dict | None) -> dict:
     containers = item["spec"]["template"]["spec"]["containers"]
     return {
         "name": item["metadata"]["name"],
@@ -54,7 +54,7 @@ def _deployment(item: dict, configmaps: dict) -> dict:
     }
 
 
-def _container(container: dict, configmaps: dict) -> dict:
+def _container(container: dict, configmaps: dict | None) -> dict:
     resources = container.get("resources", {})
     env, env_complete = _environment(container, configmaps)
     return {
@@ -71,18 +71,22 @@ def _container(container: dict, configmaps: dict) -> dict:
     }
 
 
-def _environment(container: dict, configmaps: dict) -> tuple[dict, bool]:
+def _environment(container: dict, configmaps: dict | None) -> tuple[dict, bool]:
     """The container's variables and whether all of them could be read.
 
     Follows Kubernetes precedence: `envFrom` sources in order (a later one wins), then
-    `env` entries, which override `envFrom`.
+    `env` entries, which override `envFrom`. `configmaps` is None when not fetched.
     """
+    fetched = configmaps is not None
+    configmaps = configmaps or {}
     env: dict = {}
     complete = True
     for source in container.get("envFrom") or []:
         data = configmaps.get((source.get("configMapRef") or {}).get("name"))
         if data is None:  # a secretRef, or a ConfigMap that is missing or was not fetched
             complete = False
+            # It may override any key read so far, so none of those values can be trusted.
+            env = dict.fromkeys(env, UNKNOWN)
             continue
         for key, value in data.items():
             name = source.get("prefix", "") + key
@@ -94,12 +98,17 @@ def _environment(container: dict, configmaps: dict) -> tuple[dict, bool]:
             # Kubernetes expands $(OTHER_VAR) in a literal, so the text is not the value.
             env[name] = UNKNOWN if "$(" in value else redact(name, value)
             continue
-        env[name] = UNKNOWN  # secretKeyRef, fieldRef, resourceFieldRef: never resolved
         ref = entry["valueFrom"].get("configMapKeyRef")
-        if ref:
-            data = configmaps.get(ref.get("name")) or {}
-            if ref.get("key") in data:
-                env[name] = redact(name, data[ref["key"]])
-            else:  # ConfigMap or key missing, or ConfigMaps not fetched
-                complete = False
+        if not ref:  # secretKeyRef, fieldRef, resourceFieldRef: never resolved
+            env[name] = UNKNOWN
+            continue
+        data = configmaps.get(ref.get("name")) or {}
+        if ref.get("key") in data:
+            env[name] = redact(name, data[ref["key"]])
+        elif fetched and ref.get("optional") is True:
+            # Kubernetes skips the entry, so the variable keeps whatever envFrom gave it.
+            continue
+        else:  # ConfigMap or key missing, or ConfigMaps not fetched
+            env[name] = UNKNOWN
+            complete = False
     return env, complete

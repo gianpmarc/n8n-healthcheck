@@ -336,8 +336,44 @@ class ParserTests(unittest.TestCase):
         env, complete = container_env(
             {"envFrom": [config_map("n8n-config"), {"secretRef": {"name": "n8n-secrets"}}]}
         )
-        self.assertEqual(env["EXECUTIONS_MODE"], "queue")
+        # The Secret may override any ConfigMap key, so none of them is reported as read.
+        self.assertEqual(set(env.values()), {"<valueFrom>"})
+        self.assertEqual(set(env), {"EXECUTIONS_MODE", "N8N_METRICS", "DB_POSTGRESDB_PASSWORD"})
         self.assertFalse(complete)
+
+    def test_unreadable_env_from_only_hides_the_sources_before_it(self):
+        for unreadable in ({"secretRef": {"name": "n8n-secrets"}}, config_map("gone")):
+            with self.subTest(unreadable=unreadable):
+                env, complete = container_env(
+                    {
+                        "envFrom": [config_map("n8n-config"), unreadable, config_map("override")],
+                        "env": [{"name": "EXECUTIONS_MODE", "value": "regular"}],
+                    }
+                )
+                self.assertEqual(env["DB_POSTGRESDB_PASSWORD"], "<valueFrom>")  # before it
+                self.assertEqual(env["N8N_METRICS"], "true")  # from the source after it
+                self.assertEqual(env["EXECUTIONS_MODE"], "regular")  # explicit env entry
+                self.assertFalse(complete)
+
+    def test_optional_configmap_key_ref_that_is_missing_leaves_the_variable_unset(self):
+        def entry(name, key, **ref):
+            ref = {"name": name, "key": key, **ref}
+            return {"name": "N8N_METRICS", "valueFrom": {"configMapKeyRef": ref}}
+
+        unknown = ({"N8N_METRICS": "<valueFrom>"}, False)
+        for name, key in (("gone", "A"), ("n8n-config", "NO_SUCH_KEY")):
+            with self.subTest(configmap=name):
+                optional = {"env": [entry(name, key, optional=True)]}
+                self.assertEqual(container_env(optional), ({}, True))
+                # Not optional, or ConfigMaps not fetched: still set-but-unknown.
+                self.assertEqual(container_env({"env": [entry(name, key)]}), unknown)
+                self.assertEqual(container_env(optional, configmaps=None), unknown)
+        # The skipped entry does not hide the value envFrom gave the same name.
+        spec = {
+            "envFrom": [config_map("n8n-config")],
+            "env": [entry("gone", "A", optional=True)],
+        }
+        self.assertEqual(container_env(spec)[0]["N8N_METRICS"], "false")
 
     def test_missing_configmap_makes_the_environment_incomplete(self):
         env, complete = container_env({"envFrom": [config_map("gone")]})

@@ -637,7 +637,7 @@ class KubernetesEnv(unittest.TestCase):
             (rel.sqlite_in_queue_mode, {"EXECUTIONS_MODE": "queue"}),
             (rel.single_main, dict(QUEUE)),
             (maint.metrics_disabled, dict(QUEUE)),
-            (sec.task_runners_not_external, dict(QUEUE)),
+            (sec.task_runners_not_external, {**self.PG, "EXECUTIONS_MODE": "regular"}),
         ]
         for rule, env in absent:
             with self.subTest(rule=rule.__name__):
@@ -651,11 +651,17 @@ class KubernetesEnv(unittest.TestCase):
     def test_incomplete_env_still_reports_an_explicit_bad_value(self):
         explicit = [
             (perf.pruning_disabled, {"EXECUTIONS_DATA_PRUNE": "false"}),
-            (perf.saving_execution_progress, {"EXECUTIONS_DATA_SAVE_ON_PROGRESS": "true"}),
+            (
+                perf.saving_execution_progress,
+                {"EXECUTIONS_MODE": "regular", "EXECUTIONS_DATA_SAVE_ON_PROGRESS": "true"},
+            ),
             (perf.binary_data_in_memory, {"N8N_DEFAULT_BINARY_DATA_MODE": "default"}),
             (sec.insecure_cookie, {"N8N_SECURE_COOKIE": "false"}),
             (maint.metrics_disabled, {"N8N_METRICS": "false"}),
-            (sec.task_runners_not_external, {"N8N_RUNNERS_MODE": "internal"}),
+            (
+                sec.task_runners_not_external,
+                {"EXECUTIONS_MODE": "regular", "N8N_RUNNERS_MODE": "internal"},
+            ),
             (rel.sqlite_in_queue_mode, {"EXECUTIONS_MODE": "queue", "DB_TYPE": "sqlite"}),
             (rel.single_main, {**QUEUE, "N8N_MULTI_MAIN_SETUP_ENABLED": "false"}),
             (
@@ -707,6 +713,78 @@ class KubernetesEnv(unittest.TestCase):
         bad = {"N8N_SECURE_COOKIE": "false"}
         self.assertIsNone(sec.insecure_cookie(two(bad, {"N8N_SECURE_COOKIE": "true"})))
         self.assertIsNotNone(sec.insecure_cookie(two(bad, dict(bad))))
+
+    def test_runners_are_only_required_where_code_nodes_run(self):
+        external = {"N8N_RUNNERS_MODE": "external"}
+        offloaded = {**QUEUE, "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": "true"}
+        rule = sec.task_runners_not_external
+        # Main offloads manual executions, so only the workers need a runner.
+        self.assertIsNone(rule(from_kube(offloaded, worker_env=external)))
+        finding = rule(from_kube({**offloaded, **external}))
+        self.assertEqual(
+            finding.evidence,
+            "Deployment n8n-worker, container n8n: N8N_RUNNERS_MODE is not set "
+            "(default: internal).",
+        )
+        self.assertEqual(finding.severity, "warning")
+        # Without offloading, main runs manual executions and needs one too.
+        finding = rule(from_kube(dict(QUEUE), worker_env=external))
+        self.assertIn("Environment read from Deployment n8n-main", finding.evidence)
+        both = rule(from_kube(dict(QUEUE)))
+        self.assertIn("Deployment n8n-main, container n8n: N8N_RUNNERS_MODE", both.evidence)
+        self.assertIn("Deployment n8n-worker, container n8n: N8N_RUNNERS_MODE", both.evidence)
+        self.assertIsNone(rule(from_kube({**QUEUE, **external}, worker_env=external)))
+        # Offloading unreadable: main is not judged, the workers still are.
+        opaque = {**QUEUE, "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": "<valueFrom>"}
+        self.assertIsNone(rule(from_kube(opaque, worker_env=external)))
+        self.assertIsNone(rule(from_kube(dict(QUEUE), complete=False, worker_env=external)))
+
+    def test_unreadable_worker_runner_mode_is_never_a_finding(self):
+        offloaded = {**QUEUE, "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": "true"}
+        for worker in (
+            container(command=["worker"], env_complete=False),
+            container(command=["worker"], env={"N8N_RUNNERS_MODE": "<valueFrom>"}),
+        ):
+            with self.subTest(worker=worker["env"]):
+                snapshot = Snapshot(
+                    kubernetes=kube(("n8n-main", 1, container(env=offloaded)), ("w", 2, worker))
+                )
+                self.assertIsNone(sec.task_runners_not_external(snapshot))
+        # No worker in the namespace: nothing to judge.
+        self.assertIsNone(
+            sec.task_runners_not_external(
+                Snapshot(kubernetes=kube(("n8n-main", 1, container(env=offloaded))))
+            )
+        )
+        # An unreadable execution mode does not default to regular.
+        self.assertIsNone(
+            sec.task_runners_not_external(from_kube({"EXECUTIONS_MODE": "<valueFrom>"}))
+        )
+
+    def test_env_file_runner_check_is_unchanged_by_kubernetes_data(self):
+        offloaded = {**QUEUE, "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": "true"}
+        workers = from_kube({}, worker_env={"N8N_RUNNERS_MODE": "external"}).kubernetes
+        finding = sec.task_runners_not_external(Snapshot(env=offloaded, kubernetes=workers))
+        self.assertEqual(finding, sec.task_runners_not_external(Snapshot(env=offloaded)))
+
+    def test_save_on_progress_is_judged_on_the_workers_in_queue_mode(self):
+        saving = {"EXECUTIONS_DATA_SAVE_ON_PROGRESS": "true"}
+        rule = perf.saving_execution_progress
+        # Main alone does not run production executions in queue mode.
+        self.assertIsNone(rule(from_kube({**QUEUE, **saving})))
+        finding = rule(from_kube(dict(QUEUE), worker_env=saving))
+        self.assertEqual(
+            finding.evidence,
+            "Deployment n8n-worker, container n8n: EXECUTIONS_DATA_SAVE_ON_PROGRESS=true "
+            "(default: false).",
+        )
+        # Regular mode, and the env file in any mode, keep judging the one environment.
+        self.assertIsNotNone(rule(from_kube({"EXECUTIONS_MODE": "regular", **saving})))
+        self.assertIsNotNone(rule(from_kube(saving)))
+        self.assertIsNotNone(rule(Snapshot(env={**QUEUE, **saving})))
+        # Mode unreadable: main may be a queue-mode main, so it is not judged.
+        self.assertIsNone(rule(from_kube({"EXECUTIONS_MODE": "<valueFrom>", **saving})))
+        self.assertIsNone(rule(from_kube(saving, complete=False)))
 
     def test_main_env_does_not_stand_in_for_the_workers(self):
         low = {**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "2"}

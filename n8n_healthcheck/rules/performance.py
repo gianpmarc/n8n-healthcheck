@@ -5,7 +5,15 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import Finding, Snapshot
-from ._helpers import effective_env, env_flag, is_queue_mode, shown, unknown
+from ._helpers import (
+    effective_env,
+    env_flag,
+    is_queue_mode,
+    shown,
+    shown_each,
+    unknown,
+    worker_envs,
+)
 
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/manage-execution-data#enable-executions-pruning
@@ -43,14 +51,27 @@ def pruning_disabled(snapshot: Snapshot) -> Optional[Finding]:
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/manage-execution-data#reduce-saved-data
 def saving_execution_progress(snapshot: Snapshot) -> Optional[Finding]:
     env = effective_env(snapshot)
-    if env is None or env_flag(env, "EXECUTIONS_DATA_SAVE_ON_PROGRESS") is not True:
+    if env is None:
         return None
+    name = "EXECUTIONS_DATA_SAVE_ON_PROGRESS"
+    judged = [env]
+    # In queue mode production executions run on the workers, each with its own
+    # environment in Kubernetes; main alone says nothing unless it is known to be regular.
+    if env.source and (is_queue_mode(env) or unknown(env, "EXECUTIONS_MODE")):
+        judged = worker_envs(snapshot.kubernetes)
+    saving = [each for each in judged if env_flag(each, name) is True]
+    if not saving:
+        return None
+    if saving[0] is env:
+        evidence = f"{shown(env, name)} (default: false).{env.note}"
+    else:
+        evidence = f"{shown_each(saving, name)} (default: false)."
     return Finding(
         rule_id="PERF-002",
         area="performance",
         severity="warning",
         title="Execution progress is saved after every node",
-        evidence=f"{shown(env, 'EXECUTIONS_DATA_SAVE_ON_PROGRESS')} (default: false).{env.note}",
+        evidence=evidence,
         impact=(
             "n8n writes the full execution data to the database after each node instead of "
             "once at the end, so every execution costs one database write per node and "
