@@ -33,6 +33,9 @@ EMPTY=
 N8N_ENCRYPTION_KEY=abc123
 DB_POSTGRESDB_PASSWORD="pg secret"
 N8N_SMTP_PASS=
+HTTP_PROXY=http://u:hunter2@proxy:3128
+N8N_LICENSE_CERT=MIIBkTCB
+WEBHOOK_URL=https://n8n.example.com/
 not a variable
 """
 
@@ -61,6 +64,9 @@ DEPLOYMENTS = {
                                     {"name": "DB_POSTGRESDB_PASSWORD", "value": "hunter2"},
                                     {"name": "N8N_RUNNERS_AUTH_TOKEN", "value": ""},
                                     {"name": "N8N_PROXY_HOPS"},
+                                    {"name": "HTTP_PROXY", "value": "http://u:hunter2@proxy:3128"},
+                                    {"name": "N8N_LICENSE_CERT", "value": "MIIBkTCB"},
+                                    {"name": "WEBHOOK_URL", "value": "https://n8n.example.com/"},
                                 ],
                                 "resources": {
                                     "requests": {"cpu": "500m", "memory": "512Mi"},
@@ -137,6 +143,9 @@ class ParserTests(unittest.TestCase):
                 "N8N_ENCRYPTION_KEY": REDACTED,
                 "DB_POSTGRESDB_PASSWORD": REDACTED,
                 "N8N_SMTP_PASS": "",  # unset stays distinguishable from set
+                "HTTP_PROXY": REDACTED,  # credentials inside the value
+                "N8N_LICENSE_CERT": REDACTED,
+                "WEBHOOK_URL": "https://n8n.example.com/",  # ordinary URL left intact
             },
         )
 
@@ -201,6 +210,9 @@ class ParserTests(unittest.TestCase):
                     "DB_POSTGRESDB_PASSWORD": REDACTED,
                     "N8N_RUNNERS_AUTH_TOKEN": "",
                     "N8N_PROXY_HOPS": "",
+                    "HTTP_PROXY": REDACTED,
+                    "N8N_LICENSE_CERT": REDACTED,
+                    "WEBHOOK_URL": "https://n8n.example.com/",
                 },
                 "requests": {"cpu": "500m", "memory": "512Mi"},
                 "limits": {"memory": "1Gi"},
