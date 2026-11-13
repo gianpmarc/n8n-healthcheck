@@ -30,8 +30,12 @@ Every source is optional. A source you do not provide is reported as "not assess
 | `--env-file` | n8n environment variables |
 | `--postgres-dsn` | execution table size, pruning, connections |
 | `--redis-url` | queue depth, memory policy |
-| `--kube-namespace` | replicas, resources, probes |
+| `--kube-namespace` | replicas, resources, probes, container environment |
 | `--snapshot` | a previously saved snapshot (offline run) |
+
+### Kubernetes
+
+`--kube-namespace` uses your current `kubectl` context (or `--kube-context`) and needs permission to `get` Deployments and ConfigMaps in that namespace. Without `--env-file`, the n8n settings are read from the main n8n Deployment, including values that come from ConfigMaps. Secrets are never read: a setting that comes from a Secret is reported as "set, value unknown" and no conclusion is drawn from it.
 
 ## Try it
 

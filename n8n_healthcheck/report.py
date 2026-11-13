@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .engine import SKIPPED_RULE_ID, score
 from .models import AREAS, SEVERITIES, Finding, Snapshot
+from .rules._helpers import effective_env
 
 # Snapshot section -> how to describe it to the reader.
 SECTIONS = {
@@ -108,6 +109,8 @@ def render_markdown(snapshot: Snapshot, findings: list[Finding], failed: tuple[s
     if partial:
         for name in missing:
             suffix = " — requested but could not be collected" if name in failed else ""
+            if name == "env" and effective_env(snapshot) is not None:
+                suffix += " — read from the main n8n Deployment in Kubernetes instead"
             lines.append(f"- {SECTIONS[name]}{suffix}")
         lines += [f"- {_one_line(f.title)} ({_one_line(f.evidence)})" for f in skipped]
     else:

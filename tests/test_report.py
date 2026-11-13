@@ -84,6 +84,14 @@ class RenderTest(unittest.TestCase):
         self.assertIn(f"- {SECTIONS['postgres']} — requested but could not be collected", not_assessed)
         self.assertIn(f"- {SECTIONS['redis']}\n", not_assessed + "\n")
 
+    def test_env_read_from_kubernetes_is_said_so(self):
+        container = {"name": "n8n", "image": "n8nio/n8n:2.47.7", "command": [], "env": {}, "env_complete": True}
+        kubernetes = {"deployments": [{"name": "n8n-main", "replicas": 1, "ready_replicas": 1, "containers": [container]}]}
+        not_assessed = section(render_markdown(Snapshot(kubernetes=kubernetes), []), "Not assessed")
+        self.assertIn(f"- {SECTIONS['env']} — read from the main n8n Deployment in Kubernetes instead", not_assessed)
+        without = section(render_markdown(Snapshot(health={}), []), "Not assessed")
+        self.assertIn(f"- {SECTIONS['env']}\n", without)
+
     def test_newlines_in_finding_text_stay_inside_the_bullet(self):
         multiline = dataclasses.replace(CRITICAL, evidence="line one\n\n## Fake heading\nline three")
         findings = section(render_markdown(FULL, [multiline]), "Findings")
