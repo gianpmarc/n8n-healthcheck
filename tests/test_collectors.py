@@ -9,6 +9,7 @@ import urllib.error
 from unittest import mock
 
 from n8n_healthcheck.collectors import collect, envfile, http, kubernetes, postgres, redis
+from n8n_healthcheck.collectors._util import redact
 from n8n_healthcheck.models import REDACTED, Target
 
 METRICS_TEXT = """\
@@ -189,6 +190,28 @@ class ParserTests(unittest.TestCase):
                 "WEBHOOK_URL": "https://n8n.example.com/",  # ordinary URL left intact
             },
         )
+
+    def test_redaction_allowlist_is_exact(self):
+        for name in (
+            "N8N_REDIS_KEY_PREFIX",
+            "N8N_METRICS_INCLUDE_CREDENTIAL_TYPE_LABEL",
+            "N8N_METRICS_INCLUDE_API_KEY_LABEL",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(redact(name, "true"), "true")
+                self.assertEqual(redact(name.lower(), "true"), "true")
+                # Credentials inside the value are still caught.
+                self.assertEqual(redact(name, "redis://u:pw@host"), REDACTED)
+        for name in (
+            "N8N_ENCRYPTION_KEY",
+            "QUEUE_BULL_REDIS_PASSWORD",
+            "N8N_REDIS_KEY_PREFIX_SECRET",  # only the exact names are exempt
+            "X_N8N_METRICS_INCLUDE_API_KEY_LABEL",
+            "N8N_API_KEY",
+            "CREDENTIALS_OVERWRITE_DATA",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(redact(name, "abc"), REDACTED)
 
     def test_psql_row(self):
         row = postgres.parse_row("16.4 (Debian 16.4-1.pgdg120+2)|1500000|8589934592|412.5|37|100\n")
@@ -375,6 +398,26 @@ class ParserTests(unittest.TestCase):
         }
         self.assertEqual(container_env(spec)[0]["N8N_METRICS"], "false")
 
+    def test_optional_env_from_configmap_that_is_missing_is_skipped(self):
+        def gone(**ref):  # `optional` belongs to the configMapRef, next to the name
+            return {"configMapRef": {"name": "gone", **ref}}
+
+        readable = (
+            {"EXECUTIONS_MODE": "queue", "N8N_METRICS": "false", "DB_POSTGRESDB_PASSWORD": REDACTED},
+            True,
+        )
+        spec = {"envFrom": [config_map("n8n-config"), gone(optional=True)]}
+        self.assertEqual(container_env(spec), readable)
+        # Not optional, or ConfigMaps not fetched: the earlier keys can no longer be trusted.
+        for optional in (False, "true"):
+            spec = {"envFrom": [config_map("n8n-config"), gone(optional=optional)]}
+            self.assertEqual(container_env(spec)[1], False)
+        spec = {"envFrom": [gone(optional=True)]}
+        self.assertEqual(container_env(spec, configmaps=None), ({}, False))
+        # An optional Secret is never read, so it stays unknown.
+        spec = {"envFrom": [config_map("n8n-config"), {"secretRef": {"name": "s", "optional": True}}]}
+        self.assertEqual(container_env(spec)[1], False)
+
     def test_missing_configmap_makes_the_environment_incomplete(self):
         env, complete = container_env({"envFrom": [config_map("gone")]})
         self.assertEqual((env, complete), ({}, False))
@@ -404,7 +447,9 @@ class CollectTests(unittest.TestCase):
 
         with mock.patch("urllib.request.urlopen", urlopen):
             snapshot, stderr = quiet_collect(Target(url="http://n8n:5678/"))
-        self.assertEqual(snapshot.health, {"healthz": True, "readiness": True})
+        self.assertEqual(
+            snapshot.health, {"healthz": True, "readiness": True, "metrics_disabled": False}
+        )
         self.assertEqual(snapshot.metrics["n8n_scaling_mode_queue_jobs_waiting"], 12.0)
         self.assertEqual(snapshot.n8n_version, "1.70.3")
         self.assertEqual(stderr, "")
@@ -417,9 +462,26 @@ class CollectTests(unittest.TestCase):
 
         with mock.patch("urllib.request.urlopen", urlopen):
             snapshot, stderr = quiet_collect(Target(url="http://n8n:5678"))
-        self.assertEqual(snapshot.health, {"healthz": True, "readiness": False})
+        self.assertEqual(
+            snapshot.health, {"healthz": True, "readiness": False, "metrics_disabled": True}
+        )
         self.assertIsNone(snapshot.metrics)
         self.assertEqual(stderr, "")  # 404 on /metrics is "disabled", not a failure
+
+    def test_http_metrics_that_cannot_be_read_are_not_reported_as_disabled(self):
+        failures = (http_error(403), http_error(500), urllib.error.URLError(TimeoutError("timed out")))
+        for failure in failures:
+            with self.subTest(failure=failure):
+                def urlopen(url, timeout):
+                    if url.endswith("/metrics"):
+                        raise failure
+                    return response("{}")
+
+                with mock.patch("urllib.request.urlopen", urlopen):
+                    snapshot, stderr = quiet_collect(Target(url="http://n8n:5678"))
+                self.assertIs(snapshot.health["metrics_disabled"], False)
+                self.assertIsNone(snapshot.metrics)
+                self.assertIn("metrics: not collected", stderr)
 
     def test_http_unreachable(self):
         error = urllib.error.URLError(TimeoutError("timed out"))
@@ -457,8 +519,17 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(args[0][0], "psql")
         self.assertNotIn("hunter2", " ".join(args[0]))
         self.assertEqual(kwargs["env"]["PGPASSWORD"], "hunter2")
-        self.assertIn("default_transaction_read_only=on", kwargs["env"]["PGOPTIONS"])
-        self.assertNotIn("SET ", args[0][args[0].index("-c") + 1])
+        # The guard travels in the same -c as the query (one transaction), not in PGOPTIONS,
+        # which poolers reject and a DSN `?options=` would override.
+        self.assertNotIn("PGOPTIONS", kwargs["env"])
+        self.assertEqual(args[0].count("-c"), 1)
+        sql = args[0][args[0].index("-c") + 1]
+        self.assertTrue(
+            sql.startswith(
+                "SET LOCAL transaction_read_only = on; SET LOCAL statement_timeout = 5000;"
+            )
+        )
+        self.assertTrue(sql.endswith(postgres.QUERY))
 
     def test_postgres_query_string_password_only_in_environment(self):
         done = subprocess.CompletedProcess([], 0, stdout="16.4|10|8192|1.5|3|100\n", stderr="")
@@ -590,6 +661,70 @@ class CollectTests(unittest.TestCase):
         for key in (b"acme:jobs:id", b"acme:jobs:wait", b"acme:jobs:active", b"acme:jobs:failed"):
             self.assertIn(key, stream.sent)
         self.assertNotIn(b"bull:", stream.sent)
+
+    def test_redis_uses_bull_prefix_from_kubernetes_without_an_env_file(self):
+        def probe(*containers, env_file_text=None):
+            """(queue key probed or None, redis section, stderr) for a namespace of `containers`."""
+            items = [deployment(spec) for spec in containers]
+            outputs = [json.dumps({"items": items}), json.dumps({"items": []})]
+            done = [subprocess.CompletedProcess([], 0, stdout=out, stderr="") for out in outputs]
+            sock = mock.MagicMock()
+            info = b"$%d\r\n%s\r\n" % (len(INFO_TEXT), INFO_TEXT.encode())
+            stream = sock.makefile.return_value = FakeStream(info + b":1\r\n:7\r\n:2\r\n:31\r\n")
+            with tempfile.TemporaryDirectory() as folder:
+                target = Target(kube_namespace="n8n", redis_url="redis://cache")
+                if env_file_text is not None:
+                    target.env_file = os.path.join(folder, "n8n.env")
+                    with open(target.env_file, "w", encoding="utf-8") as handle:
+                        handle.write(env_file_text)
+                with mock.patch("subprocess.run", side_effect=done), mock.patch(
+                    "socket.create_connection", return_value=sock
+                ):
+                    snapshot, stderr = quiet_collect(target)
+            _, exists, rest = stream.sent.partition(b"EXISTS\r\n")
+            return (rest.split(b"\r\n")[1].decode() if exists else None), snapshot.redis, stderr
+
+        def prefix(value, **spec):
+            return {"env": [{"name": "QUEUE_BULL_PREFIX", **value}], **spec}
+
+        acme = prefix({"value": "acme"})
+        unset = {"env": []}
+        self.assertEqual(probe(acme, acme)[0], "acme:jobs:id")
+        self.assertEqual(probe(unset)[0], "bull:jobs:id")
+        self.assertEqual(probe()[0], "bull:jobs:id")  # no n8n container at all
+        # Only n8n containers count: not Redis, a proxy or the runners sidecar.
+        for image in ("redis:7", "n8nio/runners:2.40.1", "registry.example/n8n-team/nginx:1"):
+            with self.subTest(image=image):
+                self.assertEqual(probe(acme, prefix({"value": "other"}, image=image))[0], "acme:jobs:id")
+                self.assertEqual(probe(unset, prefix({"value": "other"}, image=image))[0], "bull:jobs:id")
+        # The env file wins, even when it leaves the variable unset.
+        self.assertEqual(probe(acme, env_file_text="")[0], "bull:jobs:id")
+        # n8n containers that disagree, or a value that cannot be read: the queue is not probed.
+        from_secret = prefix({"valueFrom": {"secretKeyRef": {}}})
+        # So is a prefix set only on a container not recognised as n8n (a custom image name),
+        custom = prefix({"value": "acme"}, image="registry.acme.io/automation/engine:2.1")
+        # and an n8n container without the variable whose environment is partly unreadable.
+        secret_env = {"envFrom": [{"secretRef": {"name": "n8n-secrets"}}]}
+        self.assertEqual(probe({**acme, **secret_env})[0], "acme:jobs:id")  # `env` wins over envFrom
+        for containers in (
+            (acme, prefix({"value": "other"})),
+            (acme, unset),
+            (from_secret,),
+            (acme, from_secret),
+            (custom,),
+            (custom, {"image": "redis:7"}),
+            (secret_env,),
+            (acme, secret_env),
+        ):
+            with self.subTest(containers=containers):
+                key, section, stderr = probe(*containers)
+                self.assertIsNone(key)
+                self.assertEqual(section["version"], "7.2.4")  # INFO is still collected
+                self.assertEqual(section["maxmemory_policy"], "noeviction")
+                for field in ("waiting_jobs", "active_jobs", "failed_jobs"):
+                    self.assertIsNone(section[field])
+                self.assertEqual(stderr.count("\n"), 1)
+                self.assertIn("redis queue: not collected (QUEUE_BULL_PREFIX is ambiguous", stderr)
 
     def test_redis_failures(self):
         target = Target(redis_url="redis://:hunter2@cache:6379")

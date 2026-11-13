@@ -9,7 +9,13 @@ from n8n_healthcheck.rules import performance as perf
 from n8n_healthcheck.rules import reliability as rel
 from n8n_healthcheck.rules import scalability as scal
 from n8n_healthcheck.rules import security as sec
-from n8n_healthcheck.rules._helpers import concurrency_flag, image_tag, image_version, n8n_role
+from n8n_healthcheck.rules._helpers import (
+    concurrency_flag,
+    image_tag,
+    image_version,
+    n8n_role,
+    num,
+)
 
 QUEUE = {"EXECUTIONS_MODE": "queue", "DB_TYPE": "postgresdb"}
 
@@ -471,13 +477,17 @@ class ReviewFixes(unittest.TestCase):
 
     def test_concurrency_limit_of_zero_is_reported_as_invalid(self):
         for env in ({"N8N_CONCURRENCY_PRODUCTION_LIMIT": "0"},
-                    {"DB_TYPE": "postgresdb", "N8N_CONCURRENCY_PRODUCTION_LIMIT": "0"}):
+                    {"DB_TYPE": "postgresdb", "N8N_CONCURRENCY_PRODUCTION_LIMIT": "0"},
+                    {**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "0"}):  # n8n rejects 0 in any mode
             with self.subTest(env=env):
                 finding = scal.regular_mode_unbounded_concurrency(Snapshot(env=env))
                 self.assertEqual(finding.severity, "warning")
                 self.assertIn("N8N_CONCURRENCY_PRODUCTION_LIMIT=0", finding.evidence)
                 self.assertIn("InvalidConcurrencyLimitError", finding.evidence)
                 self.assertNotIn("no limit", finding.evidence)
+        # SCAL-004 leaves the invalid value to SCAL-001, so it is reported once.
+        zero = Snapshot(env={**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "0"})
+        self.assertIsNone(scal.low_worker_concurrency(zero))
 
     def test_worker_concurrency_flag_is_read_from_the_command(self):
         def workers(*command, env=None):
@@ -624,8 +634,10 @@ class KubernetesEnv(unittest.TestCase):
     def test_unreadable_execution_mode_is_not_read_as_regular(self):
         env = {"EXECUTIONS_MODE": "<valueFrom>", "DB_TYPE": "postgresdb"}
         self.assertIsNone(scal.regular_mode_unbounded_concurrency(from_kube(env)))
+        # A limit of 0 is invalid in every mode, so it does not depend on the unreadable one.
         zero = {**env, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "0"}
-        self.assertIsNone(scal.regular_mode_unbounded_concurrency(from_kube(zero)))
+        finding = scal.regular_mode_unbounded_concurrency(from_kube(zero))
+        self.assertEqual(finding.title, "Invalid production concurrency limit")
         incomplete = from_kube({"DB_TYPE": "postgresdb"}, complete=False)
         self.assertIsNone(scal.regular_mode_unbounded_concurrency(incomplete))
 
@@ -826,6 +838,14 @@ class Helpers(unittest.TestCase):
         self.assertIsNone(image_version("n8nio/n8n"))
         self.assertIsNone(image_version("n8nio/n8n@sha256:abc"))
         self.assertIsNone(image_version(None))
+
+    def test_num_rejects_non_finite_values(self):
+        for value in ("nan", "inf", "-inf", float("nan"), float("inf")):
+            with self.subTest(value=value):
+                self.assertIsNone(num({"x": value}, "x"))
+        self.assertEqual(num({"x": "92"}, "x"), 92)
+        nan = Snapshot(postgres={"connections": "nan", "max_connections": "100"})
+        self.assertIsNone(scal.postgres_connections_near_limit(nan))
 
     def test_concurrency_flag(self):
         self.assertEqual(concurrency_flag(container(command=["worker", "--concurrency=7"])), 7)

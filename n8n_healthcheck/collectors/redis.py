@@ -13,7 +13,8 @@ from ._util import TIMEOUT, warn
 DEFAULT_PREFIX = "bull"
 
 
-def collect(target: Target, prefix: str = DEFAULT_PREFIX) -> dict:
+def collect(target: Target, prefix: str | None = DEFAULT_PREFIX) -> dict:
+    """`prefix` is None when the queue prefix is not known: the queue is then not probed."""
     queue = f"{prefix}:jobs"
     url = urlsplit(target.redis_url)
     if url.scheme not in ("redis", "rediss"):
@@ -30,13 +31,15 @@ def collect(target: Target, prefix: str = DEFAULT_PREFIX) -> dict:
         if database:
             command(stream, "SELECT", database)
         info = parse_info(command(stream, "INFO"))
+        waiting = active = failed = None
+        if prefix is None:
+            warn("redis queue", "QUEUE_BULL_PREFIX is ambiguous: the n8n containers disagree or its value is not readable")
         # LLEN/ZCARD answer 0 for a missing key, so a wrong prefix would look like an idle queue.
-        if command(stream, "EXISTS", queue + ":id"):
+        elif command(stream, "EXISTS", queue + ":id"):
             waiting = command(stream, "LLEN", queue + ":wait")
             active = command(stream, "LLEN", queue + ":active")
             failed = command(stream, "ZCARD", queue + ":failed")
         else:
-            waiting = active = failed = None
             warn("redis queue", f'"{queue}" not found: no job enqueued yet, or another QUEUE_BULL_PREFIX')
         return {
             "redis": {

@@ -27,19 +27,21 @@ SELECT current_setting('server_version'),
 FROM pg_class c WHERE c.oid = 'execution_entity'::regclass
 """
 
+# Sent ahead of QUERY in the same `-c`, which the server runs as one transaction: the
+# server itself refuses writes and long-running statements. SET LOCAL ends with that
+# transaction, so behind a connection pooler nothing is left on the shared server
+# connection. (PGOPTIONS is not used: poolers reject the `options` startup parameter,
+# and `?options=` in the DSN overrides it.)
+GUARD = f"SET LOCAL transaction_read_only = on; SET LOCAL statement_timeout = {TIMEOUT * 1000};"
+
 
 def collect(target: Target) -> dict:
     uri, password = split_dsn(target.postgres_dsn)
-    env = {
-        **os.environ,
-        "PGCONNECT_TIMEOUT": str(TIMEOUT),
-        # session settings: the server itself refuses writes and long-running statements
-        "PGOPTIONS": f"-c default_transaction_read_only=on -c statement_timeout={TIMEOUT * 1000}",
-    }
+    env = {**os.environ, "PGCONNECT_TIMEOUT": str(TIMEOUT)}
     if password:
         env["PGPASSWORD"] = password  # via environment, so it never shows in `ps`
     args = ["psql", "-X", "-q", "-A", "-t", "-F", "|", "-w", "-v", "ON_ERROR_STOP=1"]
-    output = run(args + ["-c", QUERY, "-d", uri], env=env, timeout=2 * TIMEOUT)
+    output = run(args + ["-c", GUARD + QUERY, "-d", uri], env=env, timeout=2 * TIMEOUT)
     return {"postgres": parse_row(output)}
 
 
