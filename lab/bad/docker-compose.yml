@@ -1,0 +1,68 @@
+# n8n-healthcheck lab — BAD stack. Deliberately misconfigured. Never use as a template.
+# Every "MISCONFIGURED" comment is one finding the health check should report.
+# All credentials are throwaway demo values; everything binds to 127.0.0.1 only.
+name: n8n-hc-lab-bad
+
+x-n8n: &n8n
+  # MISCONFIGURED: mutable tag. Each pull can silently change the n8n version,
+  # and main and workers can end up on different versions.
+  image: docker.n8n.io/n8nio/n8n:latest
+  env_file: n8n.env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    # MISCONFIGURED: far too few connections for a main plus scaling workers.
+    command: postgres -c max_connections=20
+    environment:
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: lab-postgres-password # throwaway demo value
+      POSTGRES_DB: n8n
+    ports:
+      - 127.0.0.1:15432:5432
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U n8n -d n8n]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # MISCONFIGURED: an evicting policy with a small memory cap. Under memory
+    # pressure Redis deletes queue keys, so queued executions are lost.
+    command: >
+      redis-server
+      --requirepass lab-redis-password
+      --maxmemory 64mb
+      --maxmemory-policy allkeys-lru
+    environment:
+      REDISCLI_AUTH: lab-redis-password # throwaway demo value
+    ports:
+      - 127.0.0.1:16379:6379
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    <<: *n8n
+    ports:
+      - 127.0.0.1:5678:5678
+
+  # MISCONFIGURED: a single worker. One crash or restart stops all executions.
+  n8n-worker:
+    <<: *n8n
+    command: worker
+    depends_on:
+      - n8n
+
+volumes:
+  db:

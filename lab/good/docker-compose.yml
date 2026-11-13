@@ -1,0 +1,68 @@
+# n8n-healthcheck lab — GOOD stack. The bad stack with each misconfiguration fixed.
+# Still a demo: throwaway credentials, no TLS, no backups, 127.0.0.1 only.
+name: n8n-hc-lab-good
+
+x-n8n: &n8n
+  # FIXED: pinned version, identical on main and workers.
+  image: docker.n8n.io/n8nio/n8n:2.47.7
+  env_file: n8n.env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    # FIXED: headroom for the main, the workers and an operator session.
+    command: postgres -c max_connections=200
+    environment:
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: lab-postgres-password # throwaway demo value
+      POSTGRES_DB: n8n
+    ports:
+      - 127.0.0.1:15432:5432
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U n8n -d n8n]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # FIXED: noeviction. When memory is full Redis refuses writes instead of
+    # silently deleting queued jobs.
+    command: >
+      redis-server
+      --requirepass lab-redis-password
+      --maxmemory 512mb
+      --maxmemory-policy noeviction
+    environment:
+      REDISCLI_AUTH: lab-redis-password # throwaway demo value
+    ports:
+      - 127.0.0.1:16379:6379
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    <<: *n8n
+    ports:
+      - 127.0.0.1:5678:5678
+
+  # FIXED: two workers, so one can fail or restart without stopping executions.
+  n8n-worker:
+    <<: *n8n
+    command: worker
+    depends_on:
+      - n8n
+    deploy:
+      replicas: 2
+
+volumes:
+  db:
