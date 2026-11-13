@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import Finding, Snapshot
-from ._helpers import env_flag, looks_like_production, shown
+from ._helpers import effective_env, env_flag, looks_like_production, shown, unknown
 
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/basic-configuration/use-environment-variables/security
 def insecure_cookie(snapshot: Snapshot) -> Optional[Finding]:
-    env = snapshot.env
+    env = effective_env(snapshot)
     if env is None or env_flag(env, "N8N_SECURE_COOKIE") is not False:
         return None
     return Finding(
@@ -18,7 +18,7 @@ def insecure_cookie(snapshot: Snapshot) -> Optional[Finding]:
         area="security",
         severity="warning",
         title="Session cookie is not restricted to HTTPS",
-        evidence=f"{shown(env, 'N8N_SECURE_COOKIE')} (default: true).",
+        evidence=f"{shown(env, 'N8N_SECURE_COOKIE')} (default: true).{env.note}",
         impact=(
             "The browser sends the n8n session cookie over plain HTTP, so anyone on the "
             "network path can capture it and act as that user, including the instance owner."
@@ -33,8 +33,8 @@ def insecure_cookie(snapshot: Snapshot) -> Optional[Finding]:
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/set-up-task-runners
 def task_runners_not_external(snapshot: Snapshot) -> Optional[Finding]:
-    env = snapshot.env
-    if env is None:
+    env = effective_env(snapshot)
+    if env is None or unknown(env, "N8N_RUNNERS_MODE"):
         return None
     if str(env.get("N8N_RUNNERS_MODE", "")).strip().lower() == "external":
         return None
@@ -47,7 +47,7 @@ def task_runners_not_external(snapshot: Snapshot) -> Optional[Finding]:
         title="Code node runs without external task runners",
         evidence=(
             f"{shown(env, 'N8N_RUNNERS_MODE')} (default: internal); "
-            f"{shown(env, 'N8N_RUNNERS_ENABLED')}."
+            f"{shown(env, 'N8N_RUNNERS_ENABLED')}.{env.note}"
         ),
         impact=(
             "Code node scripts run in a child process of n8n (or, on n8n 1.x with runners "

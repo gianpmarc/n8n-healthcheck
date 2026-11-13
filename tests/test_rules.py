@@ -24,6 +24,7 @@ def container(image="n8nio/n8n:2.40.1", command=None, **overrides):
         "limits": {"memory": "1Gi"},
         "liveness_probe": True,
         "readiness_probe": True,
+        "env_complete": True,
     }
     return {**base, **overrides}
 
@@ -561,6 +562,168 @@ class ReviewFixes(unittest.TestCase):
             with self.subTest(rule=rule.__name__):
                 self.assertIsNone(rule(Snapshot(kubernetes=odd)))
         self.assertIsNone(scal.single_worker(Snapshot(kubernetes={"deployments": None})))
+
+
+def from_kube(env, complete=True, worker_env=None):
+    """A Kubernetes-only snapshot whose main container carries `env`."""
+    return Snapshot(
+        kubernetes=kube(
+            ("n8n-main", 1, container(env=env, env_complete=complete)),
+            ("n8n-worker", 2, container(command=["worker"], env=worker_env or {})),
+        )
+    )
+
+
+class KubernetesEnv(unittest.TestCase):
+    """The env-based rules read the main container when there is no env file."""
+
+    PG = {"DB_TYPE": "postgresdb"}
+    SOURCE = " Environment read from Deployment n8n-main, container n8n."
+    ENV_RULES = [
+        case
+        for case in CASES
+        if case[2].env is not None and case[0] is not scal.low_worker_concurrency
+    ]
+
+    def test_same_findings_as_the_env_file(self):
+        self.assertEqual(len(self.ENV_RULES), 10)
+        for rule, rule_id, triggering, quiet in self.ENV_RULES:
+            with self.subTest(rule=rule_id):
+                expected = rule(triggering)
+                finding = rule(from_kube(triggering.env))
+                self.assertEqual(finding.evidence, expected.evidence + self.SOURCE)
+                expected.evidence = finding.evidence
+                self.assertEqual(finding, expected)
+                self.assertIsNone(rule(from_kube(quiet.env)))
+
+    def test_env_file_wins_over_the_container(self):
+        bad = {**QUEUE, "EXECUTIONS_DATA_PRUNE": "false"}
+        good = {**QUEUE, "EXECUTIONS_DATA_PRUNE": "true"}
+        self.assertIsNone(
+            perf.pruning_disabled(Snapshot(env=good, kubernetes=from_kube(bad).kubernetes))
+        )
+        finding = perf.pruning_disabled(Snapshot(env=bad, kubernetes=from_kube(good).kubernetes))
+        self.assertNotIn("Deployment", finding.evidence)
+
+    def test_unreadable_value_is_never_a_finding(self):
+        for opaque in ("<valueFrom>", "<redacted>"):
+            for rule, rule_id, triggering, quiet in self.ENV_RULES:
+                # Every variable that separates the triggering case from the quiet one.
+                differing = {
+                    name
+                    for name in {*triggering.env, *quiet.env}
+                    if triggering.env.get(name) != quiet.env.get(name)
+                }
+                # Quoted in the SEC-002 evidence, decides nothing.
+                differing.discard("N8N_RUNNERS_ENABLED")
+                for name in differing:
+                    with self.subTest(rule=rule_id, variable=name, value=opaque):
+                        self.assertIsNone(rule(from_kube({**triggering.env, name: opaque})))
+                        self.assertIsNone(rule(Snapshot(env={**triggering.env, name: opaque})))
+
+    def test_unreadable_execution_mode_is_not_read_as_regular(self):
+        env = {"EXECUTIONS_MODE": "<valueFrom>", "DB_TYPE": "postgresdb"}
+        self.assertIsNone(scal.regular_mode_unbounded_concurrency(from_kube(env)))
+        zero = {**env, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "0"}
+        self.assertIsNone(scal.regular_mode_unbounded_concurrency(from_kube(zero)))
+        incomplete = from_kube({"DB_TYPE": "postgresdb"}, complete=False)
+        self.assertIsNone(scal.regular_mode_unbounded_concurrency(incomplete))
+
+    def test_incomplete_env_proves_nothing_from_an_absent_variable(self):
+        # Each of these fires on a complete environment because a variable is absent.
+        absent = [
+            (scal.regular_mode_unbounded_concurrency, {**self.PG, "EXECUTIONS_MODE": "regular"}),
+            (scal.manual_executions_on_main, dict(QUEUE)),
+            (rel.sqlite_in_queue_mode, {"EXECUTIONS_MODE": "queue"}),
+            (rel.single_main, dict(QUEUE)),
+            (maint.metrics_disabled, dict(QUEUE)),
+            (sec.task_runners_not_external, dict(QUEUE)),
+        ]
+        for rule, env in absent:
+            with self.subTest(rule=rule.__name__):
+                self.assertIsNotNone(rule(from_kube(env)))
+                self.assertIsNone(rule(from_kube(env, complete=False)))
+        # A container without the field (snapshot from an older version) is incomplete too.
+        old = from_kube(dict(QUEUE))
+        del old.kubernetes["deployments"][0]["containers"][0]["env_complete"]
+        self.assertIsNone(maint.metrics_disabled(old))
+
+    def test_incomplete_env_still_reports_an_explicit_bad_value(self):
+        explicit = [
+            (perf.pruning_disabled, {"EXECUTIONS_DATA_PRUNE": "false"}),
+            (perf.saving_execution_progress, {"EXECUTIONS_DATA_SAVE_ON_PROGRESS": "true"}),
+            (perf.binary_data_in_memory, {"N8N_DEFAULT_BINARY_DATA_MODE": "default"}),
+            (sec.insecure_cookie, {"N8N_SECURE_COOKIE": "false"}),
+            (maint.metrics_disabled, {"N8N_METRICS": "false"}),
+            (sec.task_runners_not_external, {"N8N_RUNNERS_MODE": "internal"}),
+            (rel.sqlite_in_queue_mode, {"EXECUTIONS_MODE": "queue", "DB_TYPE": "sqlite"}),
+            (rel.single_main, {**QUEUE, "N8N_MULTI_MAIN_SETUP_ENABLED": "false"}),
+            (
+                scal.manual_executions_on_main,
+                {**QUEUE, "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": "false"},
+            ),
+            (
+                scal.regular_mode_unbounded_concurrency,
+                {**self.PG, "EXECUTIONS_MODE": "regular", "N8N_CONCURRENCY_PRODUCTION_LIMIT": "-1"},
+            ),
+        ]
+        for rule, env in explicit:
+            with self.subTest(rule=rule.__name__):
+                finding = rule(from_kube(env, complete=False))
+                self.assertIn("Part of it could not be read", finding.evidence)
+                self.assertNotIn("is not set", finding.evidence)
+
+    def test_binary_data_fix_is_neutral_when_the_mode_is_unreadable(self):
+        env = {"N8N_DEFAULT_BINARY_DATA_MODE": "default"}
+        opaque = {**env, "EXECUTIONS_MODE": "<valueFrom>"}
+        for snapshot in (from_kube(env, complete=False), from_kube(opaque)):
+            fix = perf.binary_data_in_memory(snapshot).recommendation
+            self.assertIn("regular mode", fix)
+            self.assertIn("queue mode", fix)
+
+    def test_metrics_queue_advice_needs_a_readable_multi_main_setting(self):
+        env = {**QUEUE, "N8N_MULTI_MAIN_SETUP_ENABLED": "<valueFrom>"}
+        fix = maint.metrics_disabled(from_kube(env)).recommendation
+        self.assertNotIn("INCLUDE_QUEUE_METRICS", fix)
+
+    def test_no_main_container_is_never_a_finding(self):
+        bad = {**QUEUE, "EXECUTIONS_DATA_PRUNE": "false", "N8N_SECURE_COOKIE": "false"}
+        workers_only = Snapshot(
+            kubernetes=kube(
+                ("n8n-worker", 2, container(command=["worker"], env=bad)),
+                ("n8n-webhook", 2, container(command=["webhook"], env=bad)),
+                ("redis", 1, container(image="redis:7", env=bad)),
+            )
+        )
+        for rule, rule_id, _t, _q in self.ENV_RULES:
+            with self.subTest(rule=rule_id):
+                self.assertIsNone(rule(workers_only))
+
+    def test_main_containers_that_disagree_are_not_guessed_between(self):
+        def two(first, second):
+            mains = kube(("a", 1, container(env=first)), ("b", 1, container(env=second)))
+            return Snapshot(kubernetes=mains)
+
+        bad = {"N8N_SECURE_COOKIE": "false"}
+        self.assertIsNone(sec.insecure_cookie(two(bad, {"N8N_SECURE_COOKIE": "true"})))
+        self.assertIsNotNone(sec.insecure_cookie(two(bad, dict(bad))))
+
+    def test_main_env_does_not_stand_in_for_the_workers(self):
+        low = {**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "2"}
+        self.assertIsNone(scal.low_worker_concurrency(from_kube(low)))
+        self.assertIsNotNone(scal.low_worker_concurrency(from_kube(dict(QUEUE), worker_env=low)))
+
+    def test_worker_flag_is_not_trusted_when_its_limit_is_unreadable(self):
+        def worker(**overrides):
+            low = container(command=["worker", "--concurrency=2"], **overrides)
+            return Snapshot(kubernetes=kube(("w", 2, low)))
+
+        self.assertIsNotNone(scal.low_worker_concurrency(worker()))
+        self.assertIsNone(scal.low_worker_concurrency(worker(env_complete=False)))
+        opaque = worker(env={"N8N_CONCURRENCY_PRODUCTION_LIMIT": "<valueFrom>"})
+        self.assertIsNone(scal.low_worker_concurrency(opaque))
+        explicit = worker(env={"N8N_CONCURRENCY_PRODUCTION_LIMIT": "3"}, env_complete=False)
+        self.assertIsNotNone(scal.low_worker_concurrency(explicit))
 
 
 class Helpers(unittest.TestCase):
