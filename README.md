@@ -2,7 +2,7 @@
 
 **TL;DR** — Point it at a self-hosted n8n instance. It reads health endpoints, metrics, config, Postgres, Redis and Kubernetes, and returns a report of what will break at scale and how to fix it. Read-only. No dependencies.
 
-> Status: early development. Not an official n8n project.
+> Status: working, tested end to end against n8n 2.47 with Postgres 16, Redis 7 and Kubernetes. Not an official n8n project.
 
 ## Why
 
