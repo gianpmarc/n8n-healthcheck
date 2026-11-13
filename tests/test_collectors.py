@@ -1,0 +1,335 @@
+import contextlib
+import io
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+import urllib.error
+from unittest import mock
+
+from n8n_healthcheck.collectors import collect, envfile, http, kubernetes, postgres, redis
+from n8n_healthcheck.models import Target
+
+METRICS_TEXT = """\
+# HELP n8n_version_info n8n version info.
+# TYPE n8n_version_info gauge
+n8n_version_info{version="v1.70.3",major="1",minor="70",patch="3"} 1
+n8n_scaling_mode_queue_jobs_waiting 12
+n8n_http_request_duration_seconds_bucket{le="+Inf",path="/a b"} 4 1700000000000
+n8n_process_start_time_seconds 1.7e9
+garbage line
+"""
+
+ENV_TEXT = """\
+# comment
+
+EXECUTIONS_MODE=queue
+export N8N_METRICS = true
+QUOTED="a b"
+SINGLE='x=y'
+EMPTY=
+not a variable
+"""
+
+INFO_TEXT = (
+    "# Server\r\nredis_version:7.2.4\r\n\r\n# Memory\r\nused_memory:1048576\r\n"
+    "maxmemory:0\r\nmaxmemory_policy:noeviction\r\n"
+)
+
+DEPLOYMENTS = {
+    "items": [
+        {
+            "metadata": {"name": "n8n-worker"},
+            "spec": {
+                "replicas": 3,
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "n8n",
+                                "image": "n8nio/n8n:1.70.3",
+                                "command": ["n8n"],
+                                "args": ["worker"],
+                                "env": [
+                                    {"name": "EXECUTIONS_MODE", "value": "queue"},
+                                    {"name": "N8N_ENCRYPTION_KEY", "valueFrom": {"secretKeyRef": {}}},
+                                ],
+                                "resources": {
+                                    "requests": {"cpu": "500m", "memory": "512Mi"},
+                                    "limits": {"memory": "1Gi"},
+                                },
+                                "readinessProbe": {"httpGet": {"path": "/healthz"}},
+                            }
+                        ]
+                    }
+                },
+            },
+            "status": {"readyReplicas": 2},
+        },
+        {
+            "metadata": {"name": "bare"},
+            "spec": {"template": {"spec": {"containers": [{"name": "c"}]}}},
+            "status": {},
+        },
+    ]
+}
+
+
+def response(body: str, status: int = 200):
+    handle = mock.MagicMock()
+    handle.__enter__.return_value = handle
+    handle.status = status
+    handle.read.return_value = body.encode()
+    return handle
+
+
+def http_error(code: int):
+    return urllib.error.HTTPError("http://n8n", code, "error", None, None)
+
+
+class FakeStream(io.BytesIO):
+    """Stands in for sock.makefile(): replays canned replies and records what was sent."""
+
+    def __init__(self, replies: bytes):
+        super().__init__(replies)
+        self.sent = b""
+
+    def write(self, data: bytes) -> int:
+        self.sent += data
+        return len(data)
+
+
+def quiet_collect(target: Target):
+    """Run collect() and return (snapshot, stderr text)."""
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        snapshot = collect(target)
+    return snapshot, stderr.getvalue()
+
+
+class ParserTests(unittest.TestCase):
+    def test_prometheus_metrics(self):
+        metrics = http.parse_metrics(METRICS_TEXT)
+        self.assertEqual(metrics["n8n_scaling_mode_queue_jobs_waiting"], 12.0)
+        self.assertEqual(metrics["n8n_process_start_time_seconds"], 1.7e9)
+        self.assertEqual(metrics['n8n_http_request_duration_seconds_bucket{le="+Inf",path="/a b"}'], 4.0)
+        self.assertEqual(len(metrics), 4)
+        self.assertEqual(http.version_from_metrics(metrics), "1.70.3")
+        self.assertIsNone(http.version_from_metrics({"up": 1.0}))
+
+    def test_env_file(self):
+        self.assertEqual(
+            envfile.parse_env(ENV_TEXT),
+            {"EXECUTIONS_MODE": "queue", "N8N_METRICS": "true", "QUOTED": "a b", "SINGLE": "x=y", "EMPTY": ""},
+        )
+
+    def test_psql_row(self):
+        row = postgres.parse_row("16.4 (Debian 16.4-1.pgdg120+2)|1500000|8589934592|412.5|37|100\n")
+        self.assertEqual(
+            row,
+            {
+                "version": "16.4 (Debian 16.4-1.pgdg120+2)",
+                "execution_count": 1500000,
+                "execution_table_bytes": 8589934592,
+                "oldest_execution_age_days": 412.5,
+                "connections": 37,
+                "max_connections": 100,
+            },
+        )
+        self.assertIsNone(postgres.parse_row("16.4|0|8192||1|100\n")["oldest_execution_age_days"])
+
+    def test_dsn_password_is_split_out(self):
+        uri, password = postgres.split_dsn("postgresql://n8n:s%40cret@db:5432/n8n?sslmode=require")
+        self.assertEqual(uri, "postgresql://n8n@db:5432/n8n?sslmode=require")
+        self.assertEqual(password, "s@cret")
+        self.assertEqual(postgres.split_dsn("postgres://db/n8n"), ("postgres://db/n8n", ""))
+        with self.assertRaises(ValueError):
+            postgres.split_dsn("host=db password=secret")
+
+    def test_resp_replies(self):
+        stream = io.BytesIO(b"+OK\r\n:42\r\n$5\r\nhe\r\nl\r\n$-1\r\n*2\r\n:1\r\n$1\r\na\r\n-ERR nope\r\n")
+        self.assertEqual(redis.read_reply(stream), "OK")
+        self.assertEqual(redis.read_reply(stream), 42)
+        self.assertEqual(redis.read_reply(stream), "he\r\nl")
+        self.assertIsNone(redis.read_reply(stream))
+        self.assertEqual(redis.read_reply(stream), [1, "a"])
+        with self.assertRaisesRegex(RuntimeError, "ERR nope"):
+            redis.read_reply(stream)
+        with self.assertRaises(ConnectionError):
+            redis.read_reply(stream)
+
+    def test_redis_info(self):
+        info = redis.parse_info(INFO_TEXT)
+        self.assertEqual(info["redis_version"], "7.2.4")
+        self.assertEqual(info["maxmemory_policy"], "noeviction")
+        self.assertNotIn("# Server", info)
+
+    def test_kubectl_deployments(self):
+        worker, bare = kubernetes.parse_deployments(json.dumps(DEPLOYMENTS))["deployments"]
+        self.assertEqual((worker["name"], worker["replicas"], worker["ready_replicas"]), ("n8n-worker", 3, 2))
+        self.assertEqual(
+            worker["containers"][0],
+            {
+                "name": "n8n",
+                "image": "n8nio/n8n:1.70.3",
+                "command": ["n8n", "worker"],
+                "env": {"EXECUTIONS_MODE": "queue", "N8N_ENCRYPTION_KEY": "<valueFrom>"},
+                "requests": {"cpu": "500m", "memory": "512Mi"},
+                "limits": {"memory": "1Gi"},
+                "liveness_probe": False,
+                "readiness_probe": True,
+            },
+        )
+        self.assertEqual((bare["replicas"], bare["ready_replicas"]), (1, 0))
+        self.assertEqual(bare["containers"][0]["command"], [])
+        self.assertEqual(bare["containers"][0]["requests"], {})
+
+
+class CollectTests(unittest.TestCase):
+    def test_empty_target_collects_nothing(self):
+        with mock.patch("subprocess.run") as run, mock.patch("socket.create_connection") as connect:
+            snapshot, stderr = quiet_collect(Target())
+        self.assertEqual(vars(snapshot), dict.fromkeys(vars(snapshot)))
+        self.assertEqual(stderr, "")
+        run.assert_not_called()
+        connect.assert_not_called()
+
+    def test_http_healthy_with_metrics(self):
+        def urlopen(url, timeout):
+            return response(METRICS_TEXT if url.endswith("/metrics") else "{}")
+
+        with mock.patch("urllib.request.urlopen", urlopen):
+            snapshot, stderr = quiet_collect(Target(url="http://n8n:5678/"))
+        self.assertEqual(snapshot.health, {"healthz": True, "readiness": True})
+        self.assertEqual(snapshot.metrics["n8n_scaling_mode_queue_jobs_waiting"], 12.0)
+        self.assertEqual(snapshot.n8n_version, "1.70.3")
+        self.assertEqual(stderr, "")
+
+    def test_http_not_ready_and_metrics_disabled(self):
+        def urlopen(url, timeout):
+            if url.endswith("/healthz"):
+                return response("{}")
+            raise http_error(503 if url.endswith("/readiness") else 404)
+
+        with mock.patch("urllib.request.urlopen", urlopen):
+            snapshot, stderr = quiet_collect(Target(url="http://n8n:5678"))
+        self.assertEqual(snapshot.health, {"healthz": True, "readiness": False})
+        self.assertIsNone(snapshot.metrics)
+        self.assertEqual(stderr, "")  # 404 on /metrics is "disabled", not a failure
+
+    def test_http_unreachable(self):
+        error = urllib.error.URLError(TimeoutError("timed out"))
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            snapshot, stderr = quiet_collect(Target(url="http://n8n:5678"))
+        self.assertIsNone(snapshot.health)
+        self.assertIsNone(snapshot.metrics)
+        self.assertIn("url: not collected", stderr)
+
+    def test_env_file_read_and_missing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "n8n.env")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(ENV_TEXT)
+            snapshot, _ = quiet_collect(Target(env_file=path))
+            self.assertEqual(snapshot.env["EXECUTIONS_MODE"], "queue")
+            snapshot, stderr = quiet_collect(Target(env_file=path + ".missing"))
+            self.assertIsNone(snapshot.env)
+            self.assertIn("env_file: not collected", stderr)
+
+    def test_postgres_password_only_in_environment(self):
+        done = subprocess.CompletedProcess([], 0, stdout="16.4|10|8192|1.5|3|100\n", stderr="")
+        with mock.patch("subprocess.run", return_value=done) as run:
+            snapshot, _ = quiet_collect(Target(postgres_dsn="postgresql://n8n:hunter2@db/n8n"))
+        self.assertEqual(snapshot.postgres["execution_count"], 10)
+        args, kwargs = run.call_args
+        self.assertEqual(args[0][0], "psql")
+        self.assertNotIn("hunter2", " ".join(args[0]))
+        self.assertEqual(kwargs["env"]["PGPASSWORD"], "hunter2")
+
+    def test_missing_binaries_do_not_abort_the_run(self):
+        target = Target(postgres_dsn="postgresql://n8n:hunter2@db/n8n", kube_namespace="n8n")
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("psql")):
+            snapshot, stderr = quiet_collect(target)
+        self.assertIsNone(snapshot.postgres)
+        self.assertIsNone(snapshot.kubernetes)
+        self.assertIn("psql not found", stderr)
+        self.assertIn("kubectl not found", stderr)
+        self.assertNotIn("hunter2", stderr)
+
+    def test_subprocess_timeout_and_failure(self):
+        target = Target(postgres_dsn="postgresql://n8n:hunter2@db/n8n")
+        with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("psql", 10)):
+            snapshot, stderr = quiet_collect(target)
+        self.assertIsNone(snapshot.postgres)
+        self.assertIn("timed out", stderr)
+        self.assertNotIn("hunter2", stderr)
+
+        failed = subprocess.CompletedProcess([], 2, stdout="", stderr="FATAL: auth failed\ndetail\n")
+        with mock.patch("subprocess.run", return_value=failed):
+            snapshot, stderr = quiet_collect(target)
+        self.assertIsNone(snapshot.postgres)
+        self.assertEqual(stderr, "postgres_dsn: not collected (FATAL: auth failed)\n")
+
+    def test_kubectl_arguments_and_mapping(self):
+        done = subprocess.CompletedProcess([], 0, stdout=json.dumps(DEPLOYMENTS), stderr="")
+        with mock.patch("subprocess.run", return_value=done) as run:
+            snapshot, _ = quiet_collect(Target(kube_namespace="n8n", kube_context="prod"))
+        self.assertEqual(len(snapshot.kubernetes["deployments"]), 2)
+        self.assertEqual(
+            run.call_args[0][0][:8],
+            ["kubectl", "--context", "prod", "get", "deployments", "-n", "n8n", "-o"],
+        )
+
+    def test_redis_conversation(self):
+        replies = b"+OK\r\n+OK\r\n" + b"$%d\r\n%s\r\n" % (len(INFO_TEXT), INFO_TEXT.encode())
+        replies += b":7\r\n:2\r\n:31\r\n"
+        sock = mock.MagicMock()
+        stream = sock.makefile.return_value = FakeStream(replies)
+        with mock.patch("socket.create_connection", return_value=sock) as connect:
+            snapshot, stderr = quiet_collect(Target(redis_url="redis://:p%40ss@cache/2"))
+        self.assertEqual(stderr, "")
+        self.assertEqual(connect.call_args[0][0], ("cache", 6379))
+        self.assertEqual(
+            snapshot.redis,
+            {
+                "version": "7.2.4",
+                "waiting_jobs": 7,
+                "active_jobs": 2,
+                "failed_jobs": 31,
+                "used_memory_bytes": 1048576,
+                "maxmemory_bytes": 0,
+                "maxmemory_policy": "noeviction",
+            },
+        )
+        sent = stream.sent
+        self.assertTrue(sent.startswith(b"*2\r\n$4\r\nAUTH\r\n$4\r\np@ss\r\n*2\r\n$6\r\nSELECT\r\n$1\r\n2\r\n"))
+        for key in (b"bull:jobs:wait", b"bull:jobs:active", b"bull:jobs:failed"):
+            self.assertIn(key, sent)
+        sock.close.assert_called_once()
+
+    def test_redis_failures(self):
+        target = Target(redis_url="redis://:hunter2@cache:6379")
+        with mock.patch("socket.create_connection", side_effect=TimeoutError("timed out")):
+            snapshot, stderr = quiet_collect(target)
+        self.assertIsNone(snapshot.redis)
+        self.assertIn("redis_url: not collected (timed out)", stderr)
+
+        sock = mock.MagicMock()
+        sock.makefile.return_value = FakeStream(b"-WRONGPASS invalid username-password pair\r\n")
+        with mock.patch("socket.create_connection", return_value=sock):
+            snapshot, stderr = quiet_collect(target)
+        self.assertIsNone(snapshot.redis)
+        self.assertIn("WRONGPASS", stderr)
+        self.assertNotIn("hunter2", stderr)
+
+    def test_credentials_are_scrubbed_from_any_error(self):
+        boom = RuntimeError("cannot reach redis://user:hunter2@cache:6379")
+        with mock.patch("socket.create_connection", side_effect=boom):
+            _, stderr = quiet_collect(Target(redis_url="redis://user:hunter2@cache:6379"))
+        self.assertNotIn("hunter2", stderr)
+        self.assertIn("redis://***@cache", stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
