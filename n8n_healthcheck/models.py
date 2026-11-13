@@ -35,7 +35,9 @@ class Target:
 class Snapshot:
     """Everything collected from one instance. JSON-serialisable via asdict()."""
 
-    # {"healthz": bool, "readiness": bool}
+    # {"healthz": bool, "readiness": bool, "metrics_disabled": bool}
+    # metrics_disabled is True only when /metrics answered 404, i.e. the endpoint is
+    # switched off. Any other failure to read /metrics leaves it False (not collected).
     health: Optional[dict] = None
     # Prometheus samples: 'name' or 'name{label="x"}' -> value
     metrics: Optional[dict] = None
