@@ -113,6 +113,8 @@ def main():
         )
     except OSError as exc:
         fail(f"cannot run docker compose: {exc}")
+    if container.returncode != 0:
+        fail("docker compose failed. Is the Docker daemon running?", container)
     if not container.stdout.strip():
         fail(f"no n8n container is running. Is the {args.stack} stack up?", container)
 

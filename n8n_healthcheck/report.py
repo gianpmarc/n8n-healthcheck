@@ -77,9 +77,10 @@ def render_markdown(snapshot: Snapshot, findings: list[Finding], failed: tuple[s
         key=lambda f: SEVERITIES.index(f.severity),
     )
     missing = [name for name in SECTIONS if getattr(snapshot, name) is None]
-    # The URL answered but /metrics did not: the endpoint is disabled on the
-    # instance, which is a setting, not a source that could not be assessed.
-    metrics_disabled = snapshot.health is not None and snapshot.metrics is None
+    # /metrics answered 404: the endpoint is disabled on the instance, which
+    # is a setting, not a source that could not be assessed. Any other failed
+    # scrape (or an older snapshot without the flag) stays a missing source.
+    metrics_disabled = snapshot.metrics is None and bool((snapshot.health or {}).get("metrics_disabled"))
     if metrics_disabled:
         missing.remove("metrics")
     partial = bool(missing or skipped)

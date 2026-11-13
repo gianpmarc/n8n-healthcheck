@@ -110,7 +110,8 @@ class RenderTest(unittest.TestCase):
         self.assertIn("No findings.", section(markdown, "Findings"))
 
     def test_disabled_metrics_endpoint_does_not_make_the_report_partial(self):
-        markdown = render_markdown(dataclasses.replace(FULL, metrics=None), [])
+        disabled = dataclasses.replace(FULL, health={"metrics_disabled": True}, metrics=None)
+        markdown = render_markdown(disabled, [])
         self.assertNotIn("partial", markdown)
         self.assertIn("Nothing needs attention right now.", section(markdown, "Summary"))
         self.assertEqual(
@@ -118,13 +119,25 @@ class RenderTest(unittest.TestCase):
             "- Prometheus metrics — endpoint disabled on the instance",
         )
         # Another source missing: metrics is neither counted as missing nor as a source.
-        markdown = render_markdown(dataclasses.replace(FULL, metrics=None, redis=None), [])
+        markdown = render_markdown(dataclasses.replace(disabled, redis=None), [])
         self.assertIn("only 4 of 5 data sources were assessed", section(markdown, "Summary"))
         self.assertIn("endpoint disabled on the instance", section(markdown, "Not assessed"))
         # URL not reachable either: metrics stays an ordinary missing source.
         markdown = render_markdown(dataclasses.replace(FULL, health=None, metrics=None), [])
         self.assertIn("only 4 of 6 data sources were assessed", section(markdown, "Summary"))
         self.assertIn(SECTIONS["metrics"], section(markdown, "Not assessed"))
+
+    def test_failed_metrics_scrape_is_a_missing_source_not_a_disabled_endpoint(self):
+        # Flag False (scrape failed) or absent (snapshot saved by an older version).
+        for health in ({"metrics_disabled": False}, {}):
+            with self.subTest(health=health):
+                snapshot = dataclasses.replace(FULL, health=health, metrics=None)
+                markdown = render_markdown(snapshot, [], failed=("metrics",))
+                self.assertIn("only 5 of 6 data sources were assessed", section(markdown, "Summary"))
+                self.assertIn("| Security | 100/100 (partial) | 0 |", section(markdown, "Scores"))
+                not_assessed = section(markdown, "Not assessed")
+                self.assertIn(f"- {SECTIONS['metrics']} — requested but could not be collected", not_assessed)
+                self.assertNotIn("endpoint disabled", not_assessed)
 
     def test_sections_cover_every_snapshot_field(self):
         fields = {f.name for f in dataclasses.fields(Snapshot)} - {"n8n_version"}

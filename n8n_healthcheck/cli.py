@@ -17,7 +17,8 @@ EXIT_ERROR = 3
 
 # Target field -> the Snapshot section that proves the source was reached.
 # --url also feeds "metrics", but that is legitimately empty when the metrics
-# endpoint is disabled, so only "health" tells whether the URL worked.
+# endpoint is disabled, so only "health" tells whether the URL worked; main()
+# adds "metrics" to the failed sections separately.
 SOURCE_SECTION = {
     "url": "health",
     "env_file": "env",
@@ -106,7 +107,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         failed = [section for section in requested if getattr(snapshot, section) is None]
         if failed == requested:
             return _error("none of the requested sources could be collected")
-        if "health" in failed:
+        # --url also asks for metrics; only a disabled endpoint (404) excuses it.
+        if target.url and snapshot.metrics is None and not (snapshot.health or {}).get("metrics_disabled"):
             failed.append("metrics")
 
     # Imported here so the rule set is read at run time, not at import time.
