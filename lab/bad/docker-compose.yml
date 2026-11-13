@@ -1,5 +1,6 @@
 # n8n-healthcheck lab — BAD stack. Deliberately misconfigured. Never use as a template.
-# Every "MISCONFIGURED" comment is one finding the health check should report.
+# Every "MISCONFIGURED" comment is a deliberate fault. lab/README.md says which
+# ones the health check can detect in a Compose setup.
 # All credentials are throwaway demo values; everything binds to 127.0.0.1 only.
 name: n8n-hc-lab-bad
 
