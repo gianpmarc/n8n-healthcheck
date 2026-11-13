@@ -1,0 +1,58 @@
+{
+  "id": "hcLabWebhook0001",
+  "name": "n8n-healthcheck lab webhook",
+  "active": false,
+  "nodes": [
+    {
+      "id": "6f0c3a0e-6f0b-4a53-9a55-0b1d7a5f0001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "6f0c3a0e-6f0b-4a53-9a55-0b1d7a5f00aa",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "healthcheck-lab",
+        "responseMode": "onReceived",
+        "options": {}
+      }
+    },
+    {
+      "id": "6f0c3a0e-6f0b-4a53-9a55-0b1d7a5f0002",
+      "name": "Wait 2s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [220, 0],
+      "webhookId": "6f0c3a0e-6f0b-4a53-9a55-0b1d7a5f00bb",
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "6f0c3a0e-6f0b-4a53-9a55-0b1d7a5f0003",
+      "name": "Mark done",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 0],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6f0c3a0e-6f0b-4a53-9a55-0b1d7a5f00cc",
+              "name": "status",
+              "value": "done",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Wait 2s", "type": "main", "index": 0 }]] },
+    "Wait 2s": { "main": [[{ "node": "Mark done", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}
