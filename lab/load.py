@@ -104,6 +104,20 @@ def main():
     args = parser.parse_args()
     webhook = args.url.rstrip("/") + WEBHOOK_PATH
 
+    # No n8n container at all: fail now instead of waiting out the timeout.
+    # "created" and "restarting" count as up, so a starting stack still waits.
+    try:
+        container = compose(
+            args.stack, "ps", "-a", "-q", "--status", "created",
+            "--status", "restarting", "--status", "running", "n8n",
+        )
+    except OSError as exc:
+        fail(f"cannot run docker compose: {exc}")
+    if container.returncode != 0:
+        fail("docker compose failed. Is the Docker daemon running?", container)
+    if not container.stdout.strip():
+        fail(f"no n8n container is running. Is the {args.stack} stack up?", container)
+
     print("Waiting for n8n to be ready ...")
     deadline = time.time() + 120
     while not ready(args.url):

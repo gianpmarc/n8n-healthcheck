@@ -17,7 +17,8 @@ EXIT_ERROR = 3
 
 # Target field -> the Snapshot section that proves the source was reached.
 # --url also feeds "metrics", but that is legitimately empty when the metrics
-# endpoint is disabled, so only "health" tells whether the URL worked.
+# endpoint is disabled, so only "health" tells whether the URL worked; main()
+# adds "metrics" to the failed sections separately.
 SOURCE_SECTION = {
     "url": "health",
     "env_file": "env",
@@ -40,7 +41,8 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         description="Read-only health check for a self-hosted n8n instance.",
         epilog="Exit codes: 0 no critical findings or warnings, 1 at least one warning, "
         "2 at least one critical finding, 3 the check could not run "
-        "(usage error, unreadable or unwritable file, no requested source reachable).",
+        "(usage error, unreadable or unwritable file, no requested source reachable, "
+        "every rule failed to run).",
     )
     parser.add_argument("--url", help="n8n base URL (health endpoints and /metrics)")
     parser.add_argument("--env-file", help="KEY=VALUE file with the n8n environment")
@@ -52,6 +54,11 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     parser.add_argument("--save-snapshot", metavar="FILE", help="write the collected snapshot as JSON")
     parser.add_argument("-o", "--output", metavar="FILE", help="write the report here (default: stdout)")
     args = parser.parse_args(argv)
+    for source in SOURCE_SECTION:
+        value = getattr(args, source)
+        # The collectors test `is None`, so "" would be collected, not ignored.
+        if value is not None and not value.strip():
+            parser.error(f"--{source.replace('_', '-')} must not be empty")
     if not args.snapshot and not any(getattr(args, source) for source in SOURCE_SECTION):
         parser.error("nothing to inspect: give at least one source flag or --snapshot")
     return args
@@ -100,7 +107,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         failed = [section for section in requested if getattr(snapshot, section) is None]
         if failed == requested:
             return _error("none of the requested sources could be collected")
-        if "health" in failed:
+        # --url also asks for metrics; only a disabled endpoint (404) excuses it.
+        if target.url and snapshot.metrics is None and not (snapshot.health or {}).get("metrics_disabled"):
             failed.append("metrics")
 
     # Imported here so the rule set is read at run time, not at import time.
@@ -119,6 +127,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             sys.stdout.write(markdown)
     except OSError as exc:
         return _error(f"cannot write {exc.filename}: {exc.strerror}")
+
+    # Every rule crashed: the report is written, but it assessed nothing.
+    skipped = sum(f.rule_id == engine.SKIPPED_RULE_ID for f in findings)
+    if skipped and skipped == len(ALL_RULES):
+        return _error("no rule could run; see \"Not assessed\" in the report")
 
     severities = {f.severity for f in findings}
     if "critical" in severities:

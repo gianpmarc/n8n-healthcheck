@@ -67,6 +67,27 @@ class CliTest(unittest.TestCase):
             with self.subTest(expected=expected, rules=len(rules)):
                 self.assertEqual(self.run_cli(["--snapshot", self.snapshot_path], rules)[0], expected)
 
+    def test_no_rule_ran_cleanly_exits_3(self):
+        def broken(snapshot):
+            raise KeyError("version")
+
+        code, out, err = self.run_cli(["--snapshot", self.snapshot_path], [broken, broken])
+        self.assertEqual(code, 3)
+        self.assertIn("Rule broken could not run", out)  # the report is still written
+        self.assertIn("no rule could run", err)
+        # Some rules crashed, others ran: the normal 2/1/0 logic applies.
+        self.assertEqual(self.run_cli(["--snapshot", self.snapshot_path], [broken, rule("warning")])[0], 1)
+        self.assertEqual(self.run_cli(["--snapshot", self.snapshot_path], [broken, lambda s: None])[0], 0)
+
+    def test_empty_source_flag_is_a_usage_error(self):
+        for flag in ("--url", "--env-file", "--postgres-dsn", "--redis-url", "--kube-namespace"):
+            with self.subTest(flag=flag):
+                err = io.StringIO()
+                with self.assertRaises(SystemExit) as raised, contextlib.redirect_stderr(err):
+                    cli.main([flag, "", "--snapshot", self.snapshot_path])
+                self.assertEqual(raised.exception.code, 3)
+                self.assertIn(f"{flag} must not be empty", err.getvalue())
+
     def test_output_file(self):
         path = os.path.join(self.dir, "report.md")
         code, out, _ = self.run_cli(["--snapshot", self.snapshot_path, "-o", path])
@@ -104,7 +125,7 @@ class CliTest(unittest.TestCase):
     def test_collects_from_target_and_saves_snapshot(self):
         saved = os.path.join(self.dir, "saved.json")
         argv = ["--url", "https://n8n.example.com", "--kube-namespace", "n8n", "--save-snapshot", saved]
-        collected = Snapshot(health={"healthz": True}, env=SNAPSHOT.env, kubernetes={"deployments": []})
+        collected = Snapshot(health={"healthz": True}, metrics={}, env=SNAPSHOT.env, kubernetes={"deployments": []})
         with mock.patch("n8n_healthcheck.collectors.collect", return_value=collected) as collect:
             code, out, _ = self.run_cli(argv, [rule("warning")])
 
@@ -129,10 +150,21 @@ class CliTest(unittest.TestCase):
         self.assertIn("(`--postgres-dsn`)\n", out)  # not requested: listed without the failure note
 
     def test_disabled_metrics_endpoint_is_not_a_failed_url(self):
-        code, out, _ = self.collect_returning(Snapshot(health={"healthz": True}), ["--url", "https://n8n.example.com"])
+        health = {"healthz": True, "metrics_disabled": True}
+        code, out, _ = self.collect_returning(Snapshot(health=health), ["--url", "https://n8n.example.com"])
         self.assertEqual(code, 0)
         self.assertNotIn("requested but could not be collected", out)
-        self.assertIn("N8N_METRICS=true`)\n", out)
+        self.assertIn("- Prometheus metrics — endpoint disabled on the instance\n", out)
+
+    def test_failed_metrics_scrape_is_reported_as_not_collected(self):
+        # /metrics answered 403 or timed out (flag False), or the collector predates the flag.
+        for health in ({"healthz": True, "metrics_disabled": False}, {"healthz": True}):
+            with self.subTest(health=health):
+                code, out, _ = self.collect_returning(Snapshot(health=health), ["--url", "https://n8n.example.com"])
+                self.assertEqual(code, 0)
+                self.assertIn("N8N_METRICS=true`) — requested but could not be collected", out)
+                self.assertNotIn("endpoint disabled", out)
+                self.assertNotIn("(`--url`) — requested", out)  # health itself was collected
 
     def test_nothing_requested_was_collected_exits_3(self):
         # metrics alone does not count: without health the URL is treated as failed.

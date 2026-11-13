@@ -28,7 +28,7 @@ def _one_line(text: str) -> str:
     return " ".join(str(text).split())
 
 
-def _summary(findings: list[Finding], missing: int, skipped: int) -> str:
+def _summary(findings: list[Finding], missing: int, skipped: int, sources: int) -> str:
     partial = bool(missing or skipped)
     counts = {s: sum(f.severity == s for f in findings) for s in SEVERITIES}
     sentences = [
@@ -57,7 +57,7 @@ def _summary(findings: list[Finding], missing: int, skipped: int) -> str:
     if partial:
         gaps = []
         if missing:
-            gaps.append(f"only {len(SECTIONS) - missing} of {len(SECTIONS)} data sources were assessed")
+            gaps.append(f"only {sources - missing} of {sources} data sources were assessed")
         if skipped:
             gaps.append(f"{_plural(skipped, 'check')} failed to run")
         sentences.append(f"This report is partial: {' and '.join(gaps)}; see \"Not assessed\".")
@@ -77,12 +77,18 @@ def render_markdown(snapshot: Snapshot, findings: list[Finding], failed: tuple[s
         key=lambda f: SEVERITIES.index(f.severity),
     )
     missing = [name for name in SECTIONS if getattr(snapshot, name) is None]
+    # /metrics answered 404: the endpoint is disabled on the instance, which
+    # is a setting, not a source that could not be assessed. Any other failed
+    # scrape (or an older snapshot without the flag) stays a missing source.
+    metrics_disabled = snapshot.metrics is None and bool((snapshot.health or {}).get("metrics_disabled"))
+    if metrics_disabled:
+        missing.remove("metrics")
     partial = bool(missing or skipped)
 
     title = "# n8n health check report"
     if snapshot.n8n_version:
         title += f" — n8n {snapshot.n8n_version}"
-    lines = [title, "", "## Summary", "", _summary(findings, len(missing), len(skipped)), ""]
+    lines = [title, "", "## Summary", "", _summary(findings, len(missing), len(skipped), len(SECTIONS) - metrics_disabled), ""]
 
     lines += ["## Scores", "", "| Area | Score | Findings |", "|---|---|---|"]
     scores = score(findings)
@@ -106,6 +112,8 @@ def render_markdown(snapshot: Snapshot, findings: list[Finding], failed: tuple[s
         ]
 
     lines += ["## Not assessed", ""]
+    if metrics_disabled:
+        lines.append("- Prometheus metrics — endpoint disabled on the instance")
     if partial:
         for name in missing:
             suffix = " — requested but could not be collected" if name in failed else ""
@@ -113,7 +121,7 @@ def render_markdown(snapshot: Snapshot, findings: list[Finding], failed: tuple[s
                 suffix += " — read from the main n8n Deployment in Kubernetes instead"
             lines.append(f"- {SECTIONS[name]}{suffix}")
         lines += [f"- {_one_line(f.title)} ({_one_line(f.evidence)})" for f in skipped]
-    else:
+    elif not metrics_disabled:
         lines.append("Every data source was collected and every check ran.")
     lines.append("")
 

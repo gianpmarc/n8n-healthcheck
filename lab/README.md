@@ -90,7 +90,7 @@ The good stack also has no TLS and no backups.
 
 ## How the load script works
 
-`lab/load.py` needs no owner account and no API key. It waits for `/healthz/readiness`, copies `lab/workflow.json` into the n8n container, runs `n8n import:workflow` and `n8n publish:workflow`, waits for the webhook to return 200, then sends the requests. If the webhook already answers, it skips the import, so you can run it again to add more load. Each execution waits two seconds on a worker, so jobs stay in the queue for a short while.
+`lab/load.py` needs no owner account and no API key. It stops at once if the stack has no n8n container, waits for `/healthz/readiness`, copies `lab/workflow.json` into the n8n container, runs `n8n import:workflow` and `n8n publish:workflow`, waits for the webhook to return 200, then sends the requests. If the webhook already answers, it skips the import, so you can run it again to add more load. Each execution waits two seconds on a worker, so jobs stay in the queue for a short while.
 
 Options: `python3 lab/load.py good -n 500` sends 500 requests.
 
