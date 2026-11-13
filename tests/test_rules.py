@@ -485,6 +485,9 @@ class ReviewFixes(unittest.TestCase):
                 self.assertIn("N8N_CONCURRENCY_PRODUCTION_LIMIT=0", finding.evidence)
                 self.assertIn("InvalidConcurrencyLimitError", finding.evidence)
                 self.assertNotIn("no limit", finding.evidence)
+        # SCAL-004 leaves the invalid value to SCAL-001, so it is reported once.
+        zero = Snapshot(env={**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "0"})
+        self.assertIsNone(scal.low_worker_concurrency(zero))
 
     def test_worker_concurrency_flag_is_read_from_the_command(self):
         def workers(*command, env=None):

@@ -447,7 +447,9 @@ class CollectTests(unittest.TestCase):
 
         with mock.patch("urllib.request.urlopen", urlopen):
             snapshot, stderr = quiet_collect(Target(url="http://n8n:5678/"))
-        self.assertEqual(snapshot.health, {"healthz": True, "readiness": True})
+        self.assertEqual(
+            snapshot.health, {"healthz": True, "readiness": True, "metrics_disabled": False}
+        )
         self.assertEqual(snapshot.metrics["n8n_scaling_mode_queue_jobs_waiting"], 12.0)
         self.assertEqual(snapshot.n8n_version, "1.70.3")
         self.assertEqual(stderr, "")
@@ -460,9 +462,26 @@ class CollectTests(unittest.TestCase):
 
         with mock.patch("urllib.request.urlopen", urlopen):
             snapshot, stderr = quiet_collect(Target(url="http://n8n:5678"))
-        self.assertEqual(snapshot.health, {"healthz": True, "readiness": False})
+        self.assertEqual(
+            snapshot.health, {"healthz": True, "readiness": False, "metrics_disabled": True}
+        )
         self.assertIsNone(snapshot.metrics)
         self.assertEqual(stderr, "")  # 404 on /metrics is "disabled", not a failure
+
+    def test_http_metrics_that_cannot_be_read_are_not_reported_as_disabled(self):
+        failures = (http_error(403), http_error(500), urllib.error.URLError(TimeoutError("timed out")))
+        for failure in failures:
+            with self.subTest(failure=failure):
+                def urlopen(url, timeout):
+                    if url.endswith("/metrics"):
+                        raise failure
+                    return response("{}")
+
+                with mock.patch("urllib.request.urlopen", urlopen):
+                    snapshot, stderr = quiet_collect(Target(url="http://n8n:5678"))
+                self.assertIs(snapshot.health["metrics_disabled"], False)
+                self.assertIsNone(snapshot.metrics)
+                self.assertIn("metrics: not collected", stderr)
 
     def test_http_unreachable(self):
         error = urllib.error.URLError(TimeoutError("timed out"))
@@ -644,8 +663,9 @@ class CollectTests(unittest.TestCase):
         self.assertNotIn(b"bull:", stream.sent)
 
     def test_redis_uses_bull_prefix_from_kubernetes_without_an_env_file(self):
-        def prefix_sent(*container_envs, env_file_text=None):
-            items = [deployment({"env": env}) for env in container_envs]
+        def probe(*containers, env_file_text=None):
+            """(queue key probed or None, redis section, stderr) for a namespace of `containers`."""
+            items = [deployment(spec) for spec in containers]
             outputs = [json.dumps({"items": items}), json.dumps({"items": []})]
             done = [subprocess.CompletedProcess([], 0, stdout=out, stderr="") for out in outputs]
             sock = mock.MagicMock()
@@ -660,19 +680,37 @@ class CollectTests(unittest.TestCase):
                 with mock.patch("subprocess.run", side_effect=done), mock.patch(
                     "socket.create_connection", return_value=sock
                 ):
-                    quiet_collect(target)
-            return stream.sent.split(b"EXISTS\r\n")[1].split(b"\r\n")[1].decode()
+                    snapshot, stderr = quiet_collect(target)
+            _, exists, rest = stream.sent.partition(b"EXISTS\r\n")
+            return (rest.split(b"\r\n")[1].decode() if exists else None), snapshot.redis, stderr
 
-        literal = [{"name": "QUEUE_BULL_PREFIX", "value": "acme"}]
-        from_secret = [{"name": "QUEUE_BULL_PREFIX", "valueFrom": {"secretKeyRef": {}}}]
-        other = [{"name": "QUEUE_BULL_PREFIX", "value": "other"}]
-        self.assertEqual(prefix_sent(literal, []), "acme:jobs:id")
-        self.assertEqual(prefix_sent([]), "bull:jobs:id")
-        self.assertEqual(prefix_sent(from_secret), "bull:jobs:id")  # set, value not readable
-        self.assertEqual(prefix_sent(literal, from_secret), "bull:jobs:id")
-        self.assertEqual(prefix_sent(literal, other), "bull:jobs:id")  # containers disagree
+        def prefix(value, **spec):
+            return {"env": [{"name": "QUEUE_BULL_PREFIX", **value}], **spec}
+
+        acme = prefix({"value": "acme"})
+        unset = {"env": []}
+        self.assertEqual(probe(acme, acme)[0], "acme:jobs:id")
+        self.assertEqual(probe(unset)[0], "bull:jobs:id")
+        self.assertEqual(probe()[0], "bull:jobs:id")  # no n8n container at all
+        # Only n8n containers count: not Redis, a proxy or the runners sidecar.
+        for image in ("redis:7", "n8nio/runners:2.40.1", "registry.example/n8n-team/nginx:1"):
+            with self.subTest(image=image):
+                self.assertEqual(probe(acme, prefix({"value": "other"}, image=image))[0], "acme:jobs:id")
+                self.assertEqual(probe(unset, prefix({"value": "other"}, image=image))[0], "bull:jobs:id")
         # The env file wins, even when it leaves the variable unset.
-        self.assertEqual(prefix_sent(literal, env_file_text=""), "bull:jobs:id")
+        self.assertEqual(probe(acme, env_file_text="")[0], "bull:jobs:id")
+        # n8n containers that disagree, or a value that cannot be read: the queue is not probed.
+        from_secret = prefix({"valueFrom": {"secretKeyRef": {}}})
+        for containers in ((acme, prefix({"value": "other"})), (acme, unset), (from_secret,), (acme, from_secret)):
+            with self.subTest(containers=containers):
+                key, section, stderr = probe(*containers)
+                self.assertIsNone(key)
+                self.assertEqual(section["version"], "7.2.4")  # INFO is still collected
+                self.assertEqual(section["maxmemory_policy"], "noeviction")
+                for field in ("waiting_jobs", "active_jobs", "failed_jobs"):
+                    self.assertIsNone(section[field])
+                self.assertEqual(stderr.count("\n"), 1)
+                self.assertIn("redis queue: not collected (QUEUE_BULL_PREFIX is ambiguous", stderr)
 
     def test_redis_failures(self):
         target = Target(redis_url="redis://:hunter2@cache:6379")

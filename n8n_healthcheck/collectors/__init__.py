@@ -34,20 +34,25 @@ def collect(target: Target) -> Snapshot:
     return snapshot
 
 
-def bull_prefix(snapshot: Snapshot) -> str:
-    """QUEUE_BULL_PREFIX from the env file, else from the Kubernetes containers, else the default.
+def bull_prefix(snapshot: Snapshot) -> str | None:
+    """QUEUE_BULL_PREFIX from the env file, else from the n8n containers in Kubernetes.
 
-    The env file wins, as it does for the rules. In Kubernetes the value is used only
-    when every container that sets the variable has the same readable literal.
+    The env file wins, as it does for the rules. In Kubernetes every n8n container must
+    agree (one that leaves the variable unset uses the default); None when they do not,
+    or when the value is set but not readable, so no other instance's queue is probed.
     """
     if snapshot.env is not None:
         return snapshot.env.get("QUEUE_BULL_PREFIX") or redis.DEFAULT_PREFIX
     values = {
-        container["env"]["QUEUE_BULL_PREFIX"]
+        container["env"].get("QUEUE_BULL_PREFIX") or redis.DEFAULT_PREFIX
         for deployment in (snapshot.kubernetes or {}).get("deployments", [])
         for container in deployment["containers"]
-        if "QUEUE_BULL_PREFIX" in container["env"]
+        # image name (last path segment, no tag or digest) contains "n8n": not the
+        # n8nio/runners sidecar, Redis or a proxy
+        if "n8n" in container["image"].split("@")[0].rsplit("/", 1)[-1].split(":")[0].lower()
     }
-    if len(values) == 1 and not values & {"", kubernetes.UNKNOWN, REDACTED}:
-        return values.pop()
-    return redis.DEFAULT_PREFIX
+    if not values:
+        return redis.DEFAULT_PREFIX
+    if len(values) > 1 or values & {kubernetes.UNKNOWN, REDACTED}:
+        return None
+    return values.pop()

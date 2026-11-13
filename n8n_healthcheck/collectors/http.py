@@ -17,6 +17,7 @@ def collect(target: Target) -> dict:
         "health": {
             "healthz": _status(base + "/healthz") == 200,
             "readiness": _status(base + "/healthz/readiness") == 200,
+            "metrics_disabled": False,
         }
     }
     try:
@@ -24,7 +25,9 @@ def collect(target: Target) -> dict:
             metrics = parse_metrics(response.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as error:
         error.close()
-        if error.code != 404:  # 404 = metrics disabled (N8N_METRICS=false), not an error
+        if error.code == 404:  # metrics disabled (N8N_METRICS=false), not an error
+            fields["health"]["metrics_disabled"] = True
+        else:
             warn("metrics", error)
     except OSError as error:
         warn("metrics", error)
