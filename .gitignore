@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+*.env
+!lab/**/*.env.example
+report*.md
+snapshot*.json
+.claude/
+.DS_Store
