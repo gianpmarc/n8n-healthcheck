@@ -2,7 +2,7 @@
 
 **TL;DR** — Start a deliberately misconfigured queue-mode n8n stack, run the health check and read the findings. Start the fixed stack, run it again and compare the two reports.
 
-> **Not yet verified end to end.** The Compose files pass `docker compose config`, but the stacks have not been started and the health check has not been run against them. The expected findings below come from reading the rules, not from a real report.
+> **Verified end to end on 2026-11-13** with n8n 2.47.7, Postgres 16 and Redis 7: both stacks started, the load script ran, and the health check reported the findings listed below.
 
 Demo only. Every password and key in this directory is a throwaway value, and every port binds to `127.0.0.1`.
 
@@ -10,6 +10,7 @@ Demo only. Every password and key in this directory is a throwaway value, and ev
 
 - Docker with Compose v2 (`docker compose version`)
 - Python 3.10+
+- The `psql` client on your `PATH` (used for `--postgres-dsn`; without it the Postgres section is reported as not collected)
 - Free local ports 5678 (n8n), 15432 (Postgres) and 16379 (Redis)
 
 Run every command from the repository root. Run one stack at a time, because both use the same ports.
