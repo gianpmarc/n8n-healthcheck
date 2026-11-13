@@ -109,6 +109,23 @@ class RenderTest(unittest.TestCase):
         self.assertIn("Nothing needs attention right now.", section(markdown, "Summary"))
         self.assertIn("No findings.", section(markdown, "Findings"))
 
+    def test_disabled_metrics_endpoint_does_not_make_the_report_partial(self):
+        markdown = render_markdown(dataclasses.replace(FULL, metrics=None), [])
+        self.assertNotIn("partial", markdown)
+        self.assertIn("Nothing needs attention right now.", section(markdown, "Summary"))
+        self.assertEqual(
+            section(markdown, "Not assessed").strip(),
+            "- Prometheus metrics — endpoint disabled on the instance",
+        )
+        # Another source missing: metrics is neither counted as missing nor as a source.
+        markdown = render_markdown(dataclasses.replace(FULL, metrics=None, redis=None), [])
+        self.assertIn("only 4 of 5 data sources were assessed", section(markdown, "Summary"))
+        self.assertIn("endpoint disabled on the instance", section(markdown, "Not assessed"))
+        # URL not reachable either: metrics stays an ordinary missing source.
+        markdown = render_markdown(dataclasses.replace(FULL, health=None, metrics=None), [])
+        self.assertIn("only 4 of 6 data sources were assessed", section(markdown, "Summary"))
+        self.assertIn(SECTIONS["metrics"], section(markdown, "Not assessed"))
+
     def test_sections_cover_every_snapshot_field(self):
         fields = {f.name for f in dataclasses.fields(Snapshot)} - {"n8n_version"}
         self.assertEqual(set(SECTIONS), fields)
