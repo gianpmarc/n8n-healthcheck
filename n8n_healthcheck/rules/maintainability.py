@@ -5,7 +5,16 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import Finding, Snapshot
-from ._helpers import env_flag, image_tag, image_version, is_queue_mode, n8n_containers, shown
+from ._helpers import (
+    effective_env,
+    env_flag,
+    image_tag,
+    image_version,
+    is_queue_mode,
+    n8n_containers,
+    shown,
+    unknown,
+)
 
 # Tags that are moved to a new release by their publisher, so two pulls of the same
 # reference can return different n8n versions. An untagged image means `latest`.
@@ -14,15 +23,17 @@ MUTABLE_IMAGE_TAGS = ("latest", "stable", "beta", "next", "nightly")
 
 # https://docs.n8n.io/deploy/host-n8n/keep-n8n-running/monitor-n8n
 def metrics_disabled(snapshot: Snapshot) -> Optional[Finding]:
-    env = snapshot.env
-    if env is None or env_flag(env, "N8N_METRICS") is True:
+    env = effective_env(snapshot)
+    if env is None or env_flag(env, "N8N_METRICS") is True or unknown(env, "N8N_METRICS"):
         return None
     # Samples were scraped, so /metrics is on whatever the env file says.
     if snapshot.metrics:
         return None
     # n8n's config marks queue metrics as "Not supported in multi-main setup".
     queue_metrics = ""
-    if is_queue_mode(env) and env_flag(env, "N8N_MULTI_MAIN_SETUP_ENABLED") is not True:
+    multi_main = "N8N_MULTI_MAIN_SETUP_ENABLED"
+    single_main = env_flag(env, multi_main) is not True and not unknown(env, multi_main)
+    if is_queue_mode(env) and single_main:
         queue_metrics = (
             " Also set N8N_METRICS_INCLUDE_QUEUE_METRICS=true on the main process for "
             "waiting/active/failed job gauges (not supported in a multi-main setup)."
@@ -32,7 +43,7 @@ def metrics_disabled(snapshot: Snapshot) -> Optional[Finding]:
         area="maintainability",
         severity="warning",
         title="Prometheus metrics endpoint is disabled",
-        evidence=f"{shown(env, 'N8N_METRICS')} (default: false).",
+        evidence=f"{shown(env, 'N8N_METRICS')} (default: false).{env.note}",
         impact=(
             "There is no /metrics endpoint to scrape, so memory growth, event-loop lag and "
             "queue depth are invisible until users report failed or slow executions."

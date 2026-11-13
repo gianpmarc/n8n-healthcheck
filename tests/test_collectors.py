@@ -89,6 +89,47 @@ DEPLOYMENTS = {
 }
 
 
+CONFIGMAPS = {
+    "items": [
+        {
+            "metadata": {"name": "n8n-config"},
+            "data": {
+                "EXECUTIONS_MODE": "queue",
+                "N8N_METRICS": "false",
+                "DB_POSTGRESDB_PASSWORD": "hunter2",
+            },
+        },
+        {"metadata": {"name": "extra"}, "data": {"N8N_METRICS": "true", "API_TOKEN": "abc"}},
+        {"metadata": {"name": "override"}, "data": {"N8N_METRICS": "true"}},
+        {"metadata": {"name": "empty"}},
+    ]
+}
+_NOT_GIVEN = object()
+
+
+def deployment(container_spec: dict) -> dict:
+    """A `kubectl get deployments` item with one n8n container carrying `container_spec`."""
+    container = {"name": "n8n", "image": "n8nio/n8n:2.40.1", **container_spec}
+    return {
+        "metadata": {"name": "n8n-main"},
+        "spec": {"template": {"spec": {"containers": [container]}}},
+    }
+
+
+def config_map(name: str, **extra) -> dict:
+    """An `envFrom` entry for a ConfigMap."""
+    return {"configMapRef": {"name": name}, **extra}
+
+
+def container_env(container_spec: dict, configmaps=_NOT_GIVEN):
+    """(env, env_complete) the collector derives for a container; CONFIGMAPS unless overridden."""
+    if configmaps is _NOT_GIVEN:
+        configmaps = kubernetes.parse_configmaps(json.dumps(CONFIGMAPS))
+    output = json.dumps({"items": [deployment(container_spec)]})
+    parsed = kubernetes.parse_deployments(output, configmaps)["deployments"][0]["containers"][0]
+    return parsed["env"], parsed["env_complete"]
+
+
 def response(body: str, status: int = 200):
     handle = mock.MagicMock()
     handle.__enter__.return_value = handle
@@ -218,11 +259,134 @@ class ParserTests(unittest.TestCase):
                 "limits": {"memory": "1Gi"},
                 "liveness_probe": False,
                 "readiness_probe": True,
+                "env_complete": True,
             },
         )
         self.assertEqual((bare["replicas"], bare["ready_replicas"]), (1, 0))
         self.assertEqual(bare["containers"][0]["command"], [])
         self.assertEqual(bare["containers"][0]["requests"], {})
+        self.assertEqual(bare["containers"][0]["env"], {})
+        self.assertTrue(bare["containers"][0]["env_complete"])
+
+    def test_configmap_env_from_with_and_without_prefix(self):
+        env, complete = container_env(
+            {"envFrom": [config_map("n8n-config"), config_map("extra", prefix="X_")]}
+        )
+        self.assertEqual(
+            env,
+            {
+                "EXECUTIONS_MODE": "queue",
+                "N8N_METRICS": "false",
+                "DB_POSTGRESDB_PASSWORD": REDACTED,
+                "X_N8N_METRICS": "true",
+                "X_API_TOKEN": REDACTED,  # redaction sees the prefixed name
+            },
+        )
+        self.assertTrue(complete)
+
+    def test_later_env_from_source_wins(self):
+        env, _ = container_env(
+            {"envFrom": [config_map("n8n-config"), config_map("override")]}
+        )
+        self.assertEqual(env["N8N_METRICS"], "true")
+
+    def test_configmap_key_ref_is_resolved_and_redacted(self):
+        def ref(key):
+            return {"valueFrom": {"configMapKeyRef": {"name": "n8n-config", "key": key}}}
+
+        env, complete = container_env(
+            {
+                "env": [
+                    {"name": "MODE", **ref("EXECUTIONS_MODE")},
+                    {"name": "DB_PASS", **ref("DB_POSTGRESDB_PASSWORD")},
+                ]
+            }
+        )
+        self.assertEqual(env, {"MODE": "queue", "DB_PASS": REDACTED})
+        self.assertTrue(complete)
+
+    def test_env_overrides_env_from(self):
+        env, complete = container_env(
+            {
+                "envFrom": [{"configMapRef": {"name": "n8n-config"}}],
+                "env": [
+                    {"name": "N8N_METRICS", "value": "true"},
+                    {"name": "EXECUTIONS_MODE", "valueFrom": {"secretKeyRef": {"name": "s"}}},
+                ],
+            }
+        )
+        self.assertEqual((env["N8N_METRICS"], env["EXECUTIONS_MODE"]), ("true", "<valueFrom>"))
+        self.assertTrue(complete)
+
+    def test_secrets_and_field_refs_stay_unknown_but_complete(self):
+        env, complete = container_env(
+            {
+                "env": [
+                    {"name": "A", "valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}}},
+                    {"name": "B", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
+                    {"name": "C", "valueFrom": {"resourceFieldRef": {"resource": "limits.cpu"}}},
+                    {"name": "D", "value": "http://$(B):5678"},  # expanded by Kubernetes
+                ]
+            }
+        )
+        self.assertEqual(env, dict.fromkeys("ABCD", "<valueFrom>"))
+        self.assertTrue(complete)
+
+    def test_secret_env_from_makes_the_environment_incomplete(self):
+        env, complete = container_env(
+            {"envFrom": [config_map("n8n-config"), {"secretRef": {"name": "n8n-secrets"}}]}
+        )
+        # The Secret may override any ConfigMap key, so none of them is reported as read.
+        self.assertEqual(set(env.values()), {"<valueFrom>"})
+        self.assertEqual(set(env), {"EXECUTIONS_MODE", "N8N_METRICS", "DB_POSTGRESDB_PASSWORD"})
+        self.assertFalse(complete)
+
+    def test_unreadable_env_from_only_hides_the_sources_before_it(self):
+        for unreadable in ({"secretRef": {"name": "n8n-secrets"}}, config_map("gone")):
+            with self.subTest(unreadable=unreadable):
+                env, complete = container_env(
+                    {
+                        "envFrom": [config_map("n8n-config"), unreadable, config_map("override")],
+                        "env": [{"name": "EXECUTIONS_MODE", "value": "regular"}],
+                    }
+                )
+                self.assertEqual(env["DB_POSTGRESDB_PASSWORD"], "<valueFrom>")  # before it
+                self.assertEqual(env["N8N_METRICS"], "true")  # from the source after it
+                self.assertEqual(env["EXECUTIONS_MODE"], "regular")  # explicit env entry
+                self.assertFalse(complete)
+
+    def test_optional_configmap_key_ref_that_is_missing_leaves_the_variable_unset(self):
+        def entry(name, key, **ref):
+            ref = {"name": name, "key": key, **ref}
+            return {"name": "N8N_METRICS", "valueFrom": {"configMapKeyRef": ref}}
+
+        unknown = ({"N8N_METRICS": "<valueFrom>"}, False)
+        for name, key in (("gone", "A"), ("n8n-config", "NO_SUCH_KEY")):
+            with self.subTest(configmap=name):
+                optional = {"env": [entry(name, key, optional=True)]}
+                self.assertEqual(container_env(optional), ({}, True))
+                # Not optional, or ConfigMaps not fetched: still set-but-unknown.
+                self.assertEqual(container_env({"env": [entry(name, key)]}), unknown)
+                self.assertEqual(container_env(optional, configmaps=None), unknown)
+        # The skipped entry does not hide the value envFrom gave the same name.
+        spec = {
+            "envFrom": [config_map("n8n-config")],
+            "env": [entry("gone", "A", optional=True)],
+        }
+        self.assertEqual(container_env(spec)[0]["N8N_METRICS"], "false")
+
+    def test_missing_configmap_makes_the_environment_incomplete(self):
+        env, complete = container_env({"envFrom": [config_map("gone")]})
+        self.assertEqual((env, complete), ({}, False))
+        for ref in ({"name": "gone", "key": "A"}, {"name": "n8n-config", "key": "NO_SUCH_KEY"}):
+            with self.subTest(ref=ref):
+                entry = {"name": "A", "valueFrom": {"configMapKeyRef": ref}}
+                env, complete = container_env({"env": [entry]})
+                self.assertEqual((env, complete), ({"A": "<valueFrom>"}, False))
+
+    def test_configmaps_not_fetched_makes_references_incomplete(self):
+        spec = {"envFrom": [config_map("n8n-config")], "env": [{"name": "A", "value": "1"}]}
+        self.assertEqual(container_env(spec, configmaps=None), ({"A": "1"}, False))
 
 
 class CollectTests(unittest.TestCase):
@@ -335,9 +499,42 @@ class CollectTests(unittest.TestCase):
             snapshot, _ = quiet_collect(Target(kube_namespace="n8n", kube_context="prod"))
         self.assertEqual(len(snapshot.kubernetes["deployments"]), 2)
         self.assertEqual(
-            run.call_args[0][0][:8],
-            ["kubectl", "--context", "prod", "get", "deployments", "-n", "n8n", "-o"],
+            [call[0][0][:8] for call in run.call_args_list],
+            [
+                ["kubectl", "--context", "prod", "get", kind, "-n", "n8n", "-o"]
+                for kind in ("deployments", "configmaps")
+            ],
         )
+
+    def test_kubectl_resolves_configmaps(self):
+        deployments = {"items": [deployment({"envFrom": [config_map("n8n-config")]})]}
+
+        def kubectl(args, **kwargs):
+            body = CONFIGMAPS if "configmaps" in args else deployments
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(body), stderr="")
+
+        with mock.patch("subprocess.run", side_effect=kubectl) as run:
+            snapshot, stderr = quiet_collect(Target(kube_namespace="n8n"))
+        container = snapshot.kubernetes["deployments"][0]["containers"][0]
+        self.assertEqual(container["env"]["EXECUTIONS_MODE"], "queue")
+        self.assertTrue(container["env_complete"])
+        self.assertEqual(stderr, "")
+        self.assertFalse(any("secret" in " ".join(call[0][0]) for call in run.call_args_list))
+
+    def test_failing_configmap_call_keeps_the_deployments(self):
+        deployments = {"items": [deployment({"envFrom": [config_map("n8n-config")]})]}
+
+        def kubectl(args, **kwargs):
+            if "configmaps" in args:
+                error = "Error: configmaps is forbidden\n"
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr=error)
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(deployments), stderr="")
+
+        with mock.patch("subprocess.run", side_effect=kubectl):
+            snapshot, stderr = quiet_collect(Target(kube_namespace="n8n"))
+        container = snapshot.kubernetes["deployments"][0]["containers"][0]
+        self.assertEqual((container["env"], container["env_complete"]), ({}, False))
+        self.assertIn("configmaps is forbidden", stderr)
 
     def test_redis_conversation(self):
         replies = b"+OK\r\n+OK\r\n" + b"$%d\r\n%s\r\n" % (len(INFO_TEXT), INFO_TEXT.encode())

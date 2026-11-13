@@ -7,6 +7,8 @@ from typing import Optional
 from ..models import Finding, Snapshot
 from ._helpers import (
     concurrency_flag,
+    container_env,
+    effective_env,
     env_flag,
     env_int,
     is_queue_mode,
@@ -14,6 +16,7 @@ from ._helpers import (
     n8n_containers,
     num,
     shown,
+    unknown,
 )
 
 # n8n's own recommendation: "setting concurrency to 5 or higher for your worker
@@ -32,8 +35,8 @@ MIN_WORKER_REPLICAS = 2
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/control-concurrency
 def regular_mode_unbounded_concurrency(snapshot: Snapshot) -> Optional[Finding]:
-    env = snapshot.env
-    if env is None or is_queue_mode(env):
+    env = effective_env(snapshot)
+    if env is None or is_queue_mode(env) or unknown(env, "EXECUTIONS_MODE"):
         return None
     limit = env_int(env, "N8N_CONCURRENCY_PRODUCTION_LIMIT")
     if limit == 0:
@@ -46,6 +49,7 @@ def regular_mode_unbounded_concurrency(snapshot: Snapshot) -> Optional[Finding]:
             evidence=(
                 "N8N_CONCURRENCY_PRODUCTION_LIMIT=0, which n8n rejects with "
                 "InvalidConcurrencyLimitError (valid: -1 to disable, or a positive number)."
+                f"{env.note}"
             ),
             impact=(
                 "n8n raises an error when it sets up concurrency control with a limit of 0, "
@@ -59,7 +63,7 @@ def regular_mode_unbounded_concurrency(snapshot: Snapshot) -> Optional[Finding]:
     # A stock SQLite install keeps this documented default and is not worth flagging.
     if not looks_like_production(env):
         return None
-    if limit is not None and limit > 0:
+    if (limit is not None and limit > 0) or unknown(env, "N8N_CONCURRENCY_PRODUCTION_LIMIT"):
         return None
     return Finding(
         rule_id="SCAL-001",
@@ -71,6 +75,7 @@ def regular_mode_unbounded_concurrency(snapshot: Snapshot) -> Optional[Finding]:
         evidence=(
             f"{shown(env, 'EXECUTIONS_MODE')} (default: regular); {shown(env, 'DB_TYPE')}; "
             f"{shown(env, 'N8N_CONCURRENCY_PRODUCTION_LIMIT')} (default: -1, no limit)."
+            f"{env.note}"
         ),
         impact=(
             "In regular mode every execution runs inside the single main process, so a burst "
@@ -120,10 +125,11 @@ def single_worker(snapshot: Snapshot) -> Optional[Finding]:
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/set-up-task-runners
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/basic-configuration/use-environment-variables/queue-mode
 def manual_executions_on_main(snapshot: Snapshot) -> Optional[Finding]:
-    env = snapshot.env
+    env = effective_env(snapshot)
     if env is None or not is_queue_mode(env):
         return None
-    if env_flag(env, "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS") is True:
+    offload = "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS"
+    if env_flag(env, offload) is True or unknown(env, offload):
         return None
     return Finding(
         rule_id="SCAL-003",
@@ -132,7 +138,7 @@ def manual_executions_on_main(snapshot: Snapshot) -> Optional[Finding]:
         title="Manual executions run on the main process",
         evidence=(
             f"{shown(env, 'EXECUTIONS_MODE')}; "
-            f"{shown(env, 'OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS')} (default: false)."
+            f"{shown(env, 'OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS')} (default: false).{env.note}"
         ),
         impact=(
             "Executions started from the editor run inside the main process, so one heavy "
@@ -149,6 +155,9 @@ def manual_executions_on_main(snapshot: Snapshot) -> Optional[Finding]:
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/enable-queue-mode#concurrency-and-scaling-recommendations
 def low_worker_concurrency(snapshot: Snapshot) -> Optional[Finding]:
+    # Deliberately the env file only, not effective_env(): a file describes every process,
+    # while the main container's limit says nothing about the workers, which are read
+    # one by one below.
     env = snapshot.env
     if env is None and snapshot.kubernetes is None:
         return None
@@ -166,7 +175,12 @@ def low_worker_concurrency(snapshot: Snapshot) -> Optional[Finding]:
         for deployment, container, role in n8n_containers(snapshot.kubernetes):
             if role != "worker":
                 continue
-            own_limit = env_int(container.get("env") or {}, "N8N_CONCURRENCY_PRODUCTION_LIMIT")
+            own_env = container_env(deployment, container)
+            # A limit that is set but unreadable, or possibly set in a Secret, may
+            # override the flag: nothing can be said about this worker.
+            if unknown(own_env, "N8N_CONCURRENCY_PRODUCTION_LIMIT"):
+                continue
+            own_limit = env_int(own_env, "N8N_CONCURRENCY_PRODUCTION_LIMIT")
             flag = concurrency_flag(container)
             if own_limit is not None and own_limit >= 1:
                 value, source = own_limit, f"N8N_CONCURRENCY_PRODUCTION_LIMIT={own_limit}"

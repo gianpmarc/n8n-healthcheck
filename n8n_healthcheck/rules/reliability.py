@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import Finding, Snapshot
-from ._helpers import env_flag, is_queue_mode, n8n_containers, num, shown
+from ._helpers import effective_env, env_flag, is_queue_mode, n8n_containers, num, shown, unknown
 
 # Redis starts evicting (or, with noeviction, rejecting writes) at maxmemory. 80% leaves
 # headroom for a burst: each large webhook response in flight can hold about
@@ -24,11 +24,11 @@ BACKLOG_MIN_WAITING = 100
 
 # https://docs.n8n.io/deploy/host-n8n/install-options/production-requirements#database
 def sqlite_in_queue_mode(snapshot: Snapshot) -> Optional[Finding]:
-    env = snapshot.env
+    env = effective_env(snapshot)
     if env is None or not is_queue_mode(env):
         return None
     # DB_TYPE_FILE reads the value from a file we cannot see.
-    if "DB_TYPE_FILE" in env:
+    if "DB_TYPE_FILE" in env or unknown(env, "DB_TYPE"):
         return None
     if str(env.get("DB_TYPE", "sqlite")).strip().lower() != "sqlite":
         return None
@@ -37,7 +37,10 @@ def sqlite_in_queue_mode(snapshot: Snapshot) -> Optional[Finding]:
         area="reliability",
         severity="critical",
         title="Queue mode on SQLite",
-        evidence=f"{shown(env, 'EXECUTIONS_MODE')}; {shown(env, 'DB_TYPE')} (default: sqlite).",
+        evidence=(
+            f"{shown(env, 'EXECUTIONS_MODE')}; {shown(env, 'DB_TYPE')} (default: sqlite)."
+            f"{env.note}"
+        ),
         impact=(
             "SQLite in queue mode is unsupported by n8n: main and workers must all use one "
             "database, which a local SQLite file cannot provide (for example, workers on "
@@ -197,10 +200,11 @@ def readiness_failing(snapshot: Snapshot) -> Optional[Finding]:
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/enable-queue-mode#multi-main-setup
 def single_main(snapshot: Snapshot) -> Optional[Finding]:
-    env = snapshot.env
+    env = effective_env(snapshot)
     if env is None or not is_queue_mode(env):
         return None
-    if env_flag(env, "N8N_MULTI_MAIN_SETUP_ENABLED") is True:
+    multi_main = "N8N_MULTI_MAIN_SETUP_ENABLED"
+    if env_flag(env, multi_main) is True or unknown(env, multi_main):
         return None
     return Finding(
         rule_id="REL-006",
@@ -209,7 +213,7 @@ def single_main(snapshot: Snapshot) -> Optional[Finding]:
         title="Single main process (no multi-main setup)",
         evidence=(
             f"{shown(env, 'EXECUTIONS_MODE')}; "
-            f"{shown(env, 'N8N_MULTI_MAIN_SETUP_ENABLED')} (default: false)."
+            f"{shown(env, 'N8N_MULTI_MAIN_SETUP_ENABLED')} (default: false).{env.note}"
         ),
         impact=(
             "The one main process is a single point of failure: while it is down or being "

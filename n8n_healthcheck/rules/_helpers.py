@@ -5,8 +5,84 @@ from __future__ import annotations
 import re
 from typing import Iterator, Optional
 
+from ..models import REDACTED, Snapshot
+
 # Leading x.y.z of an image tag: "2.40.1", "v2.40.1" and "2.40.1-build7" are one release.
 _VERSION = re.compile(r"v?(\d+\.\d+\.\d+)")
+
+
+# Value of a Kubernetes container variable that is set but could not be read (a Secret).
+VALUE_FROM = "<valueFrom>"
+
+
+class Env(dict):
+    """The n8n environment variables, plus how far they can be trusted.
+
+    `complete` is False when part of the environment could not be read, so a variable
+    missing here may still be set. `source` names the Kubernetes container the values
+    came from; it is empty for an env file.
+    """
+
+    complete = True
+    source = ""
+
+    @property
+    def note(self) -> str:
+        """Sentence appended to evidence so the reader can find the values."""
+        if not self.source:
+            return ""
+        note = f" Environment read from {self.source}."
+        if not self.complete:
+            note += " Part of it could not be read (a Secret or an unavailable ConfigMap)."
+        return note
+
+
+def container_env(deployment: dict, container: dict) -> Env:
+    env = Env(container.get("env") or {})
+    # Anything but an explicit True (e.g. a snapshot saved before the field existed) is incomplete.
+    env.complete = container.get("env_complete") is True
+    env.source = f"Deployment {deployment.get('name')}, container {container.get('name')}"
+    return env
+
+
+def worker_envs(kubernetes: dict) -> list:
+    """The environment of every n8n worker container."""
+    return [
+        container_env(deployment, container)
+        for deployment, container, role in n8n_containers(kubernetes)
+        if role == "worker"
+    ]
+
+
+def effective_env(snapshot: Snapshot) -> Optional[Env]:
+    """The environment of the n8n main process, or None when it is not known.
+
+    The env file wins. Otherwise it is the environment of the main n8n container in
+    Kubernetes; with no main container, or several that disagree, there is no answer.
+    """
+    if snapshot.env is not None:
+        return Env(snapshot.env)
+    if snapshot.kubernetes is None:
+        return None
+    mains = [
+        container_env(deployment, container)
+        for deployment, container, role in n8n_containers(snapshot.kubernetes)
+        if role == "main"
+    ]
+    if not mains or any((env, env.complete) != (mains[0], mains[0].complete) for env in mains):
+        return None
+    return mains[0]
+
+
+def unknown(env: dict, name: str) -> bool:
+    """True when the value of `name` cannot be told: neither a readable value nor provably unset.
+
+    Rules that would conclude something from the variable's value or its absence must
+    return None instead.
+    """
+    if name in env:
+        return env[name] in (VALUE_FROM, REDACTED)
+    return not getattr(env, "complete", True)
 
 
 def env_flag(env: dict, name: str) -> Optional[bool]:
@@ -51,7 +127,14 @@ def looks_like_production(env: dict) -> bool:
 
 def shown(env: dict, name: str) -> str:
     """NAME=value as observed, for evidence strings."""
+    if unknown(env, name):
+        return f"{name} is set, value not readable" if name in env else f"{name} not readable"
     return f"{name}={env[name]}" if name in env else f"{name} is not set"
+
+
+def shown_each(envs: list, name: str) -> str:
+    """shown() for several Kubernetes containers, each prefixed with where it runs."""
+    return "; ".join(f"{env.source}: {shown(env, name)}" for env in envs)
 
 
 def image_tag(image: str) -> Optional[str]:

@@ -5,15 +5,23 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import Finding, Snapshot
-from ._helpers import env_flag, is_queue_mode, shown
+from ._helpers import (
+    effective_env,
+    env_flag,
+    is_queue_mode,
+    shown,
+    shown_each,
+    unknown,
+    worker_envs,
+)
 
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/manage-execution-data#enable-executions-pruning
 def pruning_disabled(snapshot: Snapshot) -> Optional[Finding]:
-    env = snapshot.env
+    env = effective_env(snapshot)
     if env is None or env_flag(env, "EXECUTIONS_DATA_PRUNE") is not False:
         return None
-    evidence = f"{shown(env, 'EXECUTIONS_DATA_PRUNE')} (default: true)."
+    evidence = f"{shown(env, 'EXECUTIONS_DATA_PRUNE')} (default: true).{env.note}"
     postgres = snapshot.postgres
     if postgres is not None and postgres.get("execution_count") is not None:
         evidence += (
@@ -42,15 +50,28 @@ def pruning_disabled(snapshot: Snapshot) -> Optional[Finding]:
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/manage-execution-data#reduce-saved-data
 def saving_execution_progress(snapshot: Snapshot) -> Optional[Finding]:
-    env = snapshot.env
-    if env is None or env_flag(env, "EXECUTIONS_DATA_SAVE_ON_PROGRESS") is not True:
+    env = effective_env(snapshot)
+    if env is None:
         return None
+    name = "EXECUTIONS_DATA_SAVE_ON_PROGRESS"
+    judged = [env]
+    # In queue mode production executions run on the workers, each with its own
+    # environment in Kubernetes; main alone says nothing unless it is known to be regular.
+    if env.source and (is_queue_mode(env) or unknown(env, "EXECUTIONS_MODE")):
+        judged = worker_envs(snapshot.kubernetes)
+    saving = [each for each in judged if env_flag(each, name) is True]
+    if not saving:
+        return None
+    if saving[0] is env:
+        evidence = f"{shown(env, name)} (default: false).{env.note}"
+    else:
+        evidence = f"{shown_each(saving, name)} (default: false)."
     return Finding(
         rule_id="PERF-002",
         area="performance",
         severity="warning",
         title="Execution progress is saved after every node",
-        evidence=f"{shown(env, 'EXECUTIONS_DATA_SAVE_ON_PROGRESS')} (default: false).",
+        evidence=evidence,
         impact=(
             "n8n writes the full execution data to the database after each node instead of "
             "once at the end, so every execution costs one database write per node and "
@@ -66,7 +87,7 @@ def saving_execution_progress(snapshot: Snapshot) -> Optional[Finding]:
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/handle-binary-data
 def binary_data_in_memory(snapshot: Snapshot) -> Optional[Finding]:
-    env = snapshot.env
+    env = effective_env(snapshot)
     if env is None:
         return None
     # Only an explicit `default` is flagged. When the variable is unset the effective
@@ -74,7 +95,14 @@ def binary_data_in_memory(snapshot: Snapshot) -> Optional[Finding]:
     # from n8n 2.0, database in queue mode), which the environment alone cannot tell.
     if str(env.get("N8N_DEFAULT_BINARY_DATA_MODE", "")).strip().lower() != "default":
         return None
-    if is_queue_mode(env):
+    if unknown(env, "EXECUTIONS_MODE"):
+        fix = (
+            "Set N8N_DEFAULT_BINARY_DATA_MODE=filesystem (on a persistent volume) if this "
+            "instance runs in regular mode. In queue mode use database, or s3 / azure if "
+            "your licence includes external storage; filesystem only works there when main, "
+            "workers and webhook processors mount the same shared volume."
+        )
+    elif is_queue_mode(env):
         fix = (
             "Set N8N_DEFAULT_BINARY_DATA_MODE=database, or s3 / azure if your licence "
             "includes external storage (preferred in queue mode, as database mode grows "
@@ -93,7 +121,7 @@ def binary_data_in_memory(snapshot: Snapshot) -> Optional[Finding]:
         title="Binary data is kept in memory",
         evidence=(
             f"{shown(env, 'N8N_DEFAULT_BINARY_DATA_MODE')}; {shown(env, 'EXECUTIONS_MODE')} "
-            "(default: regular)."
+            f"(default: regular).{env.note}"
         ),
         impact=(
             "Every file a workflow handles is held in the n8n process memory, so large or "
