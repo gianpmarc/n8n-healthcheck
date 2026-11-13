@@ -10,6 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+# Collectors replace the value of any secret-looking variable (password, key,
+# token, secret) with REDACTED before it enters a Snapshot, so a saved snapshot
+# is safe to share. Rules can still tell "set" from "unset".
+REDACTED = "<redacted>"
+
 AREAS = ("scalability", "reliability", "performance", "maintainability", "security")
 SEVERITIES = ("critical", "warning", "info")
 
