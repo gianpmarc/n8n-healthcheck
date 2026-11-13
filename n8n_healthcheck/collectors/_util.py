@@ -12,13 +12,22 @@ TIMEOUT = 5  # seconds, for every network call and subprocess
 # An environment variable whose name contains one of these (case-insensitive) is treated
 # as a secret: its value never enters a Snapshot. PASS also covers PASSWORD and PASSWD.
 SECRET_NAME_PARTS = ("PASS", "SECRET", "TOKEN", "KEY", "CREDENTIAL", "CERT")
+# Exact names that match a part above but hold a setting, not a secret.
+NOT_SECRET = frozenset(
+    {
+        "N8N_REDIS_KEY_PREFIX",
+        "N8N_METRICS_INCLUDE_CREDENTIAL_TYPE_LABEL",
+        "N8N_METRICS_INCLUDE_API_KEY_LABEL",
+    }
+)
 # A value that embeds credentials whatever its name, e.g. HTTP_PROXY=http://user:pw@proxy:3128
 URL_USERINFO = re.compile(r"://[^/\s]*@")
 
 
 def redact(name: str, value: str) -> str:
     """REDACTED for a non-empty secret value, so rules can still tell set from unset."""
-    if value and any(part in name.upper() for part in SECRET_NAME_PARTS):
+    name = name.upper()
+    if value and name not in NOT_SECRET and any(part in name for part in SECRET_NAME_PARTS):
         return REDACTED
     if URL_USERINFO.search(value):
         return REDACTED

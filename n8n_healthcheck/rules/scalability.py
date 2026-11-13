@@ -36,11 +36,12 @@ MIN_WORKER_REPLICAS = 2
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/control-concurrency
 def regular_mode_unbounded_concurrency(snapshot: Snapshot) -> Optional[Finding]:
     env = effective_env(snapshot)
-    if env is None or is_queue_mode(env) or unknown(env, "EXECUTIONS_MODE"):
+    if env is None:
         return None
     limit = env_int(env, "N8N_CONCURRENCY_PRODUCTION_LIMIT")
     if limit == 0:
-        # n8n's ConcurrencyControlService throws InvalidConcurrencyLimitError on 0.
+        # n8n's ConcurrencyControlService throws InvalidConcurrencyLimitError on 0,
+        # before it looks at the execution mode, so this holds in queue mode too.
         return Finding(
             rule_id="SCAL-001",
             area="scalability",
@@ -60,6 +61,8 @@ def regular_mode_unbounded_concurrency(snapshot: Snapshot) -> Optional[Finding]:
                 "to cap concurrent production executions, or to -1 to disable the limit."
             ),
         )
+    if is_queue_mode(env) or unknown(env, "EXECUTIONS_MODE"):
+        return None
     # A stock SQLite install keeps this documented default and is not worth flagging.
     if not looks_like_production(env):
         return None

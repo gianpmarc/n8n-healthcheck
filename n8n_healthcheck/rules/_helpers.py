@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Iterator, Optional
 
@@ -103,10 +104,12 @@ def env_int(env: dict, name: str) -> Optional[int]:
 
 
 def num(section: dict, key: str):
-    """Numeric field of a Snapshot section; None when absent or not a number."""
+    """Numeric field of a Snapshot section; None when absent or not a finite number."""
     try:
         value = float(section.get(key))
     except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
         return None
     return int(value) if value.is_integer() else value
 

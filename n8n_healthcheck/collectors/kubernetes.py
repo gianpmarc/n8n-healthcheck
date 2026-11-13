@@ -82,7 +82,10 @@ def _environment(container: dict, configmaps: dict | None) -> tuple[dict, bool]:
     env: dict = {}
     complete = True
     for source in container.get("envFrom") or []:
-        data = configmaps.get((source.get("configMapRef") or {}).get("name"))
+        ref = source.get("configMapRef") or {}
+        data = configmaps.get(ref.get("name"))
+        if data is None and fetched and ref.get("optional") is True:
+            continue  # Kubernetes skips a missing optional ConfigMap
         if data is None:  # a secretRef, or a ConfigMap that is missing or was not fetched
             complete = False
             # It may override any key read so far, so none of those values can be trusted.
