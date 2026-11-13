@@ -51,6 +51,18 @@ class RunTest(unittest.TestCase):
         self.assertIn("broken_rule", skipped.title)
         self.assertIn("KeyError", skipped.evidence)
 
+    def test_malformed_result_is_skipped_like_a_raising_rule(self):
+        bad_results = {
+            "severity": finding("fatal"),
+            "area": finding("warning", area="cost"),
+            "type": "not a finding",
+        }
+        for label, result in bad_results.items():
+            with self.subTest(bad=label):
+                findings = engine.run(Snapshot(), [rule_returning(result), rule_returning(finding("warning"))])
+                self.assertEqual([f.rule_id for f in findings], ["TEST-001", engine.SKIPPED_RULE_ID])
+                engine.score(findings)  # must not raise
+
 
 class ScoreTest(unittest.TestCase):
     def test_no_findings_scores_100_for_every_area(self):

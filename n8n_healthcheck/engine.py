@@ -15,14 +15,19 @@ SKIPPED_RULE_ID = "ENGINE-SKIPPED"
 def run(snapshot: Snapshot, rules: list[Rule]) -> list[Finding]:
     """Call every rule and return its findings, most severe first.
 
-    A rule that raises does not stop the run: it is recorded as an info
-    Finding with rule_id SKIPPED_RULE_ID so the reader knows the check did
-    not happen.
+    A rule that raises, or returns something that is not a valid Finding,
+    does not stop the run: it is recorded as an info Finding with rule_id
+    SKIPPED_RULE_ID so the reader knows the check did not happen.
     """
     findings = []
     for rule in rules:
         try:
             finding = rule(snapshot)
+            if finding is not None:
+                if not isinstance(finding, Finding):
+                    raise TypeError(f"returned {type(finding).__name__}, not a Finding")
+                if finding.severity not in SEVERITIES or finding.area not in AREAS:
+                    raise ValueError(f"unknown severity {finding.severity!r} or area {finding.area!r}")
         except Exception as exc:
             name = getattr(rule, "__name__", repr(rule))
             finding = Finding(

@@ -61,8 +61,33 @@ class RenderTest(unittest.TestCase):
             self.assertIn(SECTIONS[name], not_assessed)
         for name in ("env", "postgres"):
             self.assertNotIn(SECTIONS[name], not_assessed)
-        self.assertIn("Scores only reflect", section(markdown, "Scores"))
-        self.assertIn("4 of 6 data sources were not provided", section(markdown, "Summary"))
+        self.assertIn("only 2 of 6 data sources were assessed", section(markdown, "Summary"))
+
+    def test_one_section_snapshot_shows_no_clean_score(self):
+        markdown = render_markdown(Snapshot(env={}), [WARNING])
+        scores = section(markdown, "Scores")
+        for line in scores.splitlines():
+            if "/100" in line:
+                self.assertIn("(partial)", line)
+        self.assertIn("| Security | 85/100 (partial) | 1 |", scores)
+        self.assertIn("| Scalability | 100/100 (partial) | 0 |", scores)
+
+    def test_partial_run_without_findings_does_not_claim_all_clear(self):
+        summary = section(render_markdown(Snapshot(env={}), []), "Summary")
+        self.assertNotIn("Nothing needs attention", summary)
+        self.assertIn("not a clean bill of health", summary)
+        self.assertIn("only 1 of 6 data sources were assessed", summary)
+
+    def test_failed_sources_are_worded_as_requested_but_not_collected(self):
+        snapshot = Snapshot(health={}, env={})
+        not_assessed = section(render_markdown(snapshot, [], failed=("postgres",)), "Not assessed")
+        self.assertIn(f"- {SECTIONS['postgres']} — requested but could not be collected", not_assessed)
+        self.assertIn(f"- {SECTIONS['redis']}\n", not_assessed + "\n")
+
+    def test_newlines_in_finding_text_stay_inside_the_bullet(self):
+        multiline = dataclasses.replace(CRITICAL, evidence="line one\n\n## Fake heading\nline three")
+        findings = section(render_markdown(FULL, [multiline]), "Findings")
+        self.assertIn("- **Evidence:** line one ## Fake heading line three\n", findings)
 
     def test_empty_snapshot_shows_no_perfect_scores(self):
         scores = section(render_markdown(Snapshot(), []), "Scores")
@@ -72,7 +97,8 @@ class RenderTest(unittest.TestCase):
     def test_full_snapshot_has_nothing_unassessed(self):
         markdown = render_markdown(FULL, [])
         self.assertIn("Every data source was collected", section(markdown, "Not assessed"))
-        self.assertNotIn("Scores only reflect", markdown)
+        self.assertNotIn("partial", markdown)
+        self.assertIn("Nothing needs attention right now.", section(markdown, "Summary"))
         self.assertIn("No findings.", section(markdown, "Findings"))
 
     def test_sections_cover_every_snapshot_field(self):
@@ -96,7 +122,11 @@ class RenderTest(unittest.TestCase):
         self.assertIn("Rule broken_rule could not run (KeyError: 'version')", section(markdown, "Not assessed"))
         self.assertIn("No findings.", section(markdown, "Findings"))
         self.assertIn("0 informational notes", section(markdown, "Summary"))
-        self.assertIn("1 check failed to run", section(markdown, "Summary"))
+        summary = section(markdown, "Summary")
+        self.assertIn("This report is partial: 1 check failed to run", summary)
+        self.assertNotIn("data sources", summary)
+        self.assertNotIn("Nothing needs attention", summary)
+        self.assertIn("| Security | 100/100 (partial) | 0 |", section(markdown, "Scores"))
 
 
 if __name__ == "__main__":
