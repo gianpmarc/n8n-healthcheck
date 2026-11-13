@@ -3,12 +3,15 @@
 import re
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 from ..models import Target
 from ._util import TIMEOUT, warn
 
 
 def collect(target: Target) -> dict:
+    if "@" in urlsplit(target.url).netloc:
+        raise ValueError("credentials in the URL are not supported; pass the URL without user:password@")
     base = target.url.rstrip("/")
     fields = {
         "health": {
@@ -61,9 +64,13 @@ def parse_metrics(text: str) -> dict:
 
 
 def version_from_metrics(metrics: dict) -> str | None:
-    """n8n exposes its version as n8n_version_info{version="v1.2.3",...} 1."""
+    """n8n exposes its version as n8n_version_info{version="v1.2.3",...} 1.
+
+    The prefix is configurable (N8N_METRICS_PREFIX), so only the suffix is matched;
+    n8n_nodejs_version_info is the Node.js version and must not be picked up.
+    """
     for key in metrics:
-        match = re.search(r'version_info\{[^}]*\bversion="v?([^"]+)"', key)
+        match = re.search(r'(?<!nodejs_)version_info\{[^}]*\bversion="v?([^"]+)"', key)
         if match:
             return match.group(1)
     return None

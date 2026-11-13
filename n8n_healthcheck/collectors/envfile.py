@@ -1,6 +1,7 @@
 """n8n environment variables from a KEY=VALUE file (docker --env-file / .env style)."""
 
 from ..models import Target
+from ._util import redact
 
 
 def collect(target: Target) -> dict:
@@ -9,6 +10,7 @@ def collect(target: Target) -> dict:
 
 
 def parse_env(text: str) -> dict:
+    """KEY=VALUE lines -> dict; values of secret-looking names are redacted."""
     env = {}
     for line in text.splitlines():
         line = line.strip()
@@ -18,5 +20,6 @@ def parse_env(text: str) -> dict:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        env[key.strip()] = value
+        key = key.strip()
+        env[key] = redact(key, value)
     return env

@@ -3,7 +3,7 @@
 import json
 
 from ..models import Target
-from ._util import TIMEOUT, run
+from ._util import TIMEOUT, redact, run
 
 
 def collect(target: Target) -> dict:
@@ -34,10 +34,16 @@ def _container(container: dict) -> dict:
         "image": container.get("image", ""),
         # command + args, so `args: ["worker"]` and `command: ["n8n", "worker"]` look alike
         "command": container.get("command", []) + container.get("args", []),
-        # values set through a Secret/ConfigMap reference are not resolved
-        "env": {e["name"]: e.get("value", "<valueFrom>") for e in container.get("env", [])},
+        "env": {e["name"]: _env_value(e) for e in container.get("env", [])},
         "requests": resources.get("requests", {}),
         "limits": resources.get("limits", {}),
         "liveness_probe": "livenessProbe" in container,
         "readiness_probe": "readinessProbe" in container,
     }
+
+
+def _env_value(entry: dict) -> str:
+    """Literal value (redacted if the name looks secret); references are not resolved."""
+    if "valueFrom" in entry:
+        return "<valueFrom>"
+    return redact(entry["name"], entry.get("value", ""))

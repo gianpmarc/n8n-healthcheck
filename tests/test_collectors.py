@@ -9,11 +9,12 @@ import urllib.error
 from unittest import mock
 
 from n8n_healthcheck.collectors import collect, envfile, http, kubernetes, postgres, redis
-from n8n_healthcheck.models import Target
+from n8n_healthcheck.models import REDACTED, Target
 
 METRICS_TEXT = """\
 # HELP n8n_version_info n8n version info.
 # TYPE n8n_version_info gauge
+n8n_nodejs_version_info{version="v22.11.0",major="22",minor="11",patch="0"} 1
 n8n_version_info{version="v1.70.3",major="1",minor="70",patch="3"} 1
 n8n_scaling_mode_queue_jobs_waiting 12
 n8n_http_request_duration_seconds_bucket{le="+Inf",path="/a b"} 4 1700000000000
@@ -29,6 +30,9 @@ export N8N_METRICS = true
 QUOTED="a b"
 SINGLE='x=y'
 EMPTY=
+N8N_ENCRYPTION_KEY=abc123
+DB_POSTGRESDB_PASSWORD="pg secret"
+N8N_SMTP_PASS=
 not a variable
 """
 
@@ -54,6 +58,9 @@ DEPLOYMENTS = {
                                 "env": [
                                     {"name": "EXECUTIONS_MODE", "value": "queue"},
                                     {"name": "N8N_ENCRYPTION_KEY", "valueFrom": {"secretKeyRef": {}}},
+                                    {"name": "DB_POSTGRESDB_PASSWORD", "value": "hunter2"},
+                                    {"name": "N8N_RUNNERS_AUTH_TOKEN", "value": ""},
+                                    {"name": "N8N_PROXY_HOPS"},
                                 ],
                                 "resources": {
                                     "requests": {"cpu": "500m", "memory": "512Mi"},
@@ -114,14 +121,23 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(metrics["n8n_scaling_mode_queue_jobs_waiting"], 12.0)
         self.assertEqual(metrics["n8n_process_start_time_seconds"], 1.7e9)
         self.assertEqual(metrics['n8n_http_request_duration_seconds_bucket{le="+Inf",path="/a b"}'], 4.0)
-        self.assertEqual(len(metrics), 4)
+        self.assertEqual(len(metrics), 5)
         self.assertEqual(http.version_from_metrics(metrics), "1.70.3")
         self.assertIsNone(http.version_from_metrics({"up": 1.0}))
 
     def test_env_file(self):
         self.assertEqual(
             envfile.parse_env(ENV_TEXT),
-            {"EXECUTIONS_MODE": "queue", "N8N_METRICS": "true", "QUOTED": "a b", "SINGLE": "x=y", "EMPTY": ""},
+            {
+                "EXECUTIONS_MODE": "queue",
+                "N8N_METRICS": "true",
+                "QUOTED": "a b",
+                "SINGLE": "x=y",
+                "EMPTY": "",
+                "N8N_ENCRYPTION_KEY": REDACTED,
+                "DB_POSTGRESDB_PASSWORD": REDACTED,
+                "N8N_SMTP_PASS": "",  # unset stays distinguishable from set
+            },
         )
 
     def test_psql_row(self):
@@ -137,13 +153,18 @@ class ParserTests(unittest.TestCase):
                 "max_connections": 100,
             },
         )
-        self.assertIsNone(postgres.parse_row("16.4|0|8192||1|100\n")["oldest_execution_age_days"])
+        self.assertEqual(postgres.parse_row("16.4|0|8192||1|100\n")["oldest_execution_age_days"], 0.0)
 
     def test_dsn_password_is_split_out(self):
         uri, password = postgres.split_dsn("postgresql://n8n:s%40cret@db:5432/n8n?sslmode=require")
         self.assertEqual(uri, "postgresql://n8n@db:5432/n8n?sslmode=require")
         self.assertEqual(password, "s@cret")
         self.assertEqual(postgres.split_dsn("postgres://db/n8n"), ("postgres://db/n8n", ""))
+        self.assertEqual(postgres.split_dsn("postgresql:///n8n"), ("postgresql:///n8n", ""))
+        self.assertEqual(
+            postgres.split_dsn("postgresql://n8n@db/n8n?password=s%26cret&sslmode=require&options=-c%20x%3D1"),
+            ("postgresql://n8n@db/n8n?sslmode=require&options=-c%20x%3D1", "s&cret"),
+        )
         with self.assertRaises(ValueError):
             postgres.split_dsn("host=db password=secret")
 
@@ -174,7 +195,13 @@ class ParserTests(unittest.TestCase):
                 "name": "n8n",
                 "image": "n8nio/n8n:1.70.3",
                 "command": ["n8n", "worker"],
-                "env": {"EXECUTIONS_MODE": "queue", "N8N_ENCRYPTION_KEY": "<valueFrom>"},
+                "env": {
+                    "EXECUTIONS_MODE": "queue",
+                    "N8N_ENCRYPTION_KEY": "<valueFrom>",
+                    "DB_POSTGRESDB_PASSWORD": REDACTED,
+                    "N8N_RUNNERS_AUTH_TOKEN": "",
+                    "N8N_PROXY_HOPS": "",
+                },
                 "requests": {"cpu": "500m", "memory": "512Mi"},
                 "limits": {"memory": "1Gi"},
                 "liveness_probe": False,
@@ -226,6 +253,14 @@ class CollectTests(unittest.TestCase):
         self.assertIsNone(snapshot.metrics)
         self.assertIn("url: not collected", stderr)
 
+    def test_http_url_with_credentials_is_rejected_without_leaking(self):
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            snapshot, stderr = quiet_collect(Target(url="http://admin:hunter2@n8n.example.invalid"))
+        urlopen.assert_not_called()
+        self.assertIsNone(snapshot.health)
+        self.assertIn("url: not collected (credentials in the URL are not supported", stderr)
+        self.assertNotIn("hunter2", stderr)
+
     def test_env_file_read_and_missing(self):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "n8n.env")
@@ -245,6 +280,17 @@ class CollectTests(unittest.TestCase):
         args, kwargs = run.call_args
         self.assertEqual(args[0][0], "psql")
         self.assertNotIn("hunter2", " ".join(args[0]))
+        self.assertEqual(kwargs["env"]["PGPASSWORD"], "hunter2")
+        self.assertIn("default_transaction_read_only=on", kwargs["env"]["PGOPTIONS"])
+        self.assertNotIn("SET ", args[0][args[0].index("-c") + 1])
+
+    def test_postgres_query_string_password_only_in_environment(self):
+        done = subprocess.CompletedProcess([], 0, stdout="16.4|10|8192|1.5|3|100\n", stderr="")
+        with mock.patch("subprocess.run", return_value=done) as run:
+            quiet_collect(Target(postgres_dsn="postgresql://n8n@db/n8n?password=hunter2&sslmode=require"))
+        args, kwargs = run.call_args
+        self.assertNotIn("hunter2", " ".join(args[0]))
+        self.assertEqual(args[0][-1], "postgresql://n8n@db/n8n?sslmode=require")
         self.assertEqual(kwargs["env"]["PGPASSWORD"], "hunter2")
 
     def test_missing_binaries_do_not_abort_the_run(self):
@@ -283,7 +329,7 @@ class CollectTests(unittest.TestCase):
 
     def test_redis_conversation(self):
         replies = b"+OK\r\n+OK\r\n" + b"$%d\r\n%s\r\n" % (len(INFO_TEXT), INFO_TEXT.encode())
-        replies += b":7\r\n:2\r\n:31\r\n"
+        replies += b":1\r\n:7\r\n:2\r\n:31\r\n"
         sock = mock.MagicMock()
         stream = sock.makefile.return_value = FakeStream(replies)
         with mock.patch("socket.create_connection", return_value=sock) as connect:
@@ -304,9 +350,37 @@ class CollectTests(unittest.TestCase):
         )
         sent = stream.sent
         self.assertTrue(sent.startswith(b"*2\r\n$4\r\nAUTH\r\n$4\r\np@ss\r\n*2\r\n$6\r\nSELECT\r\n$1\r\n2\r\n"))
-        for key in (b"bull:jobs:wait", b"bull:jobs:active", b"bull:jobs:failed"):
+        for key in (b"bull:jobs:id", b"bull:jobs:wait", b"bull:jobs:active", b"bull:jobs:failed"):
             self.assertIn(key, sent)
         sock.close.assert_called_once()
+
+    def test_redis_missing_queue_keeps_info_but_not_counts(self):
+        replies = b"$%d\r\n%s\r\n:0\r\n" % (len(INFO_TEXT), INFO_TEXT.encode())
+        sock = mock.MagicMock()
+        stream = sock.makefile.return_value = FakeStream(replies)
+        with mock.patch("socket.create_connection", return_value=sock):
+            snapshot, stderr = quiet_collect(Target(redis_url="redis://cache"))
+        self.assertEqual(snapshot.redis["version"], "7.2.4")
+        self.assertEqual(snapshot.redis["maxmemory_policy"], "noeviction")
+        for field in ("waiting_jobs", "active_jobs", "failed_jobs"):
+            self.assertIsNone(snapshot.redis[field])
+        self.assertIn('redis queue: not collected ("bull:jobs" not found', stderr)
+        self.assertNotIn(b"LLEN", stream.sent)
+
+    def test_redis_uses_bull_prefix_from_env_file(self):
+        replies = b"$%d\r\n%s\r\n" % (len(INFO_TEXT), INFO_TEXT.encode()) + b":1\r\n:7\r\n:2\r\n:31\r\n"
+        sock = mock.MagicMock()
+        stream = sock.makefile.return_value = FakeStream(replies)
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "n8n.env")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("QUEUE_BULL_PREFIX=acme\n")
+            with mock.patch("socket.create_connection", return_value=sock):
+                snapshot, _ = quiet_collect(Target(env_file=path, redis_url="redis://cache"))
+        self.assertEqual(snapshot.redis["waiting_jobs"], 7)
+        for key in (b"acme:jobs:id", b"acme:jobs:wait", b"acme:jobs:active", b"acme:jobs:failed"):
+            self.assertIn(key, stream.sent)
+        self.assertNotIn(b"bull:", stream.sent)
 
     def test_redis_failures(self):
         target = Target(redis_url="redis://:hunter2@cache:6379")
@@ -324,11 +398,26 @@ class CollectTests(unittest.TestCase):
         self.assertNotIn("hunter2", stderr)
 
     def test_credentials_are_scrubbed_from_any_error(self):
-        boom = RuntimeError("cannot reach redis://user:hunter2@cache:6379")
-        with mock.patch("socket.create_connection", side_effect=boom):
-            _, stderr = quiet_collect(Target(redis_url="redis://user:hunter2@cache:6379"))
-        self.assertNotIn("hunter2", stderr)
-        self.assertIn("redis://***@cache", stderr)
+        # the password "p@ss/w:rd", percent-encoded as a URL requires
+        target = Target(redis_url="redis://user:p%40ss%2Fw%3Ard@cache:6379")
+        for message in (
+            "cannot reach redis://user:p%40ss%2Fw%3Ard@cache:6379",  # the URL as given
+            "auth failed with password 'p@ss/w:rd'",  # the decoded value on its own
+            "nonnumeric port: 'p@ss/w:rd@cache'",  # a fragment, as urllib reports it
+        ):
+            with mock.patch("socket.create_connection", side_effect=RuntimeError(message)):
+                _, stderr = quiet_collect(target)
+            self.assertNotIn("p@ss", stderr)
+            self.assertNotIn("p%40ss", stderr)
+            self.assertIn(REDACTED, stderr)
+
+    def test_unparseable_url_password_is_still_scrubbed(self):
+        # an unencoded "/" breaks URL parsing, so the literal secret is unknown
+        url = "redis://user:p@ss/word@cache:6379"
+        with mock.patch("socket.create_connection", side_effect=RuntimeError(f"cannot reach {url}")):
+            _, stderr = quiet_collect(Target(redis_url=url))
+        self.assertNotIn("ss/word", stderr)
+        self.assertIn(f"redis://{REDACTED}@cache:6379", stderr)
 
 
 if __name__ == "__main__":

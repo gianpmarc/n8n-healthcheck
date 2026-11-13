@@ -5,14 +5,16 @@ import ssl
 from urllib.parse import unquote, urlsplit
 
 from ..models import Target
-from ._util import TIMEOUT
+from ._util import TIMEOUT, warn
 
-# n8n queue mode uses Bull (v3) with prefix "bull" (QUEUE_BULL_PREFIX) and queue "jobs".
-# Bull keeps waiting and active jobs in lists and failed jobs in a sorted set.
-QUEUE = "bull:jobs"
+# n8n queue mode uses Bull with prefix "bull" (QUEUE_BULL_PREFIX) and queue "jobs".
+# Bull keeps waiting and active jobs in lists, failed jobs in a sorted set, and the
+# job id counter in "<queue>:id", which exists as soon as one job has been enqueued.
+DEFAULT_PREFIX = "bull"
 
 
-def collect(target: Target) -> dict:
+def collect(target: Target, prefix: str = DEFAULT_PREFIX) -> dict:
+    queue = f"{prefix}:jobs"
     url = urlsplit(target.redis_url)
     if url.scheme not in ("redis", "rediss"):
         raise ValueError("URL must start with redis:// or rediss://")
@@ -28,12 +30,20 @@ def collect(target: Target) -> dict:
         if database:
             command(stream, "SELECT", database)
         info = parse_info(command(stream, "INFO"))
+        # LLEN/ZCARD answer 0 for a missing key, so a wrong prefix would look like an idle queue.
+        if command(stream, "EXISTS", queue + ":id"):
+            waiting = command(stream, "LLEN", queue + ":wait")
+            active = command(stream, "LLEN", queue + ":active")
+            failed = command(stream, "ZCARD", queue + ":failed")
+        else:
+            waiting = active = failed = None
+            warn("redis queue", f'"{queue}" not found: no job enqueued yet, or another QUEUE_BULL_PREFIX')
         return {
             "redis": {
                 "version": info.get("redis_version", ""),
-                "waiting_jobs": command(stream, "LLEN", QUEUE + ":wait"),
-                "active_jobs": command(stream, "LLEN", QUEUE + ":active"),
-                "failed_jobs": command(stream, "ZCARD", QUEUE + ":failed"),
+                "waiting_jobs": waiting,
+                "active_jobs": active,
+                "failed_jobs": failed,
                 "used_memory_bytes": int(info.get("used_memory", 0)),
                 "maxmemory_bytes": int(info.get("maxmemory", 0)),  # 0 = no limit
                 "maxmemory_policy": info.get("maxmemory_policy", ""),

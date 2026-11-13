@@ -4,7 +4,7 @@ The standard library has no Postgres driver, so this shells out to `psql`.
 """
 
 import os
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
 from ..models import Target
 from ._util import TIMEOUT, run
@@ -15,9 +15,7 @@ from ._util import TIMEOUT, run
 # - "stoppedAt" is the indexed column n8n prunes on, so min() is cheap and meaningful.
 # - count(*) is exact for small tables; for large ones the planner estimate is used
 #   instead, because a full count is slow exactly when the table is the problem.
-QUERY = f"""
-SET statement_timeout = {TIMEOUT * 1000};
-SET default_transaction_read_only = on;
+QUERY = """
 SELECT current_setting('server_version'),
        CASE WHEN c.reltuples > 100000 THEN c.reltuples::bigint
             ELSE (SELECT count(*) FROM execution_entity) END,
@@ -32,7 +30,12 @@ FROM pg_class c WHERE c.oid = 'execution_entity'::regclass
 
 def collect(target: Target) -> dict:
     uri, password = split_dsn(target.postgres_dsn)
-    env = {**os.environ, "PGCONNECT_TIMEOUT": str(TIMEOUT)}
+    env = {
+        **os.environ,
+        "PGCONNECT_TIMEOUT": str(TIMEOUT),
+        # session settings: the server itself refuses writes and long-running statements
+        "PGOPTIONS": f"-c default_transaction_read_only=on -c statement_timeout={TIMEOUT * 1000}",
+    }
     if password:
         env["PGPASSWORD"] = password  # via environment, so it never shows in `ps`
     args = ["psql", "-X", "-q", "-A", "-t", "-F", "|", "-w", "-v", "ON_ERROR_STOP=1"]
@@ -41,13 +44,26 @@ def collect(target: Target) -> dict:
 
 
 def split_dsn(dsn: str) -> tuple:
-    """'postgresql://user:secret@host/db' -> ('postgresql://user@host/db', 'secret')."""
+    """'postgresql://user:secret@host/db' -> ('postgresql://user@host/db', 'secret').
+
+    The password may also be given as '?password=secret'; that form wins, as in libpq.
+    """
     parts = urlsplit(dsn)
     if parts.scheme not in ("postgres", "postgresql"):
         raise ValueError("DSN must be a postgresql:// URI")
     userinfo, at, host = parts.netloc.rpartition("@")
     user, _, password = userinfo.partition(":")
-    return urlunsplit(parts._replace(netloc=user + at + host)), unquote(password)
+    password = unquote(password)
+    params = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key == "password":
+            password = value
+        else:
+            params.append((key, value))
+    uri = f"{parts.scheme}://{user}{at}{host}{parts.path}"
+    if params:
+        uri += "?" + urlencode(params, quote_via=quote)  # libpq does not read "+" as a space
+    return uri, password
 
 
 def parse_row(output: str) -> dict:
@@ -57,7 +73,7 @@ def parse_row(output: str) -> dict:
         "version": version,
         "execution_count": int(count),
         "execution_table_bytes": int(size),
-        "oldest_execution_age_days": float(age) if age else None,  # empty table
+        "oldest_execution_age_days": float(age) if age else 0.0,  # empty table
         "connections": int(connections),
         "max_connections": int(max_connections),
     }

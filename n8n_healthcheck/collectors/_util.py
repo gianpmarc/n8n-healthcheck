@@ -3,13 +3,45 @@
 import re
 import subprocess
 import sys
+from urllib.parse import parse_qsl, unquote, urlsplit
+
+from ..models import REDACTED
 
 TIMEOUT = 5  # seconds, for every network call and subprocess
 
+# An environment variable whose name contains one of these (case-insensitive) is treated
+# as a secret: its value never enters a Snapshot. PASS also covers PASSWORD and PASSWD.
+SECRET_NAME_PARTS = ("PASS", "SECRET", "TOKEN", "KEY", "CREDENTIAL")
 
-def warn(source: str, error: object) -> None:
-    """One stderr line for a source that could not be collected. Never prints URL credentials."""
-    message = re.sub(r"://[^@/\s]*@", "://***@", str(error))
+
+def redact(name: str, value: str) -> str:
+    """REDACTED for a non-empty secret value, so rules can still tell set from unset."""
+    if value and any(part in name.upper() for part in SECRET_NAME_PARTS):
+        return REDACTED
+    return value
+
+
+def url_secrets(*urls: str | None) -> set:
+    """The passwords embedded in the given URLs, both as written and percent-decoded."""
+    secrets = set()
+    for url in urls:
+        try:
+            parts = urlsplit(url or "")
+        except ValueError:
+            continue
+        if parts.password:
+            secrets |= {parts.password, unquote(parts.password)}
+        secrets |= {value for key, value in parse_qsl(parts.query) if key == "password"}
+    return secrets
+
+
+def warn(source: str, error: object, secrets: set = frozenset()) -> None:
+    """One stderr line for a source that could not be collected. Never prints credentials."""
+    message = str(error)
+    for secret in sorted(secrets, key=len, reverse=True):
+        message = message.replace(secret, REDACTED)
+    # Safety net for a URL whose password could not be parsed out (e.g. an unencoded "/").
+    message = re.sub(r"://\S*@", f"://{REDACTED}@", message)
     print(f"{source}: not collected ({message})", file=sys.stderr)
 
 
