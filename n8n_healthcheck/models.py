@@ -46,6 +46,7 @@ class Snapshot:
     postgres: Optional[dict] = None
     # {"version": str, "waiting_jobs": int, "active_jobs": int, "failed_jobs": int,
     #  "used_memory_bytes": int, "maxmemory_bytes": int, "maxmemory_policy": str}
+    # The three job counts are None when the queue key was not found.
     redis: Optional[dict] = None
     # {"deployments": [{"name": str, "replicas": int, "ready_replicas": int,
     #   "containers": [{"name": str, "image": str, "command": [str], "env": {str: str},
