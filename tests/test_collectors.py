@@ -701,7 +701,21 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(probe(acme, env_file_text="")[0], "bull:jobs:id")
         # n8n containers that disagree, or a value that cannot be read: the queue is not probed.
         from_secret = prefix({"valueFrom": {"secretKeyRef": {}}})
-        for containers in ((acme, prefix({"value": "other"})), (acme, unset), (from_secret,), (acme, from_secret)):
+        # So is a prefix set only on a container not recognised as n8n (a custom image name),
+        custom = prefix({"value": "acme"}, image="registry.acme.io/automation/engine:2.1")
+        # and an n8n container without the variable whose environment is partly unreadable.
+        secret_env = {"envFrom": [{"secretRef": {"name": "n8n-secrets"}}]}
+        self.assertEqual(probe({**acme, **secret_env})[0], "acme:jobs:id")  # `env` wins over envFrom
+        for containers in (
+            (acme, prefix({"value": "other"})),
+            (acme, unset),
+            (from_secret,),
+            (acme, from_secret),
+            (custom,),
+            (custom, {"image": "redis:7"}),
+            (secret_env,),
+            (acme, secret_env),
+        ):
             with self.subTest(containers=containers):
                 key, section, stderr = probe(*containers)
                 self.assertIsNone(key)
