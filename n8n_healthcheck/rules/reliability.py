@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import Finding, Snapshot
-from ._helpers import env_flag, is_queue_mode, n8n_containers, shown
+from ._helpers import env_flag, is_queue_mode, n8n_containers, num, shown
 
 # Redis starts evicting (or, with noeviction, rejecting writes) at maxmemory. 80% leaves
 # headroom for a burst: each large webhook response in flight can hold about
@@ -39,9 +39,9 @@ def sqlite_in_queue_mode(snapshot: Snapshot) -> Optional[Finding]:
         title="Queue mode on SQLite",
         evidence=f"{shown(env, 'EXECUTIONS_MODE')}; {shown(env, 'DB_TYPE')} (default: sqlite).",
         impact=(
-            "n8n does not support SQLite in queue mode: main and workers each need the same "
-            "database, and a local SQLite file cannot be shared between processes on "
-            "different hosts, so workers cannot load workflows or save results."
+            "SQLite in queue mode is unsupported by n8n: main and workers must all use one "
+            "database, which a local SQLite file cannot provide (for example, workers on "
+            "another host cannot open it at all), so executions fail or are lost."
         ),
         recommendation=(
             "Move to PostgreSQL: set DB_TYPE=postgresdb with DB_POSTGRESDB_HOST, "
@@ -57,7 +57,7 @@ def redis_eviction_policy(snapshot: Snapshot) -> Optional[Finding]:
     if redis is None:
         return None
     policy = redis.get("maxmemory_policy")
-    maxmemory = redis.get("maxmemory_bytes")
+    maxmemory = num(redis, "maxmemory_bytes")
     # Redis only evicts when maxmemory is set; 0 means no limit, so the policy is inert.
     if policy is None or policy == "noeviction" or not maxmemory:
         return None
@@ -85,8 +85,8 @@ def redis_memory_near_limit(snapshot: Snapshot) -> Optional[Finding]:
     redis = snapshot.redis
     if redis is None:
         return None
-    used = redis.get("used_memory_bytes")
-    maxmemory = redis.get("maxmemory_bytes")
+    used = num(redis, "used_memory_bytes")
+    maxmemory = num(redis, "maxmemory_bytes")
     if used is None or not maxmemory:
         return None
     usage = used / maxmemory
@@ -122,8 +122,8 @@ def queue_backlog(snapshot: Snapshot) -> Optional[Finding]:
     redis = snapshot.redis
     if redis is None:
         return None
-    waiting = redis.get("waiting_jobs")
-    active = redis.get("active_jobs")
+    waiting = num(redis, "waiting_jobs")
+    active = num(redis, "active_jobs")
     if waiting is None or active is None:
         return None
     evidence = f"{waiting} jobs waiting and {active} active in the Bull queue."
@@ -159,8 +159,10 @@ def queue_backlog(snapshot: Snapshot) -> Optional[Finding]:
             recommendation=(
                 "Add worker replicas, or raise worker concurrency (--concurrency flag or "
                 "N8N_CONCURRENCY_PRODUCTION_LIMIT) if workers have spare CPU and memory. "
-                "Enable N8N_METRICS_INCLUDE_QUEUE_METRICS=true to track "
-                "n8n_scaling_mode_queue_jobs_waiting over time and autoscale on it."
+                "To track the backlog over time, set N8N_METRICS_INCLUDE_QUEUE_METRICS=true "
+                "(n8n_scaling_mode_queue_jobs_waiting); n8n does not support that setting in "
+                "a multi-main setup, where the Bull queue length in Redis is the signal to "
+                "watch and autoscale on."
             ),
         )
     return None
@@ -292,8 +294,8 @@ def missing_resources(snapshot: Snapshot) -> Optional[Finding]:
         recommendation=(
             "Set resources.requests.cpu, resources.requests.memory and "
             "resources.limits.memory on every n8n container (the official Helm chart "
-            "defaults to requests of 200m CPU / 512Mi and a 1Gi memory limit), then size "
-            "them from observed usage."
+            "defaults main and worker pods to requests of 200m CPU / 512Mi and a 1Gi "
+            "memory limit), then size them from observed usage."
         ),
     )
 

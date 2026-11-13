@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import Finding, Snapshot
-from ._helpers import env_flag, shown
+from ._helpers import env_flag, looks_like_production, shown
 
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/basic-configuration/use-environment-variables/security
@@ -41,7 +41,9 @@ def task_runners_not_external(snapshot: Snapshot) -> Optional[Finding]:
     return Finding(
         rule_id="SEC-002",
         area="security",
-        severity="warning",
+        # Internal mode is the default, so a stock trial install (regular mode on SQLite)
+        # gets an info; a setup that looks like production gets the warning.
+        severity="warning" if looks_like_production(env) else "info",
         title="Code node runs without external task runners",
         evidence=(
             f"{shown(env, 'N8N_RUNNERS_MODE')} (default: internal); "
@@ -57,7 +59,7 @@ def task_runners_not_external(snapshot: Snapshot) -> Optional[Finding]:
             "Set N8N_RUNNERS_MODE=external and N8N_RUNNERS_AUTH_TOKEN, and run the "
             "n8nio/runners image (same version as n8n) as a sidecar next to every worker, "
             "and next to main unless OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true. On n8n 1.x "
-            "also set N8N_RUNNERS_ENABLED=true. Internal mode is deprecated."
+            "also set N8N_RUNNERS_ENABLED=true. Internal mode is deprecated from n8n 3.0."
         ),
     )
 

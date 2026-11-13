@@ -5,7 +5,16 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import Finding, Snapshot
-from ._helpers import DOCS, env_flag, env_int, is_queue_mode, n8n_containers, shown
+from ._helpers import (
+    concurrency_flag,
+    env_flag,
+    env_int,
+    is_queue_mode,
+    looks_like_production,
+    n8n_containers,
+    num,
+    shown,
+)
 
 # n8n's own recommendation: "setting concurrency to 5 or higher for your worker
 # instances", because many low-concurrency workers exhaust the database connection pool.
@@ -26,17 +35,38 @@ def regular_mode_unbounded_concurrency(snapshot: Snapshot) -> Optional[Finding]:
     env = snapshot.env
     if env is None or is_queue_mode(env):
         return None
-    # Postgres is the signal that this is a production setup rather than a default
-    # trial install; a stock SQLite instance is not worth flagging.
-    if str(env.get("DB_TYPE", "sqlite")).strip().lower() != "postgresdb":
-        return None
     limit = env_int(env, "N8N_CONCURRENCY_PRODUCTION_LIMIT")
+    if limit == 0:
+        # n8n's ConcurrencyControlService throws InvalidConcurrencyLimitError on 0.
+        return Finding(
+            rule_id="SCAL-001",
+            area="scalability",
+            severity="warning",
+            title="Invalid production concurrency limit",
+            evidence=(
+                "N8N_CONCURRENCY_PRODUCTION_LIMIT=0, which n8n rejects with "
+                "InvalidConcurrencyLimitError (valid: -1 to disable, or a positive number)."
+            ),
+            impact=(
+                "n8n raises an error when it sets up concurrency control with a limit of 0, "
+                "so the setting does not limit anything and can stop the instance starting."
+            ),
+            recommendation=(
+                "Set N8N_CONCURRENCY_PRODUCTION_LIMIT to a positive number (for example 20) "
+                "to cap concurrent production executions, or to -1 to disable the limit."
+            ),
+        )
+    # A stock SQLite install keeps this documented default and is not worth flagging.
+    if not looks_like_production(env):
+        return None
     if limit is not None and limit > 0:
         return None
     return Finding(
         rule_id="SCAL-001",
         area="scalability",
-        severity="warning",
+        # info, not warning: no limit is the documented default, and whether it hurts
+        # depends on load the environment cannot show.
+        severity="info",
         title="Regular mode with no limit on concurrent production executions",
         evidence=(
             f"{shown(env, 'EXECUTIONS_MODE')} (default: regular); {shown(env, 'DB_TYPE')}; "
@@ -62,7 +92,7 @@ def single_worker(snapshot: Snapshot) -> Optional[Finding]:
     workers = {}
     for deployment, _container, role in n8n_containers(snapshot.kubernetes):
         if role == "worker":
-            workers[deployment["name"]] = deployment.get("replicas", 0)
+            workers[deployment["name"]] = deployment.get("replicas") or 0
     total = sum(workers.values())
     # Zero is not flagged here: workers may be scaled to zero by an autoscaler or run
     # outside this namespace. A queue that nobody consumes is caught by REL-004.
@@ -120,11 +150,33 @@ def manual_executions_on_main(snapshot: Snapshot) -> Optional[Finding]:
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/enable-queue-mode#concurrency-and-scaling-recommendations
 def low_worker_concurrency(snapshot: Snapshot) -> Optional[Finding]:
     env = snapshot.env
-    if env is None or not is_queue_mode(env):
+    if env is None and snapshot.kubernetes is None:
         return None
-    # In queue mode a value other than -1 overrides the worker --concurrency flag.
-    limit = env_int(env, "N8N_CONCURRENCY_PRODUCTION_LIMIT")
-    if limit is None or limit < 1 or limit >= MIN_WORKER_CONCURRENCY:
+    # In queue mode N8N_CONCURRENCY_PRODUCTION_LIMIT, when set to anything but -1,
+    # overrides the worker --concurrency flag; otherwise the flag (default 10) applies.
+    limit = env_int(env, "N8N_CONCURRENCY_PRODUCTION_LIMIT") if env and is_queue_mode(env) else None
+    observed = []
+    if limit is not None and limit >= 1:
+        if limit < MIN_WORKER_CONCURRENCY:
+            observed.append(
+                f"{shown(env, 'N8N_CONCURRENCY_PRODUCTION_LIMIT')} "
+                f"({shown(env, 'EXECUTIONS_MODE')})"
+            )
+    elif snapshot.kubernetes is not None:
+        for deployment, container, role in n8n_containers(snapshot.kubernetes):
+            if role != "worker":
+                continue
+            own_limit = env_int(container.get("env") or {}, "N8N_CONCURRENCY_PRODUCTION_LIMIT")
+            flag = concurrency_flag(container)
+            if own_limit is not None and own_limit >= 1:
+                value, source = own_limit, f"N8N_CONCURRENCY_PRODUCTION_LIMIT={own_limit}"
+            elif flag is not None:
+                value, source = flag, f"--concurrency={flag}"
+            else:
+                continue
+            if 1 <= value < MIN_WORKER_CONCURRENCY:
+                observed.append(f"{deployment['name']}/{container['name']}: {source}")
+    if not observed:
         return None
     return Finding(
         rule_id="SCAL-004",
@@ -132,8 +184,8 @@ def low_worker_concurrency(snapshot: Snapshot) -> Optional[Finding]:
         severity="warning",
         title="Worker concurrency below n8n's recommended minimum",
         evidence=(
-            f"{shown(env, 'EXECUTIONS_MODE')}; {shown(env, 'N8N_CONCURRENCY_PRODUCTION_LIMIT')} "
-            f"(recommended: {MIN_WORKER_CONCURRENCY} or higher; worker default: 10)."
+            "; ".join(observed)
+            + f" (recommended: {MIN_WORKER_CONCURRENCY} or higher; worker default: 10)."
         ),
         impact=(
             "Reaching a given throughput with low-concurrency workers takes many more worker "
@@ -141,9 +193,10 @@ def low_worker_concurrency(snapshot: Snapshot) -> Optional[Finding]:
             "Postgres connection pool and cause delays and failed executions."
         ),
         recommendation=(
-            f"Set N8N_CONCURRENCY_PRODUCTION_LIMIT to {MIN_WORKER_CONCURRENCY} or higher "
-            "(or remove it and use the worker's --concurrency flag, default 10), and run "
-            "fewer, larger workers."
+            f"Raise worker concurrency to {MIN_WORKER_CONCURRENCY} or higher and run fewer, "
+            "larger workers. It is set by the worker's --concurrency flag (Helm chart: "
+            "queueMode.workerConcurrency; default 10), unless "
+            "N8N_CONCURRENCY_PRODUCTION_LIMIT is set, which overrides the flag."
         ),
     )
 
@@ -153,8 +206,8 @@ def postgres_connections_near_limit(snapshot: Snapshot) -> Optional[Finding]:
     postgres = snapshot.postgres
     if postgres is None:
         return None
-    used = postgres.get("connections")
-    maximum = postgres.get("max_connections")
+    used = num(postgres, "connections")
+    maximum = num(postgres, "max_connections")
     if used is None or not maximum:
         return None
     usage = used / maximum

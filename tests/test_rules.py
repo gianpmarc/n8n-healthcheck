@@ -9,7 +9,7 @@ from n8n_healthcheck.rules import performance as perf
 from n8n_healthcheck.rules import reliability as rel
 from n8n_healthcheck.rules import scalability as scal
 from n8n_healthcheck.rules import security as sec
-from n8n_healthcheck.rules._helpers import image_tag, n8n_role
+from n8n_healthcheck.rules._helpers import concurrency_flag, image_tag, image_version, n8n_role
 
 QUEUE = {"EXECUTIONS_MODE": "queue", "DB_TYPE": "postgresdb"}
 
@@ -235,7 +235,7 @@ class Evidence(unittest.TestCase):
     def test_quotes_observed_values(self):
         expectations = {
             "SCAL-002": "n8n-worker (replicas: 1)",
-            "SCAL-004": "N8N_CONCURRENCY_PRODUCTION_LIMIT=2",
+            "SCAL-004": "N8N_CONCURRENCY_PRODUCTION_LIMIT=2 (EXECUTIONS_MODE=queue)",
             "SCAL-005": "92 of 100",
             "REL-001": "DB_TYPE is not set",
             "REL-002": "allkeys-lru",
@@ -377,6 +377,192 @@ class EdgeCases(unittest.TestCase):
         self.assertIsNotNone(sec.task_runners_not_external(Snapshot(env=env)))
 
 
+class ReviewFixes(unittest.TestCase):
+    def test_thresholds_fire_at_the_boundary_and_not_below(self):
+        def pg(used):
+            return Snapshot(postgres={"connections": used, "max_connections": 100})
+
+        def mem(used):
+            return Snapshot(redis={"used_memory_bytes": used, "maxmemory_bytes": 100})
+
+        def jobs(waiting, active):
+            return Snapshot(redis={"waiting_jobs": waiting, "active_jobs": active})
+
+        self.assertIsNone(scal.postgres_connections_near_limit(pg(79)))
+        self.assertIsNotNone(scal.postgres_connections_near_limit(pg(80)))
+        self.assertIsNone(rel.redis_memory_near_limit(mem(79)))
+        self.assertIsNotNone(rel.redis_memory_near_limit(mem(80)))
+        self.assertIsNone(rel.queue_backlog(jobs(9, 0)))
+        self.assertEqual(rel.queue_backlog(jobs(10, 0)).severity, "critical")
+        self.assertIsNone(rel.queue_backlog(jobs(99, 5)))
+        self.assertEqual(rel.queue_backlog(jobs(100, 5)).severity, "warning")
+        self.assertIsNotNone(scal.low_worker_concurrency(
+            Snapshot(env={**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "4"})))
+        self.assertIsNone(scal.low_worker_concurrency(
+            Snapshot(env={**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "5"})))
+
+    def test_digest_next_to_tag_is_not_version_skew(self):
+        digest = "n8nio/n8n@sha256:" + "a" * 64
+        snapshot = Snapshot(
+            kubernetes=kube(
+                ("n8n-main", 1, container(image=digest)),
+                ("n8n-worker", 2, container(image="n8nio/n8n:2.40.1", command=["worker"])),
+            )
+        )
+        self.assertIsNone(maint.version_skew(snapshot))
+
+    def test_build_suffix_is_the_same_version(self):
+        snapshot = Snapshot(
+            kubernetes=kube(
+                ("n8n-main", 1, container(image="n8nio/n8n:2.40.1-build7")),
+                ("n8n-worker", 2, container(image="n8nio/n8n:2.40.1", command=["worker"])),
+            )
+        )
+        self.assertIsNone(maint.version_skew(snapshot))
+
+    def test_custom_tag_names_no_version(self):
+        snapshot = Snapshot(
+            kubernetes=kube(
+                ("n8n-main", 1, container(image="acme/n8n:prod")),
+                ("n8n-worker", 2, container(image="n8nio/n8n:2.40.1", command=["worker"])),
+            )
+        )
+        self.assertIsNone(maint.version_skew(snapshot))
+
+    def test_version_skew_reports_the_leading_version(self):
+        snapshot = Snapshot(
+            kubernetes=kube(
+                ("n8n-main", 1, container(image="n8nio/n8n:2.40.1-build7")),
+                ("n8n-worker", 2, container(image="n8nio/n8n:2.38.0", command=["worker"])),
+            )
+        )
+        evidence = maint.version_skew(snapshot).evidence
+        self.assertIn("2.40.1: n8n-main (main)", evidence)
+        self.assertNotIn("build7", evidence)
+
+    def test_queue_metrics_advice_is_left_out_on_multi_main(self):
+        single = maint.metrics_disabled(Snapshot(env=dict(QUEUE)))
+        multi = maint.metrics_disabled(
+            Snapshot(env={**QUEUE, "N8N_MULTI_MAIN_SETUP_ENABLED": "true"})
+        )
+        regular = maint.metrics_disabled(Snapshot(env={}))
+        self.assertIn("N8N_METRICS_INCLUDE_QUEUE_METRICS", single.recommendation)
+        self.assertIn("multi-main", single.recommendation)
+        self.assertNotIn("N8N_METRICS_INCLUDE_QUEUE_METRICS", multi.recommendation)
+        self.assertNotIn("N8N_METRICS_INCLUDE_QUEUE_METRICS", regular.recommendation)
+
+    def test_backlog_advice_carries_the_multi_main_caveat(self):
+        finding = rel.queue_backlog(Snapshot(redis={"waiting_jobs": 500, "active_jobs": 20}))
+        self.assertIn("multi-main", finding.recommendation)
+
+    def test_task_runner_severity_follows_how_production_like_the_install_is(self):
+        stock = sec.task_runners_not_external(Snapshot(env={}))
+        postgres = sec.task_runners_not_external(Snapshot(env={"DB_TYPE": "postgresdb"}))
+        queue = sec.task_runners_not_external(Snapshot(env={"EXECUTIONS_MODE": "queue"}))
+        self.assertEqual(stock.severity, "info")
+        self.assertEqual(postgres.severity, "warning")
+        self.assertEqual(queue.severity, "warning")
+        self.assertIn("deprecated from n8n 3.0", stock.recommendation)
+
+    def test_unbounded_regular_mode_is_info(self):
+        finding = scal.regular_mode_unbounded_concurrency(Snapshot(env={"DB_TYPE": "postgresdb"}))
+        self.assertEqual(finding.severity, "info")
+
+    def test_concurrency_limit_of_zero_is_reported_as_invalid(self):
+        for env in ({"N8N_CONCURRENCY_PRODUCTION_LIMIT": "0"},
+                    {"DB_TYPE": "postgresdb", "N8N_CONCURRENCY_PRODUCTION_LIMIT": "0"}):
+            with self.subTest(env=env):
+                finding = scal.regular_mode_unbounded_concurrency(Snapshot(env=env))
+                self.assertEqual(finding.severity, "warning")
+                self.assertIn("N8N_CONCURRENCY_PRODUCTION_LIMIT=0", finding.evidence)
+                self.assertIn("InvalidConcurrencyLimitError", finding.evidence)
+                self.assertNotIn("no limit", finding.evidence)
+
+    def test_worker_concurrency_flag_is_read_from_the_command(self):
+        def workers(*command, env=None):
+            return Snapshot(
+                kubernetes=kube(("n8n-worker", 3, container(command=list(command), env=env or {})))
+            )
+
+        low = scal.low_worker_concurrency(workers("worker", "--concurrency=2"))
+        self.assertIn("n8n-worker/n8n: --concurrency=2", low.evidence)
+        self.assertIsNotNone(scal.low_worker_concurrency(workers("worker", "--concurrency", "3")))
+        self.assertIsNotNone(
+            scal.low_worker_concurrency(workers("/bin/sh", "-c", "n8n worker --concurrency=1"))
+        )
+        self.assertIsNone(scal.low_worker_concurrency(workers("worker", "--concurrency=5")))
+        self.assertIsNone(scal.low_worker_concurrency(workers("worker")))
+        # a main container's flags are not worker concurrency
+        self.assertIsNone(scal.low_worker_concurrency(workers("start", "--concurrency=2")))
+
+    def test_env_limit_overrides_the_concurrency_flag(self):
+        flag_low = kube(("n8n-worker", 3, container(command=["worker", "--concurrency=2"])))
+        overridden = Snapshot(
+            env={**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "10"}, kubernetes=flag_low
+        )
+        self.assertIsNone(scal.low_worker_concurrency(overridden))
+        own_env = kube(
+            (
+                "n8n-worker",
+                3,
+                container(
+                    command=["worker", "--concurrency=20"],
+                    env={"N8N_CONCURRENCY_PRODUCTION_LIMIT": "3"},
+                ),
+            )
+        )
+        finding = scal.low_worker_concurrency(Snapshot(kubernetes=own_env))
+        self.assertIn("N8N_CONCURRENCY_PRODUCTION_LIMIT=3", finding.evidence)
+        disabled = Snapshot(
+            env={**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "-1"}, kubernetes=flag_low
+        )
+        self.assertIsNotNone(scal.low_worker_concurrency(disabled))
+
+    def test_shell_form_command_is_a_worker(self):
+        shell = container(command=["/bin/sh", "-c", "n8n worker"])
+        self.assertEqual(n8n_role(shell), "worker")
+        self.assertIsNotNone(scal.single_worker(Snapshot(kubernetes=kube(("w", 1, shell)))))
+
+    def test_sqlite_queue_mode_is_described_as_unsupported(self):
+        finding = rel.sqlite_in_queue_mode(Snapshot(env={"EXECUTIONS_MODE": "queue"}))
+        self.assertIn("unsupported", finding.impact)
+
+    def test_redacted_secrets_do_not_change_any_result(self):
+        secrets = {
+            "N8N_ENCRYPTION_KEY": "<redacted>",
+            "DB_POSTGRESDB_PASSWORD": "<redacted>",
+            "QUEUE_BULL_REDIS_PASSWORD": "<redacted>",
+            "N8N_RUNNERS_AUTH_TOKEN": "<redacted>",
+        }
+        for base in ({}, dict(QUEUE), {"DB_TYPE": "postgresdb"}):
+            for rule in ALL_RULES:
+                with self.subTest(rule=rule.__name__, base=base):
+                    plain = rule(Snapshot(env=dict(base)))
+                    redacted = rule(Snapshot(env={**base, **secrets}))
+                    self.assertEqual(plain, redacted)
+
+    def test_values_outside_the_contract_are_tolerated_by_the_shared_helpers(self):
+        self.assertIsNotNone(
+            scal.postgres_connections_near_limit(
+                Snapshot(postgres={"connections": "92", "max_connections": "100"})
+            )
+        )
+        self.assertIsNone(
+            rel.queue_backlog(Snapshot(redis={"waiting_jobs": "n/a", "active_jobs": None}))
+        )
+        odd = {
+            "deployments": [
+                {"name": "a", "replicas": None, "containers": None},
+                {"name": "b", "replicas": None, "containers": [{"name": "c", "image": None}]},
+                {"name": "w", "replicas": None, "containers": [container(command=["worker"])]},
+            ]
+        }
+        for rule in (scal.single_worker, maint.mutable_image_tag, maint.version_skew):
+            with self.subTest(rule=rule.__name__):
+                self.assertIsNone(rule(Snapshot(kubernetes=odd)))
+        self.assertIsNone(scal.single_worker(Snapshot(kubernetes={"deployments": None})))
+
+
 class Helpers(unittest.TestCase):
     def test_image_tag(self):
         self.assertEqual(image_tag("n8nio/n8n:2.40.1"), "2.40.1")
@@ -391,6 +577,20 @@ class Helpers(unittest.TestCase):
         self.assertEqual(n8n_role(container(image="ghcr.io/acme/custom-n8n:1.2.3")), "main")
         self.assertIsNone(n8n_role(container(image="n8nio/runners:2.40.1")))
         self.assertIsNone(n8n_role(container(image="redis:7")))
+
+    def test_image_version(self):
+        self.assertEqual(image_version("n8nio/n8n:2.40.1"), "2.40.1")
+        self.assertEqual(image_version("n8nio/n8n:v2.40.1-build7"), "2.40.1")
+        self.assertIsNone(image_version("n8nio/n8n:latest"))
+        self.assertIsNone(image_version("n8nio/n8n"))
+        self.assertIsNone(image_version("n8nio/n8n@sha256:abc"))
+        self.assertIsNone(image_version(None))
+
+    def test_concurrency_flag(self):
+        self.assertEqual(concurrency_flag(container(command=["worker", "--concurrency=7"])), 7)
+        self.assertEqual(concurrency_flag(container(command=["worker", "--concurrency", "7"])), 7)
+        self.assertIsNone(concurrency_flag(container(command=["worker"])))
+        self.assertIsNone(concurrency_flag(container(command=["worker", "--concurrency=x"])))
 
 
 if __name__ == "__main__":
