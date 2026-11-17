@@ -64,12 +64,69 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     return args
 
 
+def failed_sections(target: Target, snapshot: Snapshot) -> tuple[list[str], bool]:
+    """Sections that were requested but not collected, and whether that is all of them."""
+    # Collectors do not raise for an unreachable source: they leave its
+    # section None. Tell that apart from a source nobody asked for.
+    requested = [section for source, section in SOURCE_SECTION.items() if getattr(target, source)]
+    failed = [section for section in requested if getattr(snapshot, section) is None]
+    nothing_collected = failed == requested
+    # --url also asks for metrics; only a disabled endpoint (404) excuses it.
+    if target.url and snapshot.metrics is None and not (snapshot.health or {}).get("metrics_disabled"):
+        failed.append("metrics")
+    return failed, nothing_collected
+
+
+def result_code(findings: list, rule_count: int) -> int:
+    """Exit code for a check that produced a report."""
+    # Every rule crashed: the report is written, but it assessed nothing.
+    skipped = sum(f.rule_id == engine.SKIPPED_RULE_ID for f in findings)
+    if skipped and skipped == rule_count:
+        return EXIT_ERROR
+    severities = {f.severity for f in findings}
+    if "critical" in severities:
+        return 2
+    if "warning" in severities:
+        return 1
+    return 0
+
+
+def _serve(argv: list[str]) -> int:
+    parser = _Parser(
+        prog="n8n-healthcheck serve",
+        description="Local web interface for the health check. The server has no "
+        "authentication: keep it on a loopback address unless the network is trusted.",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="address to listen on (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8080, help="port to listen on (default: 8080)")
+    parser.add_argument("--no-browser", action="store_true", help="do not open the page in the default browser")
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="NAME[:PORT]",
+        help="extra Host header value to accept besides localhost, 127.0.0.1 and [::1] "
+        "(repeatable; without a port, the serving port is assumed)",
+    )
+    args = parser.parse_args(argv)
+    from .web import server
+
+    try:
+        return server.serve(args.host, args.port, not args.no_browser, args.allow_host)
+    except OSError as exc:
+        return _error(f"cannot listen on {args.host}:{args.port}: {exc.strerror or exc}")
+
+
 def _error(message: str) -> int:
     print(f"error: {message}", file=sys.stderr)
     return EXIT_ERROR
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "serve":
+        return _serve(argv[1:])
     args = _parse_args(argv)
     failed: list[str] = []  # sections requested on the command line but not collected
 
@@ -101,15 +158,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     message = message.replace(secret, "***")
             return _error(f"collection failed: {message}")
 
-        # Collectors do not raise for an unreachable source: they leave its
-        # section None. Tell that apart from a source nobody asked for.
-        requested = [section for source, section in SOURCE_SECTION.items() if getattr(target, source)]
-        failed = [section for section in requested if getattr(snapshot, section) is None]
-        if failed == requested:
+        failed, nothing_collected = failed_sections(target, snapshot)
+        if nothing_collected:
             return _error("none of the requested sources could be collected")
-        # --url also asks for metrics; only a disabled endpoint (404) excuses it.
-        if target.url and snapshot.metrics is None and not (snapshot.health or {}).get("metrics_disabled"):
-            failed.append("metrics")
 
     # Imported here so the rule set is read at run time, not at import time.
     from .rules import ALL_RULES
@@ -128,14 +179,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     except OSError as exc:
         return _error(f"cannot write {exc.filename}: {exc.strerror}")
 
-    # Every rule crashed: the report is written, but it assessed nothing.
-    skipped = sum(f.rule_id == engine.SKIPPED_RULE_ID for f in findings)
-    if skipped and skipped == len(ALL_RULES):
+    code = result_code(findings, len(ALL_RULES))
+    if code == EXIT_ERROR:
         return _error("no rule could run; see \"Not assessed\" in the report")
-
-    severities = {f.severity for f in findings}
-    if "critical" in severities:
-        return 2
-    if "warning" in severities:
-        return 1
-    return 0
+    return code
