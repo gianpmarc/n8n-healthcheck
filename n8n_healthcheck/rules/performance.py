@@ -12,6 +12,7 @@ from ._helpers import (
     num,
     shown,
     shown_each,
+    size,
     unknown,
     worker_envs,
 )
@@ -40,7 +41,7 @@ def pruning_disabled(snapshot: Snapshot) -> Optional[Finding]:
     if postgres is not None and postgres.get("execution_count") is not None:
         evidence += (
             f" The database currently holds {postgres['execution_count']} executions "
-            f"({postgres.get('execution_table_bytes')} bytes; {_oldest(postgres)})."
+            f"({size(num(postgres, 'execution_table_bytes'))}; {_oldest(postgres)})."
         )
     return Finding(
         rule_id="PERF-001",

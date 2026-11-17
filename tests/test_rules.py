@@ -246,7 +246,7 @@ class Evidence(unittest.TestCase):
             "SCAL-005": "92 of 100",
             "REL-001": "DB_TYPE is not set",
             "REL-002": "allkeys-lru",
-            "REL-003": "950 of 1000",
+            "REL-003": "950 bytes of 1000 bytes",
             "REL-004": "500 jobs waiting and 20 active",
             "REL-007": "n8n-main/n8n (no readiness probe)",
             "REL-008": "requests.cpu, requests.memory, limits.memory",
@@ -352,7 +352,19 @@ class EdgeCases(unittest.TestCase):
         self.assertIn("oldest is 1 hour old", evidence(1.5 / 24))
         self.assertIn("oldest is 5 hours old", evidence(5.9 / 24))
         self.assertIn("oldest is 1.0 days old", evidence(1.0))
-        self.assertIn("bytes; age of the oldest unknown)", evidence(None))
+        self.assertIn("(776 KB; age of the oldest unknown)", evidence(None))
+
+    def test_byte_counts_are_stated_readably(self):
+        from n8n_healthcheck.rules._helpers import size
+
+        cases = {0: "0 bytes", 950: "950 bytes", 1024: "1 KB", 794624: "776 KB", 1536: "1.5 KB",
+                 67108864: "64 MB", 5 << 30: "5 GB", 3 << 40: "3 TB", 5000 << 40: "5000 TB", None: "unknown size"}
+        for count, text in cases.items():
+            self.assertEqual(size(count), text)
+        eviction = rel.redis_eviction_policy(Snapshot(redis={"maxmemory_policy": "allkeys-lru", "maxmemory_bytes": 67108864}))
+        self.assertIn("maxmemory is 64 MB.", eviction.evidence)
+        near = rel.redis_memory_near_limit(Snapshot(redis={"used_memory_bytes": 60 << 20, "maxmemory_bytes": 64 << 20, "maxmemory_policy": "noeviction"}))
+        self.assertIn("Redis uses 60 MB of 64 MB (94%", near.evidence)
 
     def test_unset_binary_data_mode_is_not_flagged(self):
         self.assertIsNone(perf.binary_data_in_memory(Snapshot(env={})))

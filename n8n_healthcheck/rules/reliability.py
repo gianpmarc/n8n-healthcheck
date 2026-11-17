@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import Finding, Snapshot
-from ._helpers import effective_env, env_flag, is_queue_mode, n8n_containers, num, shown, unknown
+from ._helpers import effective_env, env_flag, is_queue_mode, n8n_containers, num, shown, size, unknown
 
 # Redis starts evicting (or, with noeviction, rejecting writes) at maxmemory. 80% leaves
 # headroom for a burst: each large webhook response in flight can hold about
@@ -69,7 +69,7 @@ def redis_eviction_policy(snapshot: Snapshot) -> Optional[Finding]:
         area="reliability",
         severity="warning",
         title="Redis may evict queue keys under memory pressure",
-        evidence=f"Redis maxmemory-policy is {policy}; maxmemory is {maxmemory} bytes.",
+        evidence=f"Redis maxmemory-policy is {policy}; maxmemory is {size(maxmemory)}.",
         impact=(
             "When Redis reaches maxmemory it silently deletes keys, which can include queued "
             "jobs and job locks, so executions disappear from the queue or are marked as "
@@ -107,7 +107,7 @@ def redis_memory_near_limit(snapshot: Snapshot) -> Optional[Finding]:
         severity="warning",
         title="Redis memory close to maxmemory",
         evidence=(
-            f"Redis uses {used} of {maxmemory} bytes ({usage:.0%}; warning threshold "
+            f"Redis uses {size(used)} of {size(maxmemory)} ({usage:.0%}; warning threshold "
             f"{REDIS_MEMORY_USAGE_WARN:.0%}); maxmemory-policy is {policy}."
         ),
         impact=f"At maxmemory, with this policy, Redis {at_limit}.",

@@ -103,6 +103,18 @@ def env_int(env: dict, name: str) -> Optional[int]:
         return None
 
 
+def size(count) -> str:
+    """A byte count as a reader would say it: '950 bytes', '776 KB', '64 MB', '5 GB'."""
+    if count is None:
+        return "unknown size"
+    value, unit = float(count), "bytes"
+    for unit in ("bytes", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            break
+        value /= 1024
+    return f"{value:.1f}".removesuffix(".0") + f" {unit}"
+
+
 def num(section: dict, key: str):
     """Numeric field of a Snapshot section; None when absent or not a finite number."""
     try:
