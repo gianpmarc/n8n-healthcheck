@@ -3,24 +3,216 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f1318" media="(prefers-color-scheme: dark)">
 <title>n8n health check</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
 </head>
 <body>
-<h1>n8n health check</h1>
-<p>Placeholder page: it only proves the server and the API work.</p>
-<form id="form">
-  <p><label>n8n URL <input name="url" size="50"></label></p>
-  <p><label>Env file content<br><textarea name="env_text" rows="8" cols="70"></textarea></label></p>
-  <p><label>Postgres DSN <input name="postgres_dsn" type="password" size="50" autocomplete="off"></label></p>
-  <p><label>Redis URL <input name="redis_url" type="password" size="50" autocomplete="off"></label></p>
-  <p><label>Kubernetes namespace <input name="kube_namespace"></label></p>
-  <p><label>Kubernetes context <input name="kube_context"></label></p>
-  <p><button>Run health check</button></p>
-</form>
-<h2>GET /api/meta</h2>
-<pre id="meta"></pre>
-<h2>POST /api/run</h2>
-<pre id="result"></pre>
-<script src="/static/placeholder.js" defer></script>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="masthead">
+  <div class="wrap masthead__row">
+    <svg class="mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true" focusable="false">
+      <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M6 17h5l3-7 4 12 3-5h5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <h1 class="masthead__title" translate="no">n8n health check</h1>
+    <p class="masthead__meta">
+      <span id="tool-version"></span>
+      <span>Not an official n8n project</span>
+    </p>
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  <!-- Screen-reader announcements for results of asynchronous actions. -->
+  <div id="announce" class="sr-only" role="status" aria-live="polite"></div>
+
+  <noscript>
+    <p class="notice notice--error">This page needs JavaScript to run a health check. You can use the command line instead: <code>python3 -m n8n_healthcheck --help</code>.</p>
+  </noscript>
+
+  <!-- ───────────── Form view ───────────── -->
+  <section id="view-form" aria-labelledby="form-title">
+    <h2 id="form-title" tabindex="-1">What should be inspected?</h2>
+    <p class="lead">Give at least one source. The more you give, the more complete the report.</p>
+
+    <ul class="assurances">
+      <li><strong>Read-only.</strong> Nothing is changed on your instance, database or cluster.</li>
+      <li><strong>Local.</strong> The check runs on the machine running n8n-healthcheck; what you type is sent only to that server.</li>
+      <li><strong>Nothing kept.</strong> No form value is saved in the browser, and the server keeps nothing once the check ends. Reloading the page clears the form.</li>
+    </ul>
+
+    <div id="meta-loading" class="notice" role="status">Loading the available sources…</div>
+    <div id="meta-error" class="notice notice--error" role="alert" hidden>
+      <p><strong>Could not load the list of sources.</strong> <span id="meta-error-text"></span></p>
+      <p><button type="button" class="btn" id="meta-retry">Try again</button></p>
+    </div>
+
+    <!-- method=post: if the script ever fails to load, values still never reach the URL. -->
+    <form id="run-form" method="post" action="/api/run" novalidate autocomplete="off" hidden>
+
+      <fieldset class="source" data-source="url">
+        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+        <p class="source__hint"></p>
+        <div class="field">
+          <label for="f-url">Base URL</label>
+          <input id="f-url" name="url" type="url" inputmode="url" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="https://n8n.example.com…" aria-describedby="e-url">
+          <p class="field__error" id="e-url" hidden></p>
+        </div>
+      </fieldset>
+
+      <fieldset class="source" data-source="env">
+        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+        <p class="source__hint"></p>
+        <div class="field" id="env-paste">
+          <label for="f-env">Paste the variables</label>
+          <textarea id="f-env" name="env_text" rows="6" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="EXECUTIONS_MODE=queue&#10;DB_TYPE=postgresdb&#10;…" aria-describedby="e-env"></textarea>
+        </div>
+        <div class="field" id="env-pick">
+          <label for="f-env-file">Or choose a file <span class="field__note">(read in this browser, up to 1 MB, not shown on screen)</span></label>
+          <input id="f-env-file" type="file" aria-describedby="e-env">
+        </div>
+        <div class="filechip" id="env-chip" hidden>
+          <span class="filechip__text" id="env-chip-text"></span>
+          <button type="button" class="btn btn--small" id="env-chip-remove">Remove file</button>
+        </div>
+        <p class="field__error" id="e-env" hidden></p>
+      </fieldset>
+
+      <fieldset class="source" data-source="postgres">
+        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+        <p class="source__hint"></p>
+        <div class="field">
+          <label for="f-postgres">Connection string</label>
+          <div class="secret">
+            <input id="f-postgres" name="postgres_dsn" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" placeholder="postgresql://user:password@host:5432/n8n…" aria-describedby="e-postgres">
+            <button type="button" class="btn secret__toggle" data-toggle="f-postgres" data-what="Postgres connection string" aria-label="Show Postgres connection string">Show</button>
+          </div>
+          <p class="field__error" id="e-postgres" hidden></p>
+        </div>
+      </fieldset>
+
+      <fieldset class="source" data-source="redis">
+        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+        <p class="source__hint"></p>
+        <div class="field">
+          <label for="f-redis">Connection URL</label>
+          <div class="secret">
+            <input id="f-redis" name="redis_url" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" placeholder="redis://:password@host:6379…" aria-describedby="e-redis">
+            <button type="button" class="btn secret__toggle" data-toggle="f-redis" data-what="Redis connection URL" aria-label="Show Redis connection URL">Show</button>
+          </div>
+          <p class="field__error" id="e-redis" hidden></p>
+        </div>
+      </fieldset>
+
+      <fieldset class="source" data-source="kubernetes">
+        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+        <p class="source__hint"></p>
+        <div class="field-row">
+          <div class="field">
+            <label for="f-kube-ns">Namespace</label>
+            <input id="f-kube-ns" name="kube_namespace" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="n8n…" aria-describedby="e-kube">
+          </div>
+          <div class="field">
+            <label for="f-kube-ctx">Context <span class="field__note">(optional)</span></label>
+            <input id="f-kube-ctx" name="kube_context" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Current kubectl context…" aria-describedby="e-kube">
+          </div>
+        </div>
+        <p class="field__error" id="e-kube" hidden></p>
+      </fieldset>
+
+      <div id="form-error" class="notice notice--error" role="alert" tabindex="-1" hidden>
+        <p><strong id="form-error-title"></strong> <span id="form-error-text"></span></p>
+        <p id="form-error-actions"><button type="button" class="btn" id="form-retry">Try again</button></p>
+      </div>
+
+      <div class="submit-row">
+        <button type="submit" class="btn btn--primary" id="run-button">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="run-button-label">Run health check</span>
+        </button>
+        <p id="run-progress" class="progress" hidden>
+          <span class="progress__bar" aria-hidden="true"></span>
+          <span><span id="run-elapsed">Reading your sources…</span> A source that does not answer is given up on after about 5 seconds.</span>
+        </p>
+      </div>
+    </form>
+  </section>
+
+  <!-- ───────────── Report view ───────────── -->
+  <section id="view-report" aria-labelledby="report-title" hidden>
+    <div class="report-head">
+      <div>
+        <h2 id="report-title" tabindex="-1">Health check report</h2>
+        <p class="report-meta" id="report-meta"></p>
+      </div>
+      <div class="actions" role="group" aria-label="Report actions">
+        <button type="button" class="btn" id="act-md">Download Markdown</button>
+        <button type="button" class="btn" id="act-json">Download snapshot JSON</button>
+        <button type="button" class="btn" id="act-copy">Copy Markdown</button>
+        <button type="button" class="btn" id="act-print">Print</button>
+        <button type="button" class="btn btn--primary" id="act-again">Run again</button>
+      </div>
+    </div>
+    <p id="action-status" class="action-status" role="status" aria-live="polite"></p>
+
+    <div id="status" class="status">
+      <span class="status__icon" id="status-icon" aria-hidden="true"></span>
+      <div class="status__body">
+        <p class="status__label"><span id="status-label"></span> <span id="status-partial" class="tag tag--partial" hidden>Partial report</span></p>
+        <p class="status__summary" id="summary"></p>
+        <p class="status__note" id="status-note" hidden></p>
+      </div>
+    </div>
+
+    <section aria-labelledby="scores-title" class="block">
+      <h3 id="scores-title">Scores by area</h3>
+      <ul class="scores" id="scores"></ul>
+      <p class="block__note" id="scores-note" hidden></p>
+    </section>
+
+    <section aria-labelledby="findings-title" class="block">
+      <h3 id="findings-title" tabindex="-1">Findings</h3>
+      <div class="toolbar" id="findings-toolbar">
+        <div class="toolbar__group" role="group" aria-label="Filter by severity" id="severity-filter"></div>
+        <div class="toolbar__group">
+          <label for="area-filter">Area</label>
+          <select id="area-filter"></select>
+        </div>
+        <div class="toolbar__group toolbar__group--end">
+          <button type="button" class="btn btn--small" id="expand-all">Expand all</button>
+          <button type="button" class="btn btn--small" id="collapse-all">Collapse all</button>
+        </div>
+      </div>
+      <p class="toolbar__count" id="findings-count" role="status" aria-live="polite"></p>
+      <div id="findings"></div>
+      <div id="findings-empty" class="empty" hidden>
+        <p id="findings-empty-text"></p>
+        <p><button type="button" class="btn btn--small" id="clear-filters" hidden>Clear filters</button></p>
+      </div>
+    </section>
+
+    <section aria-labelledby="na-title" class="block">
+      <h3 id="na-title">Not assessed</h3>
+      <p class="block__note" id="na-intro"></p>
+      <ul class="na" id="not-assessed"></ul>
+    </section>
+
+    <section aria-labelledby="warn-title" class="block" id="warnings-block" hidden>
+      <h3 id="warn-title">Messages from the collectors</h3>
+      <p class="block__note">What the tool reported while reading your sources. Useful when a source could not be read.</p>
+      <ul class="messages" id="warnings"></ul>
+    </section>
+
+    <p class="report-foot">Generated by n8n-healthcheck, a read-only community tool. Not an official n8n project.</p>
+  </section>
+</main>
 </body>
 </html>
