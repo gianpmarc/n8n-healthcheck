@@ -24,10 +24,30 @@ services:
     security_opt:
       - no-new-privileges:true
 
+    # Compose-level (not in the Dockerfile) so one-shot CLI runs of the image
+    # are not marked unhealthy. The image has no curl; /api/meta has no side effects.
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/meta', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
     # Kubernetes (opt-in): uncomment to give kubectl your kubeconfig, read-only.
     # Does not work for clusters whose server address is 127.0.0.1 or localhost
     # (kind, minikube, Docker Desktop) - see docker/README.md.
+    # create_host_path: false makes a missing kubeconfig an error instead of
+    # letting Docker create a root-owned directory in its place.
     # environment:
     #   KUBECONFIG: /kube/config
     # volumes:
-    #   - ${HOME}/.kube/config:/kube/config:ro
+    #   - type: bind
+    #     source: ${HOME}/.kube/config
+    #     target: /kube/config
+    #     read_only: true
+    #     bind:
+    #       create_host_path: false
+    # Linux only: ~/.kube/config is normally mode 600, so the container must run
+    # as you to read it. Replace with the output of `id -u` and `id -g`.
+    # user: "1000:1000"

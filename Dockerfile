@@ -1,5 +1,7 @@
 # n8n-healthcheck: the tool plus the two external clients it shells out to
 # (psql for --postgres-dsn, kubectl for --kube-namespace). See docker/README.md.
+# Pinned by tag, not by digest, on purpose: rebuilding picks up Debian and
+# Python security patches without a manual digest bump for each architecture.
 FROM python:3.13-slim-trixie
 
 # kubectl: pinned release, official binary, checksum from
@@ -37,6 +39,8 @@ COPY n8n_healthcheck/ /app/n8n_healthcheck/
 
 USER 10001:10001
 EXPOSE 8080
+# No HEALTHCHECK here: the image is also used for one-shot CLI runs. The web UI
+# health check is in docker-compose.yml.
 
 # The entrypoint is the tool itself, so anything after the image name is passed
 # to it: `docker run --rm IMAGE --snapshot /data/s.json`. With no arguments it
