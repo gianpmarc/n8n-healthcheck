@@ -64,11 +64,35 @@ def _summary(findings: list[Finding], missing: int, skipped: int, sources: int) 
     return " ".join(sentences)
 
 
-def render_markdown(snapshot: Snapshot, findings: list[Finding], failed: tuple[str, ...] = ()) -> str:
-    """Render the report.
+def _not_run_summary(failed: tuple[str, ...], reasons: tuple[str, ...]) -> str:
+    names = ", ".join(label.split(" (")[0] for name, label in SECTIONS.items() if name in failed)
+    sentences = [f"This health check could not run: none of the requested data sources could be collected ({names})."]
+    if reasons:
+        sentences.append("Reported: " + "; ".join(_one_line(reason) for reason in reasons) + ".")
+    sentences.append(
+        "Nothing was assessed, so the absence of findings says nothing about the instance. "
+        "Check the connection details and run it again."
+    )
+    return " ".join(sentences)
 
-    `failed` names the Snapshot sections that were requested on the command
-    line but came back empty, so they are not described as merely absent.
+
+def build_report(
+    snapshot: Snapshot,
+    findings: list[Finding],
+    failed: tuple[str, ...] = (),
+    could_not_run: tuple[str, ...] | None = None,
+) -> dict:
+    """Everything the report says, as data. render_markdown() and the web API both read it.
+
+    `failed` names the Snapshot sections that were requested but came back
+    empty, so they are not described as merely absent. `could_not_run` is given
+    (the collectors' failure lines, possibly none) when no requested source was
+    collected: the summary then says so instead of counting zero findings. The
+    CLI stops before the report in that case; the web API still returns one.
+
+    Returns {"n8n_version", "summary", "partial", "scores": [{"area", "score"
+    (None when nothing was collected), "partial", "findings"}], "not_assessed":
+    [{"id", "label", "reason", "detail"}], "findings": [Finding] most severe first}.
     """
     skipped = [f for f in findings if f.rule_id == SKIPPED_RULE_ID]
     # Stable sort, so this also works for findings that did not come from engine.run().
@@ -85,26 +109,82 @@ def render_markdown(snapshot: Snapshot, findings: list[Finding], failed: tuple[s
         missing.remove("metrics")
     partial = bool(missing or skipped)
 
+    area_scores = score(findings)
+    # Rules are not tied to one data source, so any gap makes every score
+    # partial; with no data at all there is no score to show.
+    no_data = len(missing) == len(SECTIONS)
+    scores = [
+        {
+            "area": area,
+            "score": None if no_data else area_scores[area],
+            "partial": partial,
+            "findings": sum(f.area == area for f in findings),
+        }
+        for area in AREAS
+    ]
+
+    not_assessed = []
+    if metrics_disabled:
+        not_assessed.append(
+            {
+                "id": "metrics",
+                "label": "Prometheus metrics",
+                "reason": "disabled",
+                "detail": "endpoint disabled on the instance",
+            }
+        )
+    for name in missing:
+        reason, details = "not_provided", []
+        if name == "env" and effective_env(snapshot) is not None:
+            reason = "from_kubernetes"
+            details.append("read from the main n8n Deployment in Kubernetes instead")
+        if name in failed:
+            reason = "failed"
+            details.insert(0, "requested but could not be collected")
+        not_assessed.append({"id": name, "label": SECTIONS[name], "reason": reason, "detail": " — ".join(details)})
+    not_assessed += [
+        {"id": f.rule_id, "label": _one_line(f.title), "reason": "rule_skipped", "detail": _one_line(f.evidence)}
+        for f in skipped
+    ]
+
+    return {
+        "n8n_version": snapshot.n8n_version,
+        "summary": _summary(findings, len(missing), len(skipped), len(SECTIONS) - metrics_disabled)
+        if could_not_run is None
+        else _not_run_summary(failed, could_not_run),
+        "partial": partial,
+        "scores": scores,
+        "not_assessed": not_assessed,
+        "findings": findings,
+    }
+
+
+def render_markdown(
+    snapshot: Snapshot,
+    findings: list[Finding],
+    failed: tuple[str, ...] = (),
+    could_not_run: tuple[str, ...] | None = None,
+) -> str:
+    """Render the report built by build_report() (same arguments) as Markdown."""
+    data = build_report(snapshot, findings, failed, could_not_run)
+    findings = data["findings"]
+
     title = "# n8n health check report"
-    if snapshot.n8n_version:
-        title += f" — n8n {snapshot.n8n_version}"
-    lines = [title, "", "## Summary", "", _summary(findings, len(missing), len(skipped), len(SECTIONS) - metrics_disabled), ""]
+    if data["n8n_version"]:
+        title += f" — n8n {data['n8n_version']}"
+    lines = [title, "", "## Summary", "", data["summary"], ""]
 
     lines += ["## Scores", "", "| Area | Score | Findings |", "|---|---|---|"]
-    scores = score(findings)
-    for area in AREAS:
-        count = sum(f.area == area for f in findings)
-        # Rules are not tied to one data source, so any gap makes every score
-        # partial; with no data at all there is no score to show.
-        if len(missing) == len(SECTIONS):
+    for row in data["scores"]:
+        if row["score"] is None:
             value = "n/a"
-        elif partial:
-            value = f"{scores[area]}/100 (partial)"
+        elif row["partial"]:
+            value = f"{row['score']}/100 (partial)"
         else:
-            value = f"{scores[area]}/100"
-        lines.append(f"| {area.capitalize()} | {value} | {count} |")
+            value = f"{row['score']}/100"
+        lines.append(f"| {row['area'].capitalize()} | {value} | {row['findings']} |")
     lines.append("")
-    if partial:
+    if data["partial"]:
         lines += [
             "Scores marked *partial* only reflect the checks that ran. "
             "They say nothing about what is listed under \"Not assessed\".",
@@ -112,16 +192,14 @@ def render_markdown(snapshot: Snapshot, findings: list[Finding], failed: tuple[s
         ]
 
     lines += ["## Not assessed", ""]
-    if metrics_disabled:
-        lines.append("- Prometheus metrics — endpoint disabled on the instance")
-    if partial:
-        for name in missing:
-            suffix = " — requested but could not be collected" if name in failed else ""
-            if name == "env" and effective_env(snapshot) is not None:
-                suffix += " — read from the main n8n Deployment in Kubernetes instead"
-            lines.append(f"- {SECTIONS[name]}{suffix}")
-        lines += [f"- {_one_line(f.title)} ({_one_line(f.evidence)})" for f in skipped]
-    elif not metrics_disabled:
+    for entry in data["not_assessed"]:
+        if entry["reason"] == "rule_skipped":
+            lines.append(f"- {entry['label']} ({entry['detail']})")
+        elif entry["detail"]:
+            lines.append(f"- {entry['label']} — {entry['detail']}")
+        else:
+            lines.append(f"- {entry['label']}")
+    if not data["not_assessed"]:
         lines.append("Every data source was collected and every check ran.")
     lines.append("")
 

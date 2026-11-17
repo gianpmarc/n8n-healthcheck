@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>n8n health check</title>
+</head>
+<body>
+<h1>n8n health check</h1>
+<p>Placeholder page: it only proves the server and the API work.</p>
+<form id="form">
+  <p><label>n8n URL <input name="url" size="50"></label></p>
+  <p><label>Env file content<br><textarea name="env_text" rows="8" cols="70"></textarea></label></p>
+  <p><label>Postgres DSN <input name="postgres_dsn" type="password" size="50" autocomplete="off"></label></p>
+  <p><label>Redis URL <input name="redis_url" type="password" size="50" autocomplete="off"></label></p>
+  <p><label>Kubernetes namespace <input name="kube_namespace"></label></p>
+  <p><label>Kubernetes context <input name="kube_context"></label></p>
+  <p><button>Run health check</button></p>
+</form>
+<h2>GET /api/meta</h2>
+<pre id="meta"></pre>
+<h2>POST /api/run</h2>
+<pre id="result"></pre>
+<script src="/static/placeholder.js" defer></script>
+</body>
+</html>
