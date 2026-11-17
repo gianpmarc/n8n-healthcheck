@@ -16,7 +16,25 @@ A Markdown report with:
 - a score per area: scalability, reliability, performance, maintainability, security
 - for each finding: the evidence, the impact, the fix
 
-## Usage
+## Quick start: web interface
+
+No command line needed. With Docker running, double-click `Start Health Check.command` (macOS), or run:
+
+```bash
+docker compose up -d --build
+```
+
+Then open http://localhost:8080, fill in what you have, and press Run. The image includes `psql` and `kubectl`, so there is nothing else to install. Details, Linux notes and how to reach services on your machine: [docker/README.md](docker/README.md).
+
+Without Docker:
+
+```bash
+python3 -m n8n_healthcheck serve
+```
+
+The interface listens on `localhost` only, has no login, and stores nothing.
+
+## Usage: command line
 
 ```bash
 python3 -m n8n_healthcheck --url https://n8n.example.com --env-file n8n.env -o report.md
