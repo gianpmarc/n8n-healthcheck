@@ -373,7 +373,7 @@ class WebTest(unittest.TestCase):
             self.assertEqual(headers["Referrer-Policy"], "no-referrer")
             # The policy forbids inline scripts, styles and handlers, so the page must not have any.
             self.assertIsNone(re.search(rb"<script(?![^>]*\bsrc=)|<style|\son\w+=|\sstyle=", raw))
-        status, headers, _ = self.request("GET", "/static/placeholder.js")
+        status, headers, _ = self.request("GET", "/static/app.js")
         self.assertEqual((status, headers["Content-Type"]), (200, "text/javascript; charset=utf-8"))
         _, headers, _ = self.request("GET", "/api/meta")
         self.assertIsNone(headers["Content-Security-Policy"])

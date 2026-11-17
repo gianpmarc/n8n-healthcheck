@@ -253,7 +253,7 @@
       // Same rule as the server: http or https, with a host.
       try {
         const parsed = new URL(url);
-        valid = ["http:", "https:"].includes(parsed.protocol) && parsed.hostname !== "" && /^https?:\/\//i.test(url);
+        valid = ["http:", "https:"].includes(parsed.protocol) && parsed.hostname !== "" && /^https?:\/\/[^\/?#]/i.test(url);
       } catch { /* not a URL */ }
       if (valid) body.url = url;
       else errors.push({ errorId: "e-url", focus: "f-url", message: "Enter the full address, starting with http:// or https:// — for example https://n8n.example.com." });
@@ -359,6 +359,8 @@
         signal: abort.signal,
       });
       data = await response.json().catch(() => null);
+      // The deadline can also pass while the body is still arriving; that is a timeout, not a bad report.
+      if (abort.signal.aborted) throw new Error("timeout");
       if (!response.ok) {
         failure = describeFailure(response.status, data && typeof data.error === "string" ? data.error : "");
       } else if (!data || !Array.isArray(data.findings) || !Array.isArray(data.scores)) {
