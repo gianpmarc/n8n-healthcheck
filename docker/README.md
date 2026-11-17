@@ -2,11 +2,11 @@
 
 **TL;DR**
 
-1. Install and start Docker Desktop (or Docker Engine with Compose v2).
+1. Install and start Docker Desktop 4.27 or later (or Docker Engine 25 or later with Compose v2). Older versions do not support the `start_interval` setting of the health check in `docker-compose.yml`.
 2. Double-click `Start Health Check.command` in the repository root (macOS). On Linux: `bash "Start Health Check.command"`. On Windows: `docker compose up -d --build`, then open the URL yourself; there is no Windows launcher.
 3. Your browser opens http://localhost:8080. To stop: double-click `Stop Health Check.command`, or run `docker compose down`.
 
-If you downloaded the repository as a ZIP, macOS may refuse to open the launcher. Right-click it and choose Open, or run `bash "Start Health Check.command"` in Terminal. A `git clone` is not affected.
+If you downloaded the repository as a ZIP, macOS may refuse to open the launcher (not tested; this is our understanding of Gatekeeper). Run `bash "Start Health Check.command"` in Terminal from the repository root instead. To keep double-clicking, allow the file once: on macOS 15 and later in System Settings → Privacy & Security → Open Anyway, on older versions with right-click → Open. A `git clone` is not affected.
 
 ## What is in the image, and why
 
