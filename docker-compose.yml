@@ -1,0 +1,33 @@
+# n8n-healthcheck web UI on http://localhost:8080. See docker/README.md.
+name: n8n-healthcheck
+
+services:
+  healthcheck:
+    build: .
+    image: n8n-healthcheck:local
+    # Localhost only: the UI has no authentication. Keep both port numbers the
+    # same: the server only accepts requests whose Host header is
+    # localhost:<its own port> or 127.0.0.1:<its own port>, and the browser
+    # sends the published port. With 8080 on both sides no --allow-host flag
+    # is needed.
+    ports:
+      - 127.0.0.1:8080:8080
+    # Reach services on the host (a local n8n, the lab stacks) as
+    # host.docker.internal. Built in on Docker Desktop; this line adds it on Linux.
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # Kubernetes (opt-in): uncomment to give kubectl your kubeconfig, read-only.
+    # Does not work for clusters whose server address is 127.0.0.1 or localhost
+    # (kind, minikube, Docker Desktop) - see docker/README.md.
+    # environment:
+    #   KUBECONFIG: /kube/config
+    # volumes:
+    #   - ${HOME}/.kube/config:/kube/config:ro
