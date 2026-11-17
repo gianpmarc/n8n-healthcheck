@@ -207,6 +207,8 @@ code, .mono { font-family: var(--mono); font-size: 0.9em; }
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
 }
+/* The notice is what tells this page apart from an official n8n one: full text colour. */
+.masthead__meta span:last-child { color: var(--text); }
 
 main { padding-block: var(--space-7); }
 
