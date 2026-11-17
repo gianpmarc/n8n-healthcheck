@@ -341,7 +341,18 @@ class EdgeCases(unittest.TestCase):
         )
         evidence = perf.pruning_disabled(snapshot).evidence
         self.assertIn("1200000 executions", evidence)
-        self.assertIn("410.5 days", evidence)
+        self.assertIn("oldest is 410.5 days old", evidence)
+
+    def test_pruning_evidence_states_a_young_age_readably(self):
+        def evidence(days):
+            postgres = {"execution_count": 201, "execution_table_bytes": 794624, "oldest_execution_age_days": days}
+            return perf.pruning_disabled(Snapshot(env={"EXECUTIONS_DATA_PRUNE": "false"}, postgres=postgres)).evidence
+
+        self.assertIn("oldest is less than an hour old", evidence(0.00022262128472222222))
+        self.assertIn("oldest is 1 hour old", evidence(1.5 / 24))
+        self.assertIn("oldest is 5 hours old", evidence(5.9 / 24))
+        self.assertIn("oldest is 1.0 days old", evidence(1.0))
+        self.assertIn("bytes; age of the oldest unknown)", evidence(None))
 
     def test_unset_binary_data_mode_is_not_flagged(self):
         self.assertIsNone(perf.binary_data_in_memory(Snapshot(env={})))

@@ -9,11 +9,25 @@ from ._helpers import (
     effective_env,
     env_flag,
     is_queue_mode,
+    num,
     shown,
     shown_each,
     unknown,
     worker_envs,
 )
+
+
+def _oldest(postgres: dict) -> str:
+    """The age of the oldest execution as a reader would say it."""
+    days = num(postgres, "oldest_execution_age_days")
+    if days is None:
+        return "age of the oldest unknown"
+    if days >= 1:
+        return f"oldest is {days:.1f} days old"
+    hours = int(days * 24)
+    if hours >= 1:
+        return f"oldest is {hours} hour{'s' if hours != 1 else ''} old"
+    return "oldest is less than an hour old"
 
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/manage-execution-data#enable-executions-pruning
@@ -26,8 +40,7 @@ def pruning_disabled(snapshot: Snapshot) -> Optional[Finding]:
     if postgres is not None and postgres.get("execution_count") is not None:
         evidence += (
             f" The database currently holds {postgres['execution_count']} executions "
-            f"({postgres.get('execution_table_bytes')} bytes; oldest is "
-            f"{postgres.get('oldest_execution_age_days')} days old)."
+            f"({postgres.get('execution_table_bytes')} bytes; {_oldest(postgres)})."
         )
     return Finding(
         rule_id="PERF-001",
