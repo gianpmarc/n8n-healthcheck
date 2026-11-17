@@ -64,11 +64,31 @@ def _summary(findings: list[Finding], missing: int, skipped: int, sources: int) 
     return " ".join(sentences)
 
 
-def build_report(snapshot: Snapshot, findings: list[Finding], failed: tuple[str, ...] = ()) -> dict:
+def _not_run_summary(failed: tuple[str, ...], reasons: tuple[str, ...]) -> str:
+    names = ", ".join(label.split(" (")[0] for name, label in SECTIONS.items() if name in failed)
+    sentences = [f"This health check could not run: none of the requested data sources could be collected ({names})."]
+    if reasons:
+        sentences.append("Reported: " + "; ".join(_one_line(reason) for reason in reasons) + ".")
+    sentences.append(
+        "Nothing was assessed, so the absence of findings says nothing about the instance. "
+        "Check the connection details and run it again."
+    )
+    return " ".join(sentences)
+
+
+def build_report(
+    snapshot: Snapshot,
+    findings: list[Finding],
+    failed: tuple[str, ...] = (),
+    could_not_run: tuple[str, ...] | None = None,
+) -> dict:
     """Everything the report says, as data. render_markdown() and the web API both read it.
 
     `failed` names the Snapshot sections that were requested but came back
-    empty, so they are not described as merely absent.
+    empty, so they are not described as merely absent. `could_not_run` is given
+    (the collectors' failure lines, possibly none) when no requested source was
+    collected: the summary then says so instead of counting zero findings. The
+    CLI stops before the report in that case; the web API still returns one.
 
     Returns {"n8n_version", "summary", "partial", "scores": [{"area", "score"
     (None when nothing was collected), "partial", "findings"}], "not_assessed":
@@ -129,7 +149,9 @@ def build_report(snapshot: Snapshot, findings: list[Finding], failed: tuple[str,
 
     return {
         "n8n_version": snapshot.n8n_version,
-        "summary": _summary(findings, len(missing), len(skipped), len(SECTIONS) - metrics_disabled),
+        "summary": _summary(findings, len(missing), len(skipped), len(SECTIONS) - metrics_disabled)
+        if could_not_run is None
+        else _not_run_summary(failed, could_not_run),
         "partial": partial,
         "scores": scores,
         "not_assessed": not_assessed,
@@ -137,9 +159,14 @@ def build_report(snapshot: Snapshot, findings: list[Finding], failed: tuple[str,
     }
 
 
-def render_markdown(snapshot: Snapshot, findings: list[Finding], failed: tuple[str, ...] = ()) -> str:
+def render_markdown(
+    snapshot: Snapshot,
+    findings: list[Finding],
+    failed: tuple[str, ...] = (),
+    could_not_run: tuple[str, ...] | None = None,
+) -> str:
     """Render the report built by build_report() (same arguments) as Markdown."""
-    data = build_report(snapshot, findings, failed)
+    data = build_report(snapshot, findings, failed, could_not_run)
     findings = data["findings"]
 
     title = "# n8n health check report"

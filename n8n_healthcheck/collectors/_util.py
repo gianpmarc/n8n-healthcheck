@@ -42,6 +42,14 @@ def url_secrets(*urls: str | None) -> set:
             parts = urlsplit(url or "")
         except ValueError:
             continue
+        try:
+            parts.port
+        except ValueError:
+            # An unencoded "/" in the password cuts the host part short, and urllib then
+            # quotes what precedes it as a bad port: redis://:pa/ss@host -> "... as 'pa'".
+            if "@" in url and "@" not in parts.netloc:
+                fragment = parts.netloc.rpartition(":")[2]
+                secrets |= {fragment, unquote(fragment)}
         if parts.password:
             secrets |= {parts.password, unquote(parts.password)}
         secrets |= {value for key, value in parse_qsl(parts.query) if key == "password"}

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import asdict
 from typing import Optional
+from urllib.parse import urlsplit
 
 from . import engine, report
 from .models import Snapshot, Target
@@ -28,6 +30,36 @@ SOURCE_SECTION = {
 }
 
 
+def valid_url(url: str) -> bool:
+    """True for an http(s) URL with a host. urllib would also open file:, ftp: and data:."""
+    try:
+        parts = urlsplit(url.strip())
+        return parts.scheme in ("http", "https") and bool(parts.hostname)
+    except ValueError:
+        return False
+
+
+def json_safe(value):
+    """A copy of JSON-like data with NaN and infinities, which are not valid JSON, as None."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    return value
+
+
+def _port(text: str) -> int:
+    try:
+        port = int(text)
+    except ValueError:
+        port = -1
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a port number (0-65535)")
+    return port
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str):
         # argparse exits 2 by default, which here means "critical finding".
@@ -38,7 +70,9 @@ class _Parser(argparse.ArgumentParser):
 def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     parser = _Parser(
         prog="n8n-healthcheck",
-        description="Read-only health check for a self-hosted n8n instance.",
+        description="Read-only health check for a self-hosted n8n instance. "
+        "For a local web interface instead of these flags, run `n8n-healthcheck serve` "
+        "(see `n8n-healthcheck serve --help`).",
         epilog="Exit codes: 0 no critical findings or warnings, 1 at least one warning, "
         "2 at least one critical finding, 3 the check could not run "
         "(usage error, unreadable or unwritable file, no requested source reachable, "
@@ -59,6 +93,8 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         # The collectors test `is None`, so "" would be collected, not ignored.
         if value is not None and not value.strip():
             parser.error(f"--{source.replace('_', '-')} must not be empty")
+    if args.url and not valid_url(args.url):
+        parser.error("--url must be an http:// or https:// URL with a host")
     if not args.snapshot and not any(getattr(args, source) for source in SOURCE_SECTION):
         parser.error("nothing to inspect: give at least one source flag or --snapshot")
     return args
@@ -98,7 +134,7 @@ def _serve(argv: list[str]) -> int:
         "authentication: keep it on a loopback address unless the network is trusted.",
     )
     parser.add_argument("--host", default="127.0.0.1", help="address to listen on (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8080, help="port to listen on (default: 8080)")
+    parser.add_argument("--port", type=_port, default=8080, help="port to listen on (default: 8080)")
     parser.add_argument("--no-browser", action="store_true", help="do not open the page in the default browser")
     parser.add_argument(
         "--allow-host",
@@ -170,7 +206,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         if args.save_snapshot:
             with open(args.save_snapshot, "w", encoding="utf-8") as fh:
-                json.dump(asdict(snapshot), fh, indent=2)
+                # A metric can be NaN or +Inf, which json would write as invalid JSON.
+                json.dump(json_safe(asdict(snapshot)), fh, indent=2, allow_nan=False)
         if args.output:
             with open(args.output, "w", encoding="utf-8") as fh:
                 fh.write(markdown)

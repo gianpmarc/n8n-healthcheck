@@ -3,12 +3,15 @@ import http.client
 import io
 import json
 import os
+import re
+import socket
 import stat
 import threading
 import unittest
 from dataclasses import asdict
 from unittest import mock
 
+import n8n_healthcheck
 from n8n_healthcheck import cli
 from n8n_healthcheck.models import Finding, Snapshot
 from n8n_healthcheck.web import server as web
@@ -83,7 +86,8 @@ class WebTest(unittest.TestCase):
         meta = json.loads(raw)
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
-        self.assertEqual(meta["version"], "dev")
+        self.assertEqual(meta["version"], n8n_healthcheck.__version__)
+        self.assertRegex(meta["version"], r"^\d+\.\d+\.\d+$")
         self.assertEqual([s["id"] for s in meta["sources"]], ["url", "env", "postgres", "redis", "kubernetes"])
         sources = {s["id"]: s for s in meta["sources"]}
         self.assertFalse(sources["postgres"]["available"])
@@ -215,9 +219,17 @@ class WebTest(unittest.TestCase):
         self.assertEqual(result["exit_code"], 0)
 
     def test_nothing_collected_is_exit_code_3_with_a_report(self):
-        status, result, _ = self.run_api({"redis_url": REDIS_URL}, Snapshot(), [])
+        status, result, _ = self.run_api({"redis_url": REDIS_URL, "url": "http://n8n.internal"}, Snapshot(), [])
         self.assertEqual(status, 200)
         self.assertEqual(result["exit_code"], 3)
+        self.assertTrue(
+            result["summary"].startswith(
+                "This health check could not run: none of the requested data sources could be collected "
+                "(Health endpoints, Prometheus metrics, Redis)."
+            )
+        )
+        self.assertNotIn("found 0", result["summary"])
+        self.assertIn(result["summary"], result["markdown"])
         self.assertEqual({s["score"] for s in result["scores"]}, {None})
         self.assertIn(("redis", "failed"), [(n["id"], n["reason"]) for n in result["not_assessed"]])
 
@@ -266,6 +278,32 @@ class WebTest(unittest.TestCase):
         self.assertNotIn(PASSWORD, raw.decode())
         self.assertNotIn(PASSWORD, self.log.getvalue())
 
+    def test_could_not_run_summary_gives_the_reasons(self):
+        with mock.patch("n8n_healthcheck.collectors.redis.collect", side_effect=RuntimeError("connection refused")):
+            with mock.patch("n8n_healthcheck.rules.ALL_RULES", RULES[:0]):
+                _, _, raw = self.request("POST", "/api/run", {"redis_url": REDIS_URL})
+        result = json.loads(raw)
+        self.assertEqual(result["exit_code"], 3)
+        self.assertEqual(result["warnings"], ["redis_url: not collected (connection refused)"])
+        self.assertIn("could be collected (Redis). Reported: redis_url: not collected (connection refused).", result["summary"])
+        self.assertIn(result["summary"], result["markdown"])
+        self.assertNotIn(PASSWORD, raw.decode())
+
+    def test_partial_failure_keeps_the_normal_summary(self):
+        _, result, _ = self.run_api({"url": "http://n8n.internal", "redis_url": REDIS_URL})
+        self.assertTrue(result["summary"].startswith("This health check found 1 critical issue"))
+
+    def test_non_finite_metrics_are_null_in_valid_json(self):
+        snapshot = Snapshot(health={}, metrics={"a": float("nan"), "b": float("inf"), "c": float("-inf"), "d": 1.5})
+        status, _, raw = self.run_api({"url": "http://n8n.internal"}, snapshot)
+        self.assertEqual(status, 200)
+
+        def reject(constant):
+            raise AssertionError(f"{constant} is not valid JSON")
+
+        result = json.loads(raw, parse_constant=reject)
+        self.assertEqual(result["snapshot"]["metrics"], {"a": None, "b": None, "c": None, "d": 1.5})
+
     # --- secrets ---------------------------------------------------------------
 
     def test_failed_collectors_are_warnings_without_secrets(self):
@@ -303,7 +341,80 @@ class WebTest(unittest.TestCase):
         # The lock is released: the next run is accepted.
         self.assertEqual(self.run_api({"url": "http://n8n.internal:5678"})[0], 200)
 
+    def test_log_has_no_query_string_and_no_traceback(self):
+        self.assertEqual(self.request("GET", f"/api/meta?token={PASSWORD}")[0], 200)
+        self.assertEqual(self.request("GET", f"/static/index.html?{PASSWORD}")[0], 200)
+        self.assertEqual(self.request("GET", f"/nope?{PASSWORD}", headers={"Host": "evil.example"})[0], 403)
+        # A request line http.server rejects itself (it would log the raw line).
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as raw:
+            raw.sendall(f"GET /?{PASSWORD} HTTP/9.9\r\nHost: {self.host}\r\n\r\n".encode())
+            self.assertIn(b" 505 ", raw.makefile("rb").readline())
+        # An unexpected exception in a handler: only its type is logged.
+        with mock.patch.object(web, "meta", side_effect=RuntimeError(f"boom {PASSWORD}")):
+            with self.assertRaises((http.client.HTTPException, ConnectionError)):
+                self.request("GET", "/api/meta")
+        log = self.log.getvalue()
+        self.assertIn('"GET /api/meta" 200', log)
+        self.assertIn('"GET /static/index.html" 200', log)
+        self.assertIn('"GET /nope" 403', log)
+        self.assertIn("failed: RuntimeError", log)
+        self.assertNotIn(PASSWORD, log)
+        self.assertNotIn("?", log)
+        self.assertNotIn("Traceback", log)
+
+    def test_html_gets_a_content_security_policy(self):
+        for path in ("/", "/static/index.html"):
+            _, headers, raw = self.request("GET", path)
+            policy = headers["Content-Security-Policy"]
+            self.assertIn("default-src 'none'", policy)
+            self.assertIn("script-src 'self'", policy)
+            self.assertIn("frame-ancestors 'none'", policy)
+            self.assertNotIn("unsafe", policy)
+            self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+            # The policy forbids inline scripts, styles and handlers, so the page must not have any.
+            self.assertIsNone(re.search(rb"<script(?![^>]*\bsrc=)|<style|\son\w+=|\sstyle=", raw))
+        status, headers, _ = self.request("GET", "/static/placeholder.js")
+        self.assertEqual((status, headers["Content-Type"]), (200, "text/javascript; charset=utf-8"))
+        _, headers, _ = self.request("GET", "/api/meta")
+        self.assertIsNone(headers["Content-Security-Policy"])
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+
+    def test_head(self):
+        _, get_headers, body = self.request("GET", "/")
+        status, headers, raw = self.request("HEAD", "/")
+        self.assertEqual((status, raw), (200, b""))
+        self.assertEqual(headers["Content-Length"], str(len(body)))
+        self.assertEqual(headers["Content-Type"], get_headers["Content-Type"])
+        self.assertEqual(self.request("HEAD", "/api/meta")[0], 200)
+        self.assertEqual(self.request("HEAD", "/static/../cli.py")[0], 404)
+        self.assertEqual(self.request("HEAD", "/", headers={"Host": "evil.example"})[0], 403)
+
     # --- rejected requests -----------------------------------------------------
+
+    def test_url_must_be_http_or_https(self):
+        for url in (
+            "file:///etc/hosts#",
+            "FILE:///etc/hosts",
+            "ftp://ftp.example/pub",
+            "data:text/plain,up 1",
+            "http://",
+            "https:///metrics",
+            "n8n.internal:5678",
+            "//n8n.internal",
+            "http://[bad",
+        ):
+            status, result, _ = self.run_api({"url": url, "env_text": "A=b"})
+            self.assertEqual(status, 400, url)
+            self.assertEqual(result["error"], "url must be an http:// or https:// URL with a host")
+            self.collect.assert_not_called()
+        for url in ("http://n8n.internal:5678", "HTTPS://n8n.example.com/n8n/", "http://[::1]:5678"):
+            self.assertEqual(self.run_api({"url": url})[0], 200, url)
+
+    def test_deeply_nested_json_is_a_bad_request(self):
+        status, result, _ = self.run_api(b"[" * 200000, headers={"Content-Type": "application/json"})
+        self.assertEqual(status, 400)
+        self.assertIn("not valid JSON", result["error"])
+        self.assertEqual(self.request("GET", "/api/meta")[0], 200)
 
     def test_bad_requests(self):
         cases = [
@@ -398,13 +509,15 @@ class WebTest(unittest.TestCase):
 
     def test_origin_must_match_the_host(self):
         body = {"url": "http://n8n.internal:5678"}
-        for origin in ("http://evil.example", f"http://evil.example:{self.port}", f"https://{self.host}", f"http://localhost:{self.port}", "null"):
+        for origin in ("http://evil.example", f"http://evil.example:{self.port}", f"http://localhost:{self.port}", "null", "http://[bad", self.host):
             status, result, _ = self.run_api(body, headers={"Origin": origin})
             self.assertEqual(status, 403, origin)
             self.assertIn("cross-origin", result["error"])
             self.collect.assert_not_called()
-        status, _, _ = self.run_api(body, headers={"Origin": f"http://{self.host}"})
-        self.assertEqual(status, 200)
+        # Same host and port; https is what the browser sends behind a TLS proxy.
+        for origin in (f"http://{self.host}", f"https://{self.host}", f"HTTP://{self.host}"):
+            status, _, _ = self.run_api(body, headers={"Origin": origin})
+            self.assertEqual(status, 200, origin)
         status, _, _ = self.run_api(body, headers={"Origin": f"http://localhost:{self.port}", "Host": f"localhost:{self.port}"})
         self.assertEqual(status, 200)
 
@@ -458,6 +571,7 @@ class ServeCommandTest(unittest.TestCase):
         self.assertEqual(len(out.splitlines()), 1)
         self.assertIn("http://localhost:", out)
         self.assertIn("no authentication", err)
+        self.assertIn("simultaneous connections is not limited", err)
         browser.assert_not_called()
 
     def test_usage_error_and_busy_port(self):
@@ -468,6 +582,31 @@ class ServeCommandTest(unittest.TestCase):
             code, _, err, _ = self.run_serve(["serve", "--no-browser"])
         self.assertEqual(code, 3)
         self.assertIn("cannot listen on 127.0.0.1:8080: Address already in use", err)
+
+    def test_port_out_of_range_is_a_usage_error(self):
+        for port in ("99999", "65536", "-1", "8080.5"):
+            code, _, err, _ = self.run_serve(["serve", "--port", port, "--no-browser"])
+            self.assertEqual(code, 3, port)
+            self.assertIn("is not a port number (0-65535)", err)
+            self.assertNotIn("Traceback", err)
+
+    def test_bind_address_is_an_accepted_host(self):
+        self.assertEqual(
+            web.allowed_hosts("192.168.1.20", 8080),
+            {"localhost:8080", "127.0.0.1:8080", "[::1]:8080", "192.168.1.20:8080"},
+        )
+        self.assertIn("[fe80::1]:8080", web.allowed_hosts("fe80::1", 8080))
+        for wildcard in ("0.0.0.0", "::", ""):
+            self.assertEqual(web.allowed_hosts(wildcard, 8080), {"localhost:8080", "127.0.0.1:8080", "[::1]:8080"})
+        self.assertEqual(
+            web.allowed_hosts("0.0.0.0", 80, ["hc.internal", "localhost:9000"]) - web.allowed_hosts("0.0.0.0", 80),
+            {"hc.internal", "hc.internal:80", "localhost:9000"},
+        )
+
+    def test_main_help_mentions_serve(self):
+        code, out, _, _ = self.run_serve(["--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("n8n-healthcheck serve", " ".join(out.split()))
 
     def test_serve_is_only_a_command_in_first_position(self):
         code, _, err, _ = self.run_serve(["--url", "http://n8n.internal", "serve"])
