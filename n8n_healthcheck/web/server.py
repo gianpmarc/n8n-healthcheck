@@ -283,6 +283,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")  # with frame-ancestors below: no clickjacking
         if content_type.startswith("text/html"):
             self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
         self.end_headers()
