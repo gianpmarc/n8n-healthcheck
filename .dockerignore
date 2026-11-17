@@ -1,0 +1,5 @@
+# Allowlist: the image contains only the package.
+*
+!n8n_healthcheck/
+**/__pycache__/
+**/*.pyc
