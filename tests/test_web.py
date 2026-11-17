@@ -377,8 +377,38 @@ class WebTest(unittest.TestCase):
         status, headers, _ = self.request("GET", "/static/placeholder.js")
         self.assertEqual((status, headers["Content-Type"]), (200, "text/javascript; charset=utf-8"))
         _, headers, _ = self.request("GET", "/api/meta")
-        self.assertIsNone(headers["Content-Security-Policy"])
+        self.assertEqual(headers["Content-Security-Policy"], web.CONTENT_SECURITY_POLICY)
         self.assertEqual(headers["X-Frame-Options"], "DENY")
+
+    def test_every_response_has_the_security_headers_once(self):
+        expected = {
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "X-Frame-Options": "DENY",
+            "Content-Security-Policy": web.CONTENT_SECURITY_POLICY,
+        }
+        responses = {
+            "GET /": self.request("GET", "/"),
+            "GET /api/meta": self.request("GET", "/api/meta"),
+            "404": self.request("GET", "/nope"),
+            "403": self.request("GET", "/", headers={"Host": "evil.example"}),
+            # http.server's own error pages
+            "501 PUT": self.request("PUT", "/api/run", b"{}"),
+            "501 OPTIONS": self.request("OPTIONS", "/api/run"),
+            "414": self.request("GET", "/" + "a" * 70000),
+        }
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as raw:
+            raw.sendall(b"GET / HTTP/1.1 extra words\r\n\r\n")
+            response = http.client.HTTPResponse(raw)
+            response.begin()
+            responses["400 malformed"] = (response.status, response.headers, response.read())
+        self.assertEqual(
+            [responses[name][0] for name in responses if name[0].isdigit()], [404, 403, 501, 501, 414, 400]
+        )
+        for name, (_, headers, _) in responses.items():
+            for header, value in expected.items():
+                self.assertEqual(headers.get_all(header), [value], (name, header))
         self.assertEqual(headers["Referrer-Policy"], "no-referrer")
 
     def test_head(self):

@@ -175,6 +175,16 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
     timeout = 30  # seconds a client may take to send its request
 
+    def end_headers(self):
+        # Here, not in _send(), so that http.server's own error pages (501, 414, a
+        # malformed request) carry them too.
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")  # with frame-ancestors: no clickjacking
+        self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        super().end_headers()
+
     def log_request(self, code="-", size="-"):
         # Method, path and status only: a query string is client input and is never logged.
         path = re.sub(r"[^!-~]", "?", urlsplit(getattr(self, "path", "") or "").path)[:200]
@@ -280,12 +290,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("X-Frame-Options", "DENY")  # with frame-ancestors below: no clickjacking
-        if content_type.startswith("text/html"):
-            self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)

@@ -9,6 +9,20 @@ from ..models import Target
 from ._util import TIMEOUT, warn
 
 
+class _HttpOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to http(s): urllib would also follow one to ftp:."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).scheme not in ("http", "https"):
+            fp.close()
+            # Not an HTTPError: the source failed, it did not answer with a status.
+            raise urllib.error.URLError(f"HTTP {code} redirect to a URL that is not http(s) was refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_open = urllib.request.build_opener(_HttpOnlyRedirects).open
+
+
 def collect(target: Target) -> dict:
     if "@" in urlsplit(target.url).netloc:
         raise ValueError("credentials in the URL are not supported; pass the URL without user:password@")
@@ -21,7 +35,7 @@ def collect(target: Target) -> dict:
         }
     }
     try:
-        with urllib.request.urlopen(base + "/metrics", timeout=TIMEOUT) as response:
+        with _open(base + "/metrics", timeout=TIMEOUT) as response:
             metrics = parse_metrics(response.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as error:
         error.close()
@@ -40,7 +54,7 @@ def collect(target: Target) -> dict:
 def _status(url: str) -> int:
     """HTTP status of a GET. An unreachable host raises, so health stays 'not collected'."""
     try:
-        with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
+        with _open(url, timeout=TIMEOUT) as response:
             return response.status
     except urllib.error.HTTPError as error:
         error.close()

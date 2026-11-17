@@ -445,7 +445,7 @@ class CollectTests(unittest.TestCase):
         def urlopen(url, timeout):
             return response(METRICS_TEXT if url.endswith("/metrics") else "{}")
 
-        with mock.patch("urllib.request.urlopen", urlopen):
+        with mock.patch("n8n_healthcheck.collectors.http._open", urlopen):
             snapshot, stderr = quiet_collect(Target(url="http://n8n:5678/"))
         self.assertEqual(
             snapshot.health, {"healthz": True, "readiness": True, "metrics_disabled": False}
@@ -460,7 +460,7 @@ class CollectTests(unittest.TestCase):
                 return response("{}")
             raise http_error(503 if url.endswith("/readiness") else 404)
 
-        with mock.patch("urllib.request.urlopen", urlopen):
+        with mock.patch("n8n_healthcheck.collectors.http._open", urlopen):
             snapshot, stderr = quiet_collect(Target(url="http://n8n:5678"))
         self.assertEqual(
             snapshot.health, {"healthz": True, "readiness": False, "metrics_disabled": True}
@@ -477,7 +477,7 @@ class CollectTests(unittest.TestCase):
                         raise failure
                     return response("{}")
 
-                with mock.patch("urllib.request.urlopen", urlopen):
+                with mock.patch("n8n_healthcheck.collectors.http._open", urlopen):
                     snapshot, stderr = quiet_collect(Target(url="http://n8n:5678"))
                 self.assertIs(snapshot.health["metrics_disabled"], False)
                 self.assertIsNone(snapshot.metrics)
@@ -485,14 +485,14 @@ class CollectTests(unittest.TestCase):
 
     def test_http_unreachable(self):
         error = urllib.error.URLError(TimeoutError("timed out"))
-        with mock.patch("urllib.request.urlopen", side_effect=error):
+        with mock.patch("n8n_healthcheck.collectors.http._open", side_effect=error):
             snapshot, stderr = quiet_collect(Target(url="http://n8n:5678"))
         self.assertIsNone(snapshot.health)
         self.assertIsNone(snapshot.metrics)
         self.assertIn("url: not collected", stderr)
 
     def test_http_url_with_credentials_is_rejected_without_leaking(self):
-        with mock.patch("urllib.request.urlopen") as urlopen:
+        with mock.patch("n8n_healthcheck.collectors.http._open") as urlopen:
             snapshot, stderr = quiet_collect(Target(url="http://admin:hunter2@n8n.example.invalid"))
         urlopen.assert_not_called()
         self.assertIsNone(snapshot.health)
@@ -776,6 +776,72 @@ class CollectTests(unittest.TestCase):
         # a mistyped port in a URL without credentials is not a secret
         _, stderr = quiet_collect(Target(redis_url="redis://cache:63x9"))
         self.assertIn("'63x9'", stderr)
+
+    def test_short_password_fragment_does_not_shred_the_warning(self):
+        _, stderr = quiet_collect(Target(redis_url="redis://u:e/S3cretPw@cache"))
+        self.assertEqual(stderr, f"redis_url: not collected (Port could not be cast to integer value as {REDACTED})\n")
+        # two characters before the slash: quoted, or in the URL echoed without its host part
+        from n8n_healthcheck.collectors._util import url_secrets, warn
+
+        url = "redis://:ab/cdefgh@cache:6379"
+        _, stderr = quiet_collect(Target(redis_url=url))
+        self.assertEqual(stderr, f"redis_url: not collected (Port could not be cast to integer value as {REDACTED})\n")
+        for message in ('nonnumeric port "ab"', "cannot parse redis://:ab/cdefgh", "no database cdefgh, table unreachable"):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                warn("redis_url", message, url_secrets(url))
+            self.assertNotIn("ab", stderr.getvalue().replace("database", "").replace("table", "").replace("unreachable", ""))
+            self.assertNotIn("cdefgh", stderr.getvalue())
+        self.assertIn("no database <redacted>, table unreachable", stderr.getvalue())  # not shredded
+
+    def test_short_full_password_is_scrubbed(self):
+        url = "redis://:ab@cache:6379"
+        for message in (f"cannot reach {url}", "AUTH failed for password ab"):
+            with mock.patch("socket.create_connection", side_effect=RuntimeError(message)):
+                _, stderr = quiet_collect(Target(redis_url=url))
+            self.assertNotIn(":ab@", stderr)
+            self.assertNotIn("password ab", stderr)
+
+    def test_redirect_to_a_non_http_url_is_not_followed(self):
+        import http.server
+        import threading
+
+        class Redirecting(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/ok/healthz" or self.path == "/ok/healthz/readiness":
+                    self.send_response(302)
+                    self.send_header("Location", "/landed")  # http -> http is still followed
+                elif self.path == "/landed":
+                    self.send_response(200)
+                elif self.path.startswith("/ok/"):
+                    self.send_response(404)
+                else:
+                    self.send_response(302)
+                    self.send_header("Location", "ftp://127.0.0.1:1/x")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Redirecting)
+        thread = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        with mock.patch("urllib.request.FTPHandler.ftp_open") as ftp_open:
+            snapshot, stderr = quiet_collect(Target(url=base))
+            followed, _ = quiet_collect(Target(url=base + "/ok"))
+        ftp_open.assert_not_called()
+        self.assertIsNone(snapshot.health)
+        self.assertIsNone(snapshot.metrics)
+        self.assertEqual(stderr.count("\n"), 1)
+        self.assertTrue(stderr.startswith("url: not collected ("))
+        self.assertIn("redirect to a URL that is not http(s) was refused", stderr)
+        self.assertEqual(followed.health, {"healthz": True, "readiness": True, "metrics_disabled": True})
 
 
 if __name__ == "__main__":

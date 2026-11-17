@@ -34,6 +34,10 @@ def redact(name: str, value: str) -> str:
     return value
 
 
+# A fragment of a password shorter than this is not replaced wherever it occurs.
+SHORT_SECRET = 3
+
+
 def url_secrets(*urls: str | None) -> set:
     """The passwords embedded in the given URLs, both as written and percent-decoded."""
     secrets = set()
@@ -49,7 +53,14 @@ def url_secrets(*urls: str | None) -> set:
             # quotes what precedes it as a bad port: redis://:pa/ss@host -> "... as 'pa'".
             if "@" in url and "@" not in parts.netloc:
                 fragment = parts.netloc.rpartition(":")[2]
-                secrets |= {fragment, unquote(fragment)}
+                rest = url.split("://", 1)[-1][len(parts.netloc) :].rpartition("@")[0]  # "/ss"
+                for piece in (fragment, fragment + rest, rest.lstrip("/")):
+                    if len(piece) >= SHORT_SECRET:
+                        secrets |= {piece, unquote(piece)}
+                    elif piece:
+                        # Replacing one or two characters everywhere would shred the message,
+                        # so only where they stand as a value: quoted, or as the URL's port.
+                        secrets |= {f"'{piece}'", f'"{piece}"', f":{piece}/"}
         if parts.password:
             secrets |= {parts.password, unquote(parts.password)}
         secrets |= {value for key, value in parse_qsl(parts.query) if key == "password"}
