@@ -8,6 +8,8 @@
 
 (() => {
   const MAX_BODY_BYTES = 1024 * 1024; // same limit as the server
+  // The server gives up on each source after a few seconds, so a run ends well within this.
+  const RUN_TIMEOUT_MS = 3 * 60 * 1000;
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   const $ = (id) => document.getElementById(id);
@@ -132,7 +134,7 @@
         ? `The server answered: ${data.error}.`
         : `The server answered with HTTP ${response.status}.`;
     } catch {
-      problem = "The local server did not answer. Check that “n8n-healthcheck serve” is still running in your terminal.";
+      problem = "The local server did not answer. Check that “n8n-healthcheck serve” is still running.";
     }
     $("meta-loading").hidden = true;
     if (problem) {
@@ -157,7 +159,7 @@
       hint.textContent = source.hint || "";
       fieldset.setAttribute("aria-describedby", hint.id);
       fieldset.querySelector(".source__name").textContent = source.label || source.id;
-      fieldset.querySelector(".source__state").textContent = source.available ? "" : "Unavailable on this computer";
+      fieldset.querySelector(".source__state").textContent = source.available ? "" : "Unavailable on the n8n-healthcheck machine";
       fieldset.classList.toggle("source--unavailable", !source.available);
     }
   }
@@ -248,7 +250,11 @@
     const url = value("f-url").trim();
     if (url) {
       let valid = false;
-      try { valid = ["http:", "https:"].includes(new URL(url).protocol); } catch { /* not a URL */ }
+      // Same rule as the server: http or https, with a host.
+      try {
+        const parsed = new URL(url);
+        valid = ["http:", "https:"].includes(parsed.protocol) && parsed.hostname !== "" && /^https?:\/\//i.test(url);
+      } catch { /* not a URL */ }
       if (valid) body.url = url;
       else errors.push({ errorId: "e-url", focus: "f-url", message: "Enter the full address, starting with http:// or https:// — for example https://n8n.example.com." });
     }
@@ -341,6 +347,8 @@
     announce("Health check running. This can take up to a minute.");
     let failure = null;
     let data = null;
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), RUN_TIMEOUT_MS);
     try {
       const response = await fetch("/api/run", {
         method: "POST",
@@ -348,6 +356,7 @@
         body: JSON.stringify(body),
         cache: "no-store",
         referrerPolicy: "no-referrer",
+        signal: abort.signal,
       });
       data = await response.json().catch(() => null);
       if (!response.ok) {
@@ -356,8 +365,11 @@
         failure = ["The server sent a report this page could not read.", "Try again; if it keeps happening, the page and the server may be different versions — restart “n8n-healthcheck serve” and reload."];
       }
     } catch {
-      failure = ["The local server could not be reached.", "Check that “n8n-healthcheck serve” is still running in your terminal, then try again. Your form is unchanged."];
+      failure = abort.signal.aborted
+        ? ["The health check did not finish within 3 minutes.", "This page stopped waiting. The server may still be working on it: wait a moment, then try again. If it keeps happening, restart “n8n-healthcheck serve”."]
+        : ["The server could not be reached.", "Check that “n8n-healthcheck serve” is still running, then try again. Your form is unchanged."];
     }
+    clearTimeout(deadline);
     setRunning(false);
 
     if (failure) {
@@ -385,17 +397,19 @@
       case 2: return { kind: "critical", icon: "critical", label: "Critical issues found" };
       case 1: return { kind: "warning", icon: "warning", label: "Warnings found" };
       case 0:
+        // Exit code 0 still allows informational findings, so "no issues" would contradict the list.
         return data.partial
-          ? { kind: "partial-clean", icon: "partial-clean", label: "No issues found in the part that was checked" }
-          : { kind: "clean", icon: "clean", label: "No issues found" };
+          ? { kind: "partial-clean", icon: "partial-clean", label: `${data.findings.length ? "No critical issues or warnings" : "No issues found"} in the part that was checked` }
+          : { kind: "clean", icon: "clean", label: data.findings.length ? "No critical issues or warnings" : "No issues found" };
       default:
         return {
           kind: "error",
           icon: "unknown",
           label: "The check could not run",
-          note: noData
-            ? "None of the sources you gave could be read, so nothing was assessed and there is no result to rely on. “Not assessed” and the messages from the collectors below say what went wrong. Use “Run again” to correct the sources."
-            : "No check was able to run on the data that was collected, so there is no result to rely on. See “Not assessed” below, then use “Run again”.",
+          // With no data the API summary already says the check could not run and why;
+          // when every check crashed it still reads "found 0 issues", so ours leads.
+          lead: noData ? null : "No check was able to run on the data that was collected, so there is no result to rely on. See “Not assessed” below.",
+          note: noData ? "“Not assessed” and the messages from the collectors below have the details. Use “Run again” to correct the sources." : null,
         };
     }
   }
@@ -415,10 +429,10 @@
     $("status-icon").replaceChildren(icon(status.icon));
     $("status-label").textContent = status.label;
     $("status-partial").hidden = !data.partial || status.kind === "error";
-    // When the check could not run, "found 0 issues" must not be the headline.
-    $("summary").textContent = status.note || data.summary || "";
-    $("status-note").textContent = status.note ? (data.summary || "") : "";
-    $("status-note").hidden = !status.note || !data.summary;
+    const note = status.lead ? data.summary : status.note;
+    $("summary").textContent = status.lead || data.summary || "";
+    $("status-note").textContent = note || "";
+    $("status-note").hidden = !note;
 
     renderScores(data);
     renderFindings(data, status);
@@ -551,6 +565,7 @@
     const filtered = filters.severity !== "all" || filters.area !== "all";
     const empty = $("findings-empty");
     empty.hidden = shown > 0;
+    empty.classList.toggle("empty--filtered", total > 0); // not printed: paper shows every finding
     $("findings-empty-text").textContent = total === 0 ? empty.dataset.none : "No findings match these filters.";
     $("clear-filters").hidden = total === 0;
     const count = total === 0 ? "" : filtered ? `Showing ${shown} of ${plural(total, "finding")}.` : `${plural(total, "finding")}.`;
@@ -585,7 +600,7 @@
       } else if (entry.reason === "not_provided" && section) {
         const source = meta && meta.sources.find((item) => item.id === section.source);
         if (source && !source.available) {
-          tag = "Unavailable on this computer";
+          tag = "Unavailable on the n8n-healthcheck machine";
           why = `${source.hint} Run n8n-healthcheck where that tool is installed to include it.`;
         } else {
           why = `${section.missing} Add it on the form and run again to include it.`;
@@ -651,13 +666,23 @@
   $("f-env-file").addEventListener("change", chooseEnvFile);
   $("env-chip-remove").addEventListener("click", removeEnvFile);
 
+  // Connection strings are type="text" masked with CSS, because browsers offer to save
+  // type="password" fields whatever autocomplete says. Without the CSS property, a real
+  // password field is the safer fallback.
+  const MASK_SUPPORTED = typeof CSS !== "undefined" && CSS.supports("-webkit-text-security", "disc");
+  if (!MASK_SUPPORTED) {
+    for (const input of document.querySelectorAll('input[data-masked="true"]')) input.type = "password";
+  }
+
   for (const toggle of document.querySelectorAll(".secret__toggle")) {
     toggle.addEventListener("click", () => {
       const input = $(toggle.dataset.toggle);
-      const show = input.type === "password";
-      input.type = show ? "text" : "password";
-      toggle.setAttribute("aria-pressed", String(show));
+      const show = input.dataset.masked === "true";
+      input.dataset.masked = String(!show);
+      if (!MASK_SUPPORTED) input.type = show ? "text" : "password";
+      // The visible word and the accessible name change together.
       toggle.textContent = show ? "Hide" : "Show";
+      toggle.setAttribute("aria-label", `${show ? "Hide" : "Show"} ${toggle.dataset.what}`);
     });
   }
 

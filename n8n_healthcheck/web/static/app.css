@@ -85,7 +85,7 @@ body {
 
 h1, h2, h3, h4, p, ul, ol, dl, dd, fieldset, legend { margin: 0; padding: 0; }
 ul, ol { list-style: none; }
-h1, h2, h3, h4 { text-wrap: balance; line-height: 1.25; }
+h1, h2, h3, h4 { text-wrap: balance; line-height: 1.25; overflow-wrap: anywhere; }
 h2 { font-size: 1.5rem; font-weight: 650; }
 h3 { font-size: 1.125rem; font-weight: 650; }
 h4 { font-size: 1rem; font-weight: 650; }
@@ -169,6 +169,8 @@ main { padding-block: var(--space-6) var(--space-7); }
   font-weight: 550;
   line-height: 1.2;
   cursor: pointer;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .btn:hover { background: var(--surface-2); }
 .btn--small { min-height: 2rem; padding: var(--space-1) var(--space-3); font-size: 0.875rem; }
@@ -306,6 +308,9 @@ input[type="file"]::file-selector-button {
 
 .secret { display: flex; gap: var(--space-2); align-items: flex-end; }
 .secret input { flex: 1; min-width: 0; }
+/* Masked like a password without being type="password", so browsers do not offer to save it.
+   Where the property is not supported the script falls back to type="password". */
+input[data-masked="true"] { -webkit-text-security: disc; }
 .secret__toggle { flex: none; min-width: 4rem; }
 
 .filechip {
@@ -451,6 +456,8 @@ input[type="file"]::file-selector-button {
 .tag--warning { color: var(--warning); background: var(--warning-bg); }
 .tag--info { color: var(--info); background: var(--info-bg); }
 .tag--area { color: var(--muted); font-weight: 500; }
+/* These can carry values this page does not know (a new reason, area or severity). */
+.tag--area, .tag--reason, .tag--failed { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 
 .block { margin-top: var(--space-6); }
 .block > h3 { padding-bottom: var(--space-2); border-bottom: 1px solid var(--border); }
@@ -508,15 +515,15 @@ input[type="file"]::file-selector-button {
   gap: var(--space-3) var(--space-5);
   margin-top: var(--space-4);
 }
-.toolbar__group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.toolbar__group { min-width: 0; max-width: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .toolbar__group--end { margin-left: auto; }
 .toolbar label { font-size: 0.875rem; }
-.toolbar select { width: auto; min-height: 2rem; margin-top: 0; padding-block: var(--space-1); font-size: 0.875rem; }
+.toolbar select { width: auto; max-width: 100%; min-height: 2rem; margin-top: 0; padding-block: var(--space-1); font-size: 0.875rem; }
 .toolbar__count { margin-top: var(--space-2); color: var(--muted); font-size: 0.875rem; }
 .toolbar__count:empty { display: none; }
 
 .sev-group { margin-top: var(--space-4); }
-.sev-group > h4 { display: flex; align-items: center; gap: var(--space-2); }
+.sev-group > h4 { overflow-wrap: anywhere; }
 .sev-group > ul { display: grid; gap: var(--space-2); margin-top: var(--space-2); }
 
 .finding {
@@ -651,13 +658,11 @@ input[type="file"]::file-selector-button {
   main { padding-block: 0; }
   .masthead { border-bottom: 1px solid #000; margin-bottom: 12pt; }
   .skip-link, #view-form, .actions, .action-status, .toolbar, .toolbar__count,
-  #findings-empty button, .chevron { display: none !important; }
+  #findings-empty button, .empty--filtered, .chevron { display: none !important; }
   /* Collapsed and filtered-out findings are printed too: paper has no controls. */
   .finding__body[hidden], .finding[hidden], .sev-group[hidden] { display: block !important; }
   .finding__toggle { display: block; padding-left: var(--space-4); }
   .finding__body { padding-left: var(--space-4); }
   .finding, .score, .na li, .status { break-inside: avoid; }
   h3, h4 { break-after: avoid; }
-  .print-note { display: block !important; }
 }
-.print-note { display: none; }

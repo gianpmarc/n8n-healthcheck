@@ -45,7 +45,7 @@
 
     <ul class="assurances">
       <li><strong>Read-only.</strong> Nothing is changed on your instance, database or cluster.</li>
-      <li><strong>Local.</strong> The check runs on this computer; what you type is sent only to the local n8n-healthcheck server.</li>
+      <li><strong>Local.</strong> The check runs on the machine running n8n-healthcheck; what you type is sent only to that server.</li>
       <li><strong>Nothing kept.</strong> No form value is saved in the browser, and the server keeps nothing once the check ends. Reloading the page clears the form.</li>
     </ul>
 
@@ -92,8 +92,8 @@
         <div class="field">
           <label for="f-postgres">Connection string</label>
           <div class="secret">
-            <input id="f-postgres" name="postgres_dsn" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" placeholder="postgresql://user:password@host:5432/n8n…" aria-describedby="e-postgres">
-            <button type="button" class="btn secret__toggle" data-toggle="f-postgres" aria-pressed="false" aria-label="Show Postgres connection string">Show</button>
+            <input id="f-postgres" name="postgres_dsn" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" placeholder="postgresql://user:password@host:5432/n8n…" aria-describedby="e-postgres">
+            <button type="button" class="btn secret__toggle" data-toggle="f-postgres" data-what="Postgres connection string" aria-label="Show Postgres connection string">Show</button>
           </div>
           <p class="field__error" id="e-postgres" hidden></p>
         </div>
@@ -105,8 +105,8 @@
         <div class="field">
           <label for="f-redis">Connection URL</label>
           <div class="secret">
-            <input id="f-redis" name="redis_url" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" placeholder="redis://:password@host:6379…" aria-describedby="e-redis">
-            <button type="button" class="btn secret__toggle" data-toggle="f-redis" aria-pressed="false" aria-label="Show Redis connection URL">Show</button>
+            <input id="f-redis" name="redis_url" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" placeholder="redis://:password@host:6379…" aria-describedby="e-redis">
+            <button type="button" class="btn secret__toggle" data-toggle="f-redis" data-what="Redis connection URL" aria-label="Show Redis connection URL">Show</button>
           </div>
           <p class="field__error" id="e-redis" hidden></p>
         </div>

@@ -763,6 +763,20 @@ class CollectTests(unittest.TestCase):
         self.assertNotIn("ss/word", stderr)
         self.assertIn(f"redis://{REDACTED}@cache:6379", stderr)
 
+    def test_password_with_a_slash_is_not_quoted_as_a_bad_port(self):
+        # "/" ends the host part early, and urllib names what precedes it in its error
+        for url, leaked in (
+            ("redis://:pa55w0rd/more@cache:6379", "pa55w0rd"),
+            ("redis://user:hunter2/x@cache:6379/0", "hunter2"),
+            ("rediss://:top%2Fsecret/more@cache", "top%2Fsecret"),
+        ):
+            _, stderr = quiet_collect(Target(redis_url=url))
+            self.assertNotIn(leaked, stderr, url)
+            self.assertIn(f"redis_url: not collected (Port could not be cast to integer value as '{REDACTED}')", stderr)
+        # a mistyped port in a URL without credentials is not a secret
+        _, stderr = quiet_collect(Target(redis_url="redis://cache:63x9"))
+        self.assertIn("'63x9'", stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

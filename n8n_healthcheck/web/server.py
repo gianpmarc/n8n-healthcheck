@@ -36,6 +36,12 @@ from ..models import Target
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_BYTES = 1024 * 1024
 LOCAL_NAMES = ("localhost", "127.0.0.1", "[::1]")
+WILDCARD_HOSTS = ("", "0.0.0.0", "::")
+# The same policy as the page's own <meta>, plus what only a header can say.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+)
 
 # Request field -> Target field. env_text is the content of an env file, never a path.
 RUN_FIELDS = {
@@ -83,7 +89,7 @@ def parse_run_request(body: bytes) -> dict:
     """Validate the JSON body of POST /api/run; return only the fields that are set."""
     try:
         data = json.loads(body)
-    except ValueError:  # includes UnicodeDecodeError
+    except (ValueError, RecursionError):  # ValueError includes UnicodeDecodeError; RecursionError: deep nesting
         raise BadRequest("the request body is not valid JSON") from None
     if not isinstance(data, dict):
         raise BadRequest("the request body must be a JSON object")
@@ -99,6 +105,9 @@ def parse_run_request(body: bytes) -> dict:
             raise BadRequest(f"{name} must be a string")
         if value.strip():
             fields[name] = value if name == "env_text" else value.strip()
+    # urllib would also open file:, ftp: and data: URLs, i.e. read local files.
+    if "url" in fields and not cli.valid_url(fields["url"]):
+        raise BadRequest("url must be an http:// or https:// URL with a host")
     if not set(fields) - {"kube_context"}:
         raise BadRequest("nothing to inspect: give at least one of url, env_text, postgres_dsn, redis_url, kube_namespace")
     return fields
@@ -145,16 +154,18 @@ def run_check(fields: dict) -> dict:
             snapshot = collect(target)
 
     failed, nothing_collected = cli.failed_sections(target, snapshot)
+    warnings = [line for line in "".join(tee.captured).splitlines() if line.strip()]
     findings = engine.run(snapshot, ALL_RULES)
-    data = report.build_report(snapshot, findings, failed=tuple(failed))
+    # The CLI stops with exit code 3 before the report when no source answered; here a
+    # report is still returned, saying that the check could not run and why.
+    report_args = (snapshot, findings, tuple(failed), tuple(warnings) if nothing_collected else None)
+    data = report.build_report(*report_args)
     data["findings"] = [asdict(finding) for finding in data["findings"]]
     return {
         **data,
-        # The CLI stops with exit code 3 before the report when no source answered;
-        # here the (empty) report is still returned so the page can show what failed.
         "exit_code": cli.EXIT_ERROR if nothing_collected else cli.result_code(findings, len(ALL_RULES)),
-        "warnings": [line for line in "".join(tee.captured).splitlines() if line.strip()],
-        "markdown": report.render_markdown(snapshot, findings, failed=tuple(failed)),
+        "warnings": warnings,
+        "markdown": report.render_markdown(*report_args),
         "snapshot": asdict(snapshot),
     }
 
@@ -163,6 +174,14 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "n8n-healthcheck"
     sys_version = ""
     timeout = 30  # seconds a client may take to send its request
+
+    def log_request(self, code="-", size="-"):
+        # Method, path and status only: a query string is client input and is never logged.
+        path = re.sub(r"[^!-~]", "?", urlsplit(getattr(self, "path", "") or "").path)[:200]
+        self.log_message('"%s %s" %s', self.command or "-", path or "-", getattr(code, "value", code))
+
+    def log_error(self, format, *args):
+        pass  # http.server quotes the raw request line here; log_request() records the status
 
     def do_GET(self):
         if not self._host_allowed():
@@ -179,13 +198,21 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send_json(404, {"error": "not found"})
 
+    do_HEAD = do_GET  # _send() leaves the body out
+
     def do_POST(self):
         if not self._host_allowed():
             return
         if urlsplit(self.path).path != "/api/run":
             return self._send_json(404, {"error": "not found"})
         origin = self.headers.get("Origin")
-        if origin is not None and origin.lower() != "http://" + self.headers.get("Host", "").lower():
+        # Host was checked above, so an Origin on the same host and port is this page
+        # (the scheme is not compared: a TLS proxy in front makes it https).
+        try:
+            same_origin = origin is None or urlsplit(origin).netloc.lower() == self.headers.get("Host", "").lower()
+        except ValueError:
+            same_origin = False
+        if not same_origin:
             return self._send_json(403, {"error": "cross-origin requests are not allowed"})
         if self.headers.get_content_type() != "application/json":  # text/plain when the header is absent
             return self._send_json(415, {"error": "Content-Type must be application/json"})
@@ -245,7 +272,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, content_type, path.read_bytes())
 
     def _send_json(self, status: int, payload: dict) -> None:
-        self._send(status, "application/json; charset=utf-8", json.dumps(payload).encode("utf-8"))
+        # A scraped metric can be NaN or +Inf, which json would write as invalid JSON.
+        body = json.dumps(cli.json_safe(payload), allow_nan=False).encode("utf-8")
+        self._send(status, "application/json; charset=utf-8", body)
 
     def _send(self, status: int, content_type: str, body: bytes) -> None:
         self.send_response(status)
@@ -253,8 +282,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if content_type.startswith("text/html"):
+            self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+
+def allowed_hosts(host: str, port: int, allow_hosts=()) -> frozenset:
+    """Host header values accepted by a server bound to host:port."""
+    # A specific bind address is itself a name the page is opened with.
+    bind = () if host in WILDCARD_HOSTS else (f"[{host}]" if ":" in host else host,)
+    names = set()
+    for name in (*LOCAL_NAMES, *bind, *allow_hosts):
+        name = name.strip().lower()
+        if re.search(r":\d+$", name):  # an explicit port, e.g. a different published port
+            names.add(name)
+        elif name:
+            names.add(f"{name}:{port}")
+            if port == 80:  # browsers leave the default port out of Host
+                names.add(name)
+    return frozenset(names)
 
 
 def make_server(host: str, port: int, allow_hosts=()) -> ThreadingHTTPServer:
@@ -264,18 +313,12 @@ def make_server(host: str, port: int, allow_hosts=()) -> ThreadingHTTPServer:
         daemon_threads = True
         address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
 
+        def handle_error(self, request, client_address):
+            # The default prints a traceback, whose message could quote request data.
+            print(f"request from {client_address[0]} failed: {sys.exc_info()[0].__name__}", file=sys.stderr)
+
     server = Server((host, port), Handler)
-    port = server.server_address[1]
-    names = set()
-    for name in (*LOCAL_NAMES, *allow_hosts):
-        name = name.strip().lower()
-        if re.search(r":\d+$", name):  # an explicit port, e.g. a different published port
-            names.add(name)
-        elif name:
-            names.add(f"{name}:{port}")
-            if port == 80:  # browsers leave the default port out of Host
-                names.add(name)
-    server.allowed_hosts = frozenset(names)
+    server.allowed_hosts = allowed_hosts(host, server.server_address[1], allow_hosts)
     server.run_lock = threading.Lock()  # one run at a time
     return server
 
@@ -291,13 +334,14 @@ def _is_loopback(host: str) -> bool:
 
 def serve(host: str, port: int, open_browser: bool, allow_hosts=()) -> int:
     server = make_server(host, port, allow_hosts)
-    shown = "localhost" if host in ("", "0.0.0.0", "::") else f"[{host}]" if ":" in host else host
+    shown = "localhost" if host in WILDCARD_HOSTS else f"[{host}]" if ":" in host else host
     url = f"http://{shown}:{server.server_address[1]}/"
     print(f"n8n-healthcheck is serving on {url} (Ctrl+C to stop)", flush=True)
     if not _is_loopback(host):
         print(
             f"warning: listening on {host}, not a loopback address. This server has no authentication: "
-            "anyone who can reach it can make it connect to hosts and databases of their choice.",
+            "anyone who can reach it can make it connect to hosts and databases of their choice. "
+            "The number of simultaneous connections is not limited either.",
             file=sys.stderr,
             flush=True,
         )

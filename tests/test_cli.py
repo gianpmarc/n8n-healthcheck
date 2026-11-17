@@ -114,6 +114,31 @@ class CliTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertIn("Exit codes:", out.getvalue())
 
+    def test_url_must_be_http_or_https(self):
+        # urllib would open file:, ftp: and data: URLs too, i.e. read local files
+        for url in ("file:///etc/hosts#", "ftp://ftp.example/pub", "data:text/plain,up 1", "n8n.internal:5678", "http://"):
+            with self.subTest(url=url), mock.patch("n8n_healthcheck.collectors.collect") as collect:
+                with self.assertRaises(SystemExit) as raised, contextlib.redirect_stderr(io.StringIO()) as err:
+                    cli.main(["--url", url])
+                self.assertEqual(raised.exception.code, 3)
+                self.assertIn("--url must be an http:// or https:// URL with a host", err.getvalue())
+                collect.assert_not_called()
+
+    def test_saved_snapshot_is_valid_json_with_non_finite_metrics(self):
+        saved = os.path.join(self.dir, "saved.json")
+        collected = Snapshot(health={"healthz": True}, metrics={"a": float("nan"), "b": float("inf"), "c": 2.0})
+        with mock.patch("n8n_healthcheck.collectors.collect", return_value=collected):
+            code, _, _ = self.run_cli(["--url", "https://n8n.example.com", "--save-snapshot", saved])
+        self.assertEqual(code, 0)
+
+        def reject(constant):
+            raise AssertionError(f"{constant} is not valid JSON")
+
+        with open(saved, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh, parse_constant=reject)["metrics"], {"a": None, "b": None, "c": 2.0})
+        # ... and it loads back
+        self.assertEqual(self.run_cli(["--snapshot", saved])[0], 0)
+
     def test_unwritable_paths_exit_3(self):
         bad = os.path.join(self.dir, "no-such-dir", "file")
         for flag in ("-o", "--save-snapshot"):
