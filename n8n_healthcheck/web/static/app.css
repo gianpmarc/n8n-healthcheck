@@ -407,6 +407,7 @@ input[data-masked="true"] { -webkit-text-security: disc; }
   overflow-wrap: anywhere;
 }
 .field__error::before { content: "Error: "; }
+.field__hint { margin-top: var(--space-2); color: var(--muted); font-size: 0.875rem; }
 
 .submit-row {
   display: flex;
@@ -773,6 +774,92 @@ input[data-masked="true"] { -webkit-text-security: disc; }
   white-space: pre-wrap;
 }
 
+/* ── Environment profile: the share step and a saved profile ────────── */
+.share-note { color: var(--text); }
+#share-form .submit-row { margin-top: var(--space-5); }
+.ppart { margin-top: var(--space-6); }
+.ppart > h4 {
+  color: var(--muted);
+  font: 400 0.8125rem/1.4 var(--mono);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+.ppart__bulk { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+
+.pdetails {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-4);
+  margin-top: var(--space-3);
+}
+.pdetails dt {
+  padding-top: 0.2em;
+  color: var(--muted);
+  font: 400 0.75rem/1.4 var(--mono);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+.pdetails dd { overflow-wrap: anywhere; }
+
+.ptable {
+  width: 100%;
+  margin-top: var(--space-3);
+  table-layout: fixed;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  border-spacing: 0;
+  background: var(--surface);
+  overflow: hidden; /* the group rows keep inside the rounded corners */
+}
+.ptable th, .ptable td {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  font-weight: 400;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.ptable thead th, .ptable__group th {
+  color: var(--muted);
+  font: 400 0.75rem/1.4 var(--mono);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+.ptable thead th { border-top: 0; }
+/* A group is named by text of the profile (the start of a fact id, a scope): shown as it is. */
+.ptable__group th { padding-block: var(--space-2); background: var(--surface-2); color: var(--text); text-transform: none; }
+.ptable th[scope="row"] { width: 38%; font-family: var(--mono); font-size: 0.875rem; }
+.ptable .ptable__withhold { width: 6.5rem; padding-block: var(--space-1); text-align: center; vertical-align: middle; }
+.ptable thead .ptable__withhold { padding-block: var(--space-3); }
+.pline { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+.pvalue { min-width: 0; font-weight: 500; }
+.pdetail { color: var(--muted); font-size: 0.875rem; }
+p.pdetail { margin-top: var(--space-1); }
+/* Withheld is the reader's own choice: the one inverted tag, so it cannot be missed. */
+.tag--withheld { color: var(--surface); background: var(--text); border-color: var(--text); }
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  cursor: pointer;
+}
+.check input { flex: none; width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--text); cursor: pointer; }
+.check--row { justify-content: flex-start; gap: var(--space-3); margin-top: var(--space-2); font-size: 1rem; font-weight: 400; }
+
+.pfindings { margin-top: var(--space-3); border-bottom: 1px solid var(--border); }
+.pfindings li { padding-block: var(--space-3); border-top: 1px solid var(--border); }
+
+@media (max-width: 30rem) {
+  .ptable th, .ptable td { padding: var(--space-2) var(--space-3); }
+  .ptable .ptable__withhold { width: 5.25rem; padding-inline: var(--space-1); }
+  .ptable th[scope="row"] { width: 42%; font-size: 0.8125rem; }
+  .pdetails { grid-template-columns: minmax(0, 1fr); }
+  .pdetails dd + dt { margin-top: var(--space-2); }
+}
+
 .report-foot { margin-top: var(--space-7); color: var(--muted); font-size: 0.875rem; }
 
 /* ── Print: a clean report, everything expanded, no controls ────────── */
@@ -801,7 +888,7 @@ input[data-masked="true"] { -webkit-text-security: disc; }
   .wrap { max-width: none; padding-inline: 0; }
   main { padding-block: 0; }
   .masthead { border-bottom: 1px solid var(--text); margin-bottom: 12pt; }
-  .skip-link, #view-form, .actions, .action-status, .toolbar, .toolbar__count,
+  .skip-link, #view-form, #share-block, .actions, .action-status, .toolbar, .toolbar__count,
   #findings-empty button, .empty--filtered, .chevron { display: none !important; }
   /* Collapsed and filtered-out findings are printed too: paper has no controls. */
   .finding__body[hidden], .finding[hidden], .sev-group[hidden] { display: block !important; }

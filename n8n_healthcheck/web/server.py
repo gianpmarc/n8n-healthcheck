@@ -30,7 +30,7 @@ from urllib.parse import unquote, urlsplit
 
 import n8n_healthcheck
 
-from .. import cli, engine, report
+from .. import cli, engine, profile, report
 from ..models import Target
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -167,6 +167,8 @@ def run_check(fields: dict) -> dict:
         "warnings": warnings,
         "markdown": report.render_markdown(*report_args),
         "snapshot": asdict(snapshot),
+        # Default reason, no reference, nothing withheld: the page blanks entries itself.
+        "profile": profile.build_profile(snapshot, findings, tuple(failed)),
     }
 
 
