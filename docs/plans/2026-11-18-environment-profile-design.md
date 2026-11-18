@@ -92,7 +92,8 @@ Chosen by the user: 1.
 - One JSON file is the profile.
 - Environment variables: facts derived from them, plus the n8n settings
   themselves with their value, except those that hold hosts, URLs or paths,
-  which are recorded only as "set".
+  which are recorded only as "set". (After the review: the value only for
+  settings known to be a boolean, a number or a fixed word; see "Settings".)
 
 ## The file
 
@@ -150,6 +151,13 @@ The format is described for outside readers in a new `docs/profile-format.md`.
 A change that removes or renames a field or a fact id raises `format_version`.
 Adding a fact id does not.
 
+*Added after the reviews.* A file is complete or it is refused: a version 1
+file must hold the six sources and the 32 fact ids of the first release, kept
+as a frozen list (`FORMAT_1_FACT_IDS`) so that a later tool with a larger
+catalogue still opens it. On load `run.reference` is checked as when typed.
+Text from a file is never printed raw: the rendering drops control characters
+and escapes markup, and error messages name an entry by its position.
+
 ## Fact catalogue, version 1
 
 Ids are this project's own vocabulary. One line each is enough for a reader of
@@ -157,12 +165,12 @@ the file to understand it.
 
 | Id | From |
 |---|---|
-| `n8n.version` | `Snapshot.n8n_version`; else the version in the image tag when every main container agrees (`image_version`) |
-| `n8n.image_official` | Kubernetes: true when the image is `n8nio/n8n` or `docker.n8n.io/n8nio/n8n`; the image name itself is never written |
+| `n8n.version` | `Snapshot.n8n_version`; else the version in the image tag when every main container runs the official image and agrees (`image_version`). Never the tag of another image, never the start of a longer dotted number |
+| `n8n.image_official` | Kubernetes: true when the image is `n8nio/n8n`, `docker.io/n8nio/n8n` (the same image with Docker Hub written out) or `docker.n8n.io/n8nio/n8n`; the image name itself is never written |
 | `orchestrator` | `kubernetes` when that source was collected, else unknown |
 | `executions.mode` | `EXECUTIONS_MODE`, default `regular` |
-| `main.replicas`, `worker.replicas`, `webhook.replicas` | Kubernetes Deployments, summed per role. A role with no container found is unknown, never 0: only Deployments are read, so a StatefulSet would be missed |
-| `worker.concurrency` | Same precedence as rule SCAL in `rules/scalability.py`: `N8N_CONCURRENCY_PRODUCTION_LIMIT` on the workers unless unset or -1, else the `--concurrency` flag, else 10. Needs worker containers; with an env file only it is unknown |
+| `main.replicas`, `worker.replicas`, `webhook.replicas` | Kubernetes Deployments, summed per role. A role with no container found is unknown, never 0: only Deployments are read, so a StatefulSet would be missed. An image called exactly `n8n` is n8n. In the main role, containers under another name (an exporter or another server whose name contains "n8n") are left out when one called `n8n` exists, never counted; a role with no container called `n8n`, and a worker or webhook role with one under another name, is unknown. The same holds for `resources.*` and `probes.*` |
+| `worker.concurrency` | Same precedence as rule SCAL in `rules/scalability.py`: `N8N_CONCURRENCY_PRODUCTION_LIMIT` on the workers unless unset or -1, else the `--concurrency` flag, else 10. Needs worker containers; with an env file only it is unknown. A flag that is present but not a literal number (`--concurrency=$N`) is unknown; so is a limit given through `<NAME>_FILE`, and the default of 10 on an image that is not the official one |
 | `multi_main.enabled` | `N8N_MULTI_MAIN_SETUP_ENABLED` |
 | `task_runners.enabled`, `task_runners.mode` | `N8N_RUNNERS_ENABLED`, `N8N_RUNNERS_MODE` |
 | `binary_data.mode` | `N8N_DEFAULT_BINARY_DATA_MODE` |
@@ -172,7 +180,7 @@ the file to understand it.
 | `database.version` | Postgres |
 | `database.pool_size` | `DB_POSTGRESDB_POOL_SIZE` |
 | `database.max_connections` | Postgres |
-| `database.execution_count`, `database.execution_table_bytes`, `database.oldest_execution_age_days` | Postgres |
+| `database.execution_count`, `database.execution_table_bytes`, `database.oldest_execution_age_days` | Postgres. The age is unknown when the table is empty (the collector stores 0.0 for it) |
 | `queue.redis_version`, `queue.maxmemory_policy`, `queue.maxmemory_bytes` | Redis |
 | `queue.waiting_jobs`, `queue.active_jobs`, `queue.failed_jobs` | Redis |
 | `resources.main`, `resources.worker` | Kubernetes requests and limits; value is an object `{requests, limits}`; unknown when containers of the role disagree |
@@ -189,7 +197,10 @@ Rules for every fact:
 - **Defaults.** Only three are stable across n8n versions and are reported as
   measured when the variable is provably unset (environment read and complete):
   `executions.mode` = `regular`, `database.engine` = `sqlite`,
-  `multi_main.enabled` = false. For every other fact an unset variable gives
+  `multi_main.enabled` = false. "Provably unset" also requires that
+  `<NAME>_FILE` is absent (then the fact is unknown whatever else is set) and,
+  when Kubernetes was read, that the main containers run the official image:
+  another image may set the variable itself. For every other fact an unset variable gives
   unknown with the detail "not set, the n8n default for this version applies".
   *(My call: the other defaults changed between releases, and a wrong default
   stated as a fact is worse than a gap.)*
@@ -209,30 +220,37 @@ mostly empty for no gain.)*
 
 The n8n settings themselves, from the same environment the rules use.
 
-- **Which names**: those starting with `N8N_`, `EXECUTIONS_`, `QUEUE_`, `DB_`,
-  `WEBHOOK_`, `OFFLOAD_`, `NODE_FUNCTION_`, plus `NODE_ENV` and `NODE_OPTIONS`.
-  Any other variable is not listed, not even by name: `settings_not_listed`
-  carries only how many there were. *(My call: custom variable names can
-  identify a company or a product.)*
+*Changed after the review of the first implementation, approved by the user. The
+first version listed names by prefix and wrote a value unless the name or the
+shape looked unsafe. A blocklist cannot know every name: host names without
+dots, package names, a tenant id and short secrets under unremarkable names all
+passed. The filter is now an allowlist.*
+
+- **Which names**: only the variables n8n documents, kept as a list in
+  `n8n_healthcheck/n8n_settings.py` (taken from the environment variable
+  reference of n8n's documentation, plus `NODE_ENV`), and `<NAME>_FILE` of one
+  of them. Any other variable is not listed, not even by name, including one
+  that starts with `N8N_`: `settings_not_listed` carries only how many there
+  were. Custom variable names can identify a company or a product. A variable
+  n8n adds later stays counted until the list is updated.
 - **Scope**: `instance` for an env file; for Kubernetes one entry per n8n role
   (`main`, `worker`, `webhook`) that has the variable. With both sources, both
   are listed. Containers of one role that disagree on a variable give
   `state: "set"` with no value.
 - **When the value is written** (`state: "value"`): only when all of these hold,
   otherwise `state: "set"`:
-  - the stored value is not `<redacted>` or `<valueFrom>`;
-  - the name does not contain `HOST`, `URL`, `URI`, `ENDPOINT`, `DOMAIN`,
-    `ADDRESS`, `PROXY`, `PATH`, `FOLDER`, `DIR`, `FILE`, `BUCKET`, `EMAIL`,
-    `USER`, `SENDER`, `NAME`, `OPTIONS`, `PREFIX`, `DATABASE`, `SCHEMA`,
-    `TABLE` (the last four are free identifiers such as `acme_prod`);
-  - the value has a safe shape: at most 64 characters of letters, digits, `_`,
-    `-` and `,` only. No dots, slashes, colons, `@` or spaces, so no host, URL,
-    path, address or e-mail can pass.
+  - the stored value is not `<redacted>` or `<valueFrom>` (an explicit check,
+    with its own test);
+  - the list marks the variable as a boolean, a number or one word of a fixed
+    enumeration. Hosts, URLs, paths, free identifiers, lists of packages or
+    nodes, credentials and the licence tenant id are marked "set only". When in
+    doubt a variable is "set only";
+  - the value actually is of that type: `true` or `false`; digits with an
+    optional sign and decimal part; exactly one of the listed words.
 
-*(My call: two independent tests, by name and by shape, because either alone has
-obvious holes. The cost is that a few harmless values, a cron expression or a
-dotted list, show as "set". A missing value is acceptable; a leaked host is
-not.)*
+The cost: a setting n8n documents as free text is never shown with its value,
+and a new n8n variable is invisible by name until the list is updated. A
+missing value is acceptable; a leaked host is not.
 
 ## Withholding
 
@@ -270,7 +288,12 @@ what the customer had just withheld.)*
 ```
 
 `--save-profile` cannot be combined with `--snapshot`: a saved snapshot does
-not record which sources failed or when it was taken. `--reason`, `--reference` and
+not record which sources failed or when it was taken. `--save-profile ""` is a
+usage error. Abbreviations that were unambiguous before these flags existed
+(`--save` for `--save-snapshot`, `--re` for `--redis-url`) keep their meaning:
+the parser prefers the older flag when a prefix matches exactly one of them.
+This overrides a private argparse method (`_get_option_tuples`); a test fails
+if a Python release stops calling it. `--reason`, `--reference` and
 `--withhold` without `--save-profile` are usage errors. `--show-profile` takes
 no other flag except `-o`; an unreadable or invalid file is exit code 3. Exit
 codes of a normal run do not change.
@@ -305,9 +328,11 @@ codes of a normal run do not change.
   the point of the piece and must not be weakened later.
 - Every fact: measured, default applied, unknown because the source is missing,
   unknown because the environment is incomplete, unknown because roles disagree.
-- Safe-shape and name tests, with the awkward cases (a host without dots is
-  still blocked by name; a URL in an innocently named variable is blocked by
-  shape).
+- Settings: only documented names are listed; a value is written only for a
+  typed variable whose value fits the type. The awkward cases are seeded in the
+  zero-leak test: host names without dots, relative paths, package names, a
+  tenant id, a short secret under an unredacted name, a custom `N8N_<COMPANY>_`
+  name.
 - Withholding: fact, setting, check, unknown id.
 - Round trip: build, save, load, render. Invalid and newer-version files.
 - Catalogue: every id emitted is documented in `docs/profile-format.md`.
