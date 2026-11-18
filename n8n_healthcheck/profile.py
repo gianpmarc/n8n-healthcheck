@@ -68,10 +68,10 @@ DEFAULT_WORKER_CONCURRENCY = 10
 CONCURRENCY_LIMIT = "N8N_CONCURRENCY_PRODUCTION_LIMIT"
 
 # Settings: the shape of a value that is written for a variable known to hold a number.
-_NUMBER = re.compile(r"-?\d{1,15}(\.\d{1,6})?")
+_NUMBER = re.compile(r"-?[0-9]{1,15}(\.[0-9]{1,6})?")
 
 # Not followed by a further digit or dot: three parts of a longer dotted number are not a version.
-_VERSION = re.compile(r"\d+\.\d+(\.\d+)?(?![\d.])")
+_VERSION = re.compile(r"[0-9]+\.[0-9]+(\.[0-9]+)?(?![0-9.])")
 # Stricter than Kubernetes itself: one decimal point at most, so nothing dotted passes.
 _QUANTITY = re.compile(r"[0-9]+(\.[0-9]+)?[a-zA-Z]{0,2}")
 _UNSET = object()
@@ -101,15 +101,31 @@ def _missing(section: str, failed: tuple) -> dict:
     return _unknown(f"{SOURCE_LABELS[section]} was not provided")
 
 
-def _role_containers(snapshot: Snapshot, role: str) -> list:
-    return [(d, c) for d, c, r in n8n_containers(snapshot.kubernetes or {}) if r == role]
-
-
 def _image_name(container: dict) -> str:
     """The image without its tag or digest."""
     image = (container.get("image") or "").split("@")[0]
     head, _, last = image.rpartition("/")
     return (head + "/" if head else "") + last.split(":")[0]
+
+
+def _called_n8n(container: dict) -> bool:
+    """True when the image is called exactly n8n, whatever the registry: n8n itself."""
+    return _image_name(container).rpartition("/")[2] == "n8n"
+
+
+def _role_containers(snapshot: Snapshot, role: str) -> list:
+    """The (deployment, container) pairs of one role.
+
+    A role is told by an image name that contains "n8n" (rules/_helpers.py), and anything
+    without a worker or webhook command is "main": an exporter or another server whose
+    image name merely contains "n8n" lands there. So when the main role has containers
+    called exactly n8n, only those are n8n; the others are left out, never counted.
+    A role where no container is called exactly n8n is returned whole: a build under
+    another name cannot be told from an unrelated image, and the callers treat it so.
+    """
+    found = [(d, c) for d, c, r in n8n_containers(snapshot.kubernetes or {}) if r == role]
+    exact = [(d, c) for d, c in found if _called_n8n(c)]
+    return exact if exact and role == "main" else found
 
 
 def _official(container: dict) -> bool:
@@ -158,9 +174,19 @@ def _bool(raw: str) -> Optional[bool]:
     return env_flag({"": raw}, "")
 
 
+def _plain_int(raw) -> Optional[int]:
+    """env_int() for text that is only ASCII digits with an optional minus.
+
+    int() also reads "1_000" and digits of other scripts, which n8n does not read the same.
+    """
+    if not isinstance(raw, str) or not re.fullmatch(r"-?[0-9]{1,15}", raw.strip()):
+        return None
+    return env_int({"": raw}, "")
+
+
 def _count(raw) -> Optional[int]:
     """A whole number that is not negative."""
-    value = env_int({"": raw}, "")
+    value = _plain_int(raw)
     return value if value is not None and value >= 0 else None
 
 
@@ -226,6 +252,14 @@ def _policy(raw) -> Optional[str]:
     return raw if raw in REDIS_POLICIES else None
 
 
+def _oldest_execution_age(snapshot: Snapshot, failed: tuple) -> dict:
+    found = _section_fact("postgres", "oldest_execution_age_days", _number)(snapshot, failed)
+    # The collector stores 0.0 for an empty table: that is no age, not a fresh execution.
+    if found["value"] == 0 and _whole((snapshot.postgres or {}).get("execution_count")) in (0, None):
+        return _unknown("there are no stored executions")
+    return found
+
+
 def _n8n_version(snapshot: Snapshot, failed: tuple) -> dict:
     version = _version(snapshot.n8n_version)
     if version:
@@ -250,7 +284,7 @@ def _n8n_version(snapshot: Snapshot, failed: tuple) -> dict:
 def _image_official(snapshot: Snapshot, failed: tuple) -> dict:
     if snapshot.kubernetes is None:
         return _missing("kubernetes", failed)
-    official = {_official(container) for _deployment, container, _role in n8n_containers(snapshot.kubernetes)}
+    official = {_official(c) for role in ROLES for _, c in _role_containers(snapshot, role)}
     if not official:
         return _unknown("no n8n container was found in Kubernetes")
     if len(official) > 1:
@@ -277,9 +311,7 @@ def _kube_fact(role: str, read: Callable) -> Callable:
         if not found:
             # Not 0: only Deployments are read, so a StatefulSet would be missed.
             return _unknown(f"no {role} container was found in the Deployments")
-        # Roles are told by an image name that contains "n8n", which an exporter or a
-        # sidecar can also have: only an image called exactly n8n is known to be n8n itself.
-        if any(_image_name(c).rpartition("/")[2] != "n8n" for _, c in found):
+        if not all(_called_n8n(c) for _, c in found):
             return _unknown("a container of this role runs an image that may not be n8n itself")
         return read(found)
 
@@ -341,21 +373,28 @@ def _worker_concurrency(snapshot: Snapshot, failed: tuple) -> dict:
     workers = _role_containers(snapshot, "worker")
     if not workers:
         return _unknown("no worker container was found in the Deployments")
+    if not all(_called_n8n(c) for _, c in workers):
+        return _unknown("a container of this role runs an image that may not be n8n itself")
+    file_detail = "the limit variable is set through a file, which this tool does not read"
     # In queue mode the limit, when set to anything but -1, overrides the --concurrency
     # flag; an env file describes every process, so it is read before the containers.
     env = snapshot.env
+    if env is not None and CONCURRENCY_LIMIT + "_FILE" in env:
+        return _unknown(file_detail)
     if env is not None and is_queue_mode(env):
         if unknown(env, CONCURRENCY_LIMIT):
             return _unknown("set, but the value could not be read")
-        limit = env_int(env, CONCURRENCY_LIMIT)
+        limit = _plain_int(env.get(CONCURRENCY_LIMIT))
         if limit is not None and limit >= 1:
             return _measured(limit, "env", f"from {CONCURRENCY_LIMIT}")
     found = set()
     for deployment, container in workers:
         own_env = container_env(deployment, container)
+        if CONCURRENCY_LIMIT + "_FILE" in own_env:
+            return _unknown(file_detail)
         if unknown(own_env, CONCURRENCY_LIMIT):
             return _unknown("the limit variable on a worker could not be read")
-        own_limit = env_int(own_env, CONCURRENCY_LIMIT)
+        own_limit = _plain_int(own_env.get(CONCURRENCY_LIMIT))
         flag = concurrency_flag(container)
         if CONCURRENCY_LIMIT in own_env and (own_limit is None or own_limit == 0 or own_limit < -1):
             return _unknown("the limit variable on a worker is not a valid number")
@@ -366,6 +405,9 @@ def _worker_concurrency(snapshot: Snapshot, failed: tuple) -> dict:
         elif any(word.startswith("--concurrency") for word in command_words(container)):
             # e.g. --concurrency=$WORKERS: the flag is there, its number is not.
             return _unknown("the --concurrency flag on a worker is not a plain number")
+        elif not _official(container):
+            # As for the other defaults: an image built by someone else may set either.
+            return _unknown("neither is set here, but the image is not the official one and may set it")
         else:
             found.add((DEFAULT_WORKER_CONCURRENCY, "worker default, neither the limit variable nor the flag is set"))
     if len({value for value, _ in found}) > 1:
@@ -408,7 +450,7 @@ CATALOGUE = (
     ("database.max_connections", _section_fact("postgres", "max_connections", _whole)),
     ("database.execution_count", _section_fact("postgres", "execution_count", _whole)),
     ("database.execution_table_bytes", _section_fact("postgres", "execution_table_bytes", _whole)),
-    ("database.oldest_execution_age_days", _section_fact("postgres", "oldest_execution_age_days", _number)),
+    ("database.oldest_execution_age_days", _oldest_execution_age),
     ("queue.redis_version", _section_fact("redis", "version", _version)),
     ("queue.maxmemory_policy", _section_fact("redis", "maxmemory_policy", _policy)),
     ("queue.maxmemory_bytes", _section_fact("redis", "maxmemory_bytes", _whole)),
@@ -421,6 +463,20 @@ CATALOGUE = (
     ("probes.worker", _kube_fact("worker", _probes)),
 )
 FACT_IDS = tuple(fact_id for fact_id, _ in CATALOGUE)
+
+# The fact ids every file of format version 1 holds. Frozen: a later tool version may add
+# ids to CATALOGUE without raising the format version, and must still open older files.
+FORMAT_1_FACT_IDS = frozenset(
+    """
+    n8n.version n8n.image_official orchestrator executions.mode main.replicas worker.replicas
+    webhook.replicas worker.concurrency multi_main.enabled task_runners.enabled task_runners.mode
+    binary_data.mode metrics.enabled pruning.enabled pruning.max_age_hours database.engine
+    database.version database.pool_size database.max_connections database.execution_count
+    database.execution_table_bytes database.oldest_execution_age_days queue.redis_version
+    queue.maxmemory_policy queue.maxmemory_bytes queue.waiting_jobs queue.active_jobs
+    queue.failed_jobs resources.main resources.worker probes.main probes.worker
+    """.split()
+)
 
 
 # --- settings ----------------------------------------------------------------------
@@ -642,24 +698,25 @@ def validate(data) -> dict:
 
     facts = data.get("facts")
     _require(isinstance(facts, list), '"facts"')
-    for fact in facts:
-        _require(isinstance(fact, dict) and isinstance(fact.get("id"), str), "a fact has no id")
-        _require(fact.get("provenance") in PROVENANCES, f'provenance of fact "{fact["id"]}"')
-        _require("value" in fact and _is_value(fact["value"]), f'value of fact "{fact["id"]}"')
-        _require(fact.get("source") is None or isinstance(fact["source"], str), f'source of fact "{fact["id"]}"')
-        _require(isinstance(fact.get("detail"), str), f'detail of fact "{fact["id"]}"')
-    # Every fact of the catalogue is there, so nothing can be silently absent.
-    _require(set(FACT_IDS) <= {fact["id"] for fact in facts}, "a fact of the catalogue is missing")
+    # The messages name an entry by its position, never by text taken from the file.
+    for number, fact in enumerate(facts, 1):
+        _require(isinstance(fact, dict) and isinstance(fact.get("id"), str), f"fact {number} has no id")
+        _require(fact.get("provenance") in PROVENANCES, f"provenance of fact {number}")
+        _require("value" in fact and _is_value(fact["value"]), f"value of fact {number}")
+        _require(fact.get("source") is None or isinstance(fact["source"], str), f"source of fact {number}")
+        _require(isinstance(fact.get("detail"), str), f"detail of fact {number}")
+    # Every fact of format version 1 is there, so nothing can be silently absent.
+    _require(FORMAT_1_FACT_IDS <= {fact["id"] for fact in facts}, "a fact of the catalogue is missing")
 
     settings = data.get("settings")
     _require(isinstance(settings, list), '"settings"')
-    for setting in settings:
-        _require(isinstance(setting, dict), '"settings"')
-        _require(isinstance(setting.get("scope"), str) and isinstance(setting.get("name"), str), "a setting")
-        _require(setting.get("state") in SETTING_STATES, f'state of setting "{setting["name"]}"')
-        _require("value" in setting, f'value of setting "{setting["name"]}"')
+    for number, setting in enumerate(settings, 1):
+        _require(isinstance(setting, dict), f"setting {number}")
+        _require(isinstance(setting.get("scope"), str) and isinstance(setting.get("name"), str), f"setting {number}")
+        _require(setting.get("state") in SETTING_STATES, f"state of setting {number}")
+        _require("value" in setting, f"value of setting {number}")
         value = setting["value"]
-        _require(value is None or isinstance(value, str), f'value of setting "{setting["name"]}"')
+        _require(value is None or isinstance(value, str), f"value of setting {number}")
     count = data.get("settings_not_listed")
     _require(isinstance(count, int) and not isinstance(count, bool) and count >= 0, '"settings_not_listed"')
 

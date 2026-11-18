@@ -429,7 +429,7 @@ class DefaultsTest(unittest.TestCase):
                         self.assertEqual(found["detail"], "set through a file, which this tool does not read")
 
     def test_no_default_for_an_image_that_is_not_the_official_one(self):
-        custom = "registry.example/platform/n8n-custom:7.3.1"
+        custom = "registry.example/platform/n8n:7.3.1"
         for fact_id, _name, _raw, _expected, default in self.DEFAULTS:
             with self.subTest(fact=fact_id):
                 for snapshot in (
@@ -460,6 +460,21 @@ class SectionFactTest(unittest.TestCase):
                 for bad in (None, "", "db.internal.example", -1, float("nan"), "allkeys-custom", "192.168.77.5", "7.2.4.1"):
                     found = fact(Snapshot(**{section: {key: bad}}), fact_id)
                     self.assertEqual((found["provenance"], found["value"]), ("unknown", None), bad)
+
+    def test_an_empty_execution_table_has_no_oldest_execution(self):
+        # The Postgres collector stores 0.0 for an empty table.
+        fact_id = "database.oldest_execution_age_days"
+        empty = fact(Snapshot(postgres={"execution_count": 0, "oldest_execution_age_days": 0.0}), fact_id)
+        self.assertEqual((empty["value"], empty["provenance"], empty["source"]), (None, "unknown", None))
+        self.assertEqual(empty["detail"], "there are no stored executions")
+        # ... and 0 without a count proves nothing either.
+        self.assertEqual(fact(Snapshot(postgres={"oldest_execution_age_days": 0.0}), fact_id)["provenance"], "unknown")
+        # An execution that stopped a moment ago is a real 0.
+        fresh = fact(Snapshot(postgres={"execution_count": 3, "oldest_execution_age_days": 0.0}), fact_id)
+        self.assertEqual((fresh["value"], fresh["provenance"]), (0, "measured"))
+        aged = fact(Snapshot(postgres={"execution_count": 3, "oldest_execution_age_days": 12.5}), fact_id)
+        self.assertEqual(aged["value"], 12.5)
+        self.assertEqual(fact(Snapshot(postgres={"execution_count": 0}), "database.execution_count")["value"], 0)
 
     def test_counts_are_whole_numbers(self):
         self.assertEqual(fact(Snapshot(redis={"waiting_jobs": 2.5}), "queue.waiting_jobs")["provenance"], "unknown")
@@ -504,22 +519,65 @@ class KubernetesFactTest(unittest.TestCase):
         snapshot.kubernetes["deployments"][0]["containers"].append(container())
         self.assertEqual(fact(snapshot, "main.replicas")["value"], 2)
 
-    def test_containers_that_may_not_be_n8n_itself_are_never_counted(self):
-        # An image name that contains "n8n" is enough for a role, not for a fact.
-        snapshot = Snapshot(
+    EXPORTER = "example/n8n-metrics-exporter:1.0.0"
+    MCP = "example/n8n-mcp:0.4.0"
+
+    def beside_unrelated(self, env=None):
+        """Two n8n replicas next to an exporter and another server whose names contain "n8n"."""
+        return Snapshot(
             kubernetes=kube(
-                ("n8n", 2, container()),
-                ("exporter", 1, container(image="example/n8n-metrics-exporter:1.0.0")),
-                ("mcp", 3, container(image="example/n8n-mcp:0.4.0")),
+                ("n8n", 2, container(env=env or {})),
+                ("exporter", 1, container(image=self.EXPORTER, env={"EXECUTIONS_MODE": "regular", "N8N_PORT": "9"})),
+                ("mcp", 3, container(image=self.MCP, requests={}, limits={}, liveness_probe=False)),
             )
         )
-        for fact_id in ("main.replicas", "resources.main", "probes.main"):
+
+    def test_unrelated_images_are_left_out_of_the_main_role_never_counted(self):
+        snapshot = self.beside_unrelated({"EXECUTIONS_MODE": "queue", "N8N_PORT": "5678"})
+        for fact_id, expected in (
+            ("main.replicas", 2),  # not 6
+            ("probes.main", {"liveness": True, "readiness": True}),
+            ("resources.main", {"requests": {"cpu": "200m", "memory": "512Mi"}, "limits": {"cpu": None, "memory": "1Gi"}}),
+            ("n8n.version", "2.40.1"),
+            ("n8n.image_official", True),
+            ("executions.mode", "queue"),
+            ("database.engine", "sqlite"),
+        ):
+            found = fact(snapshot, fact_id)
+            self.assertEqual((found["value"], found["provenance"]), (expected, "measured"), fact_id)
+        self.assertEqual(
+            settings(snapshot),
+            {"setting:main:EXECUTIONS_MODE": ("value", "queue"), "setting:main:N8N_PORT": ("value", "5678")},
+        )
+
+    def test_a_role_with_no_image_called_n8n_stays_unknown(self):
+        # A build of n8n under another name cannot be told from an unrelated image.
+        for image in (self.MCP, "example/n8n-custom:7.3.1"):
+            alone = Snapshot(kubernetes=kube(("x", 3, container(image=image))))
+            for fact_id in ("main.replicas", "resources.main", "probes.main", "n8n.version"):
+                found = fact(alone, fact_id)
+                self.assertEqual((found["value"], found["provenance"]), (None, "unknown"), fact_id)
+            self.assertEqual(
+                fact(alone, "main.replicas")["detail"], "a container of this role runs an image that may not be n8n itself"
+            )
+
+    def test_a_worker_or_webhook_under_another_name_makes_its_role_unknown(self):
+        # It carries the role's own command, so it may well be n8n: neither counted nor left out.
+        snapshot = Snapshot(
+            kubernetes=kube(
+                ("main", 1, container()),
+                ("w1", 2, worker()),
+                ("w2", 1, worker(image="example/n8n-worker:1")),
+                ("h1", 1, container(command=["webhook"])),
+                ("h2", 1, container(command=["webhook"], image="example/n8n-hooks:1")),
+            )
+        )
+        for fact_id in ("worker.replicas", "resources.worker", "probes.worker", "worker.concurrency", "webhook.replicas"):
             found = fact(snapshot, fact_id)
             self.assertEqual((found["value"], found["provenance"]), (None, "unknown"), fact_id)
-            self.assertEqual(found["detail"], "a container of this role runs an image that may not be n8n itself")
-        alone = Snapshot(kubernetes=kube(("mcp", 3, container(image="example/n8n-mcp:0.4.0"))))
-        self.assertEqual(fact(alone, "main.replicas")["provenance"], "unknown")
-        # A copy of n8n in another registry is still n8n.
+        self.assertEqual(fact(snapshot, "main.replicas")["value"], 1)
+
+    def test_a_copy_of_n8n_in_another_registry_is_still_n8n(self):
         mirror = Snapshot(kubernetes=kube(("a", 2, container()), ("b", 1, container(image="registry.example:5000/mirror/n8n:2.40.1"))))
         self.assertEqual(fact(mirror, "main.replicas")["value"], 3)
 
@@ -673,6 +731,38 @@ class WorkerConcurrencyTest(unittest.TestCase):
         limited = Snapshot(kubernetes=kube(("w", 1, worker({LIMIT: "7"}, ["worker", "--concurrency=$X"]))))
         self.assertEqual(self.value(limited)[0], 7)
 
+    def test_the_default_is_stated_only_when_nothing_can_have_set_it(self):
+        official = fact(Snapshot(kubernetes=kube(("w", 1, worker()))), "worker.concurrency")
+        self.assertEqual((official["value"], official["provenance"]), (10, "measured"))
+        file_variant = {LIMIT + "_FILE": "/run/limit"}
+        for label, snapshot in (
+            ("limit given through a file on the worker", Snapshot(kubernetes=kube(("w", 1, worker(file_variant))))),
+            ("... even with a flag", Snapshot(kubernetes=kube(("w", 1, worker(file_variant, ["worker", "--concurrency=3"]))))),
+            ("limit given through a file in the env file", Snapshot(env={"EXECUTIONS_MODE": "queue", **file_variant}, kubernetes=kube(("w", 1, worker())))),
+            ("... whatever the mode in the file", Snapshot(env=file_variant, kubernetes=kube(("w", 1, worker())))),
+            ("image called n8n in another registry", Snapshot(kubernetes=kube(("w", 1, worker(image="registry.example/n8n:2.40.1"))))),
+            ("image under another name", Snapshot(kubernetes=kube(("w", 1, worker(image="example/n8n-worker:1"))))),
+            ("... even with a flag", Snapshot(kubernetes=kube(("w", 1, worker({}, ["worker", "--concurrency=3"], image="example/n8n-worker:1"))))),
+        ):
+            with self.subTest(case=label):
+                self.assertEqual(self.value(snapshot), (None, "unknown", None))
+        # A number that is written down is read whatever the registry.
+        mirror = Snapshot(kubernetes=kube(("w", 1, worker({}, ["worker", "--concurrency=3"], image="registry.example/n8n:2.40.1"))))
+        self.assertEqual(self.value(mirror)[0], 3)
+
+    def test_numbers_are_plain_ascii_digits(self):
+        for raw in ("\u0664", "1_0", "\uff11\uff10", "+5", "5 0"):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.value(Snapshot(kubernetes=kube(("w", 1, worker({LIMIT: raw})))))[1], "unknown")
+                self.assertEqual(fact(Snapshot(env={"DB_POSTGRESDB_POOL_SIZE": raw}), "database.pool_size")["provenance"], "unknown")
+                self.assertIsNone(profile.setting_value("DB_POSTGRESDB_POOL_SIZE", raw))
+                self.assertEqual(
+                    settings(Snapshot(env={"DB_POSTGRESDB_POOL_SIZE": raw})),
+                    {"setting:instance:DB_POSTGRESDB_POOL_SIZE": ("set", None)},
+                )
+        self.assertEqual(fact(Snapshot(n8n_version="\u0662.\u0664\u0667.\u0660"), "n8n.version")["provenance"], "unknown")
+        self.assertEqual(fact(Snapshot(postgres={"version": "\u0661\u0666.\u0664"}), "database.version")["provenance"], "unknown")
+
     def test_workers_that_reach_the_same_number_differently_agree(self):
         snapshot = Snapshot(kubernetes=kube(("a", 1, worker({LIMIT: "5"})), ("b", 1, worker({}, ["worker", "--concurrency=5"]))))
         self.assertEqual(self.value(snapshot)[0], 5)
@@ -805,6 +895,14 @@ class SettingsTest(unittest.TestCase):
         for name in ("N8N_METRICS", "N8N_PORT", "EXECUTIONS_MODE"):
             for value in (REDACTED, "<valueFrom>"):
                 self.assertIsNone(profile.setting_value(name, value))
+        # ... and setting_value() really asks it: no marker fits a type today, so only
+        # this shows that the call is still there.
+        self.assertEqual(profile.setting_value("N8N_METRICS", "true"), "true")
+        with mock.patch("n8n_healthcheck.profile.value_readable", return_value=False) as asked:
+            self.assertIsNone(profile.setting_value("N8N_METRICS", "true"))
+            self.assertIsNone(profile.setting_value("N8N_PORT", "5678"))
+            self.assertIsNone(profile.setting_value("EXECUTIONS_MODE", "queue"))
+        self.assertEqual(asked.call_count, 3)
 
     def test_the_known_list_is_well_formed(self):
         groups = (n8n_settings.BOOLEANS, n8n_settings.NUMBERS, frozenset(n8n_settings.ENUMS), n8n_settings.SET_ONLY)
@@ -1049,6 +1147,31 @@ class FileTest(unittest.TestCase):
         data["facts"].append({"id": "hosting.region", "value": "eu", "provenance": "declared", "source": "questionnaire", "detail": ""})
         self.assertIn("| hosting.region | eu | declared | questionnaire |  |", profile.render_markdown(profile.validate(data)))
 
+    def test_a_file_from_this_version_opens_in_a_tool_with_a_larger_catalogue(self):
+        # Adding a fact id does not raise the format version, so a later tool must still
+        # open what 0.2.0 wrote: completeness is judged by the frozen version 1 ids.
+        written_today = json.loads(profile.to_json(self.valid()))
+        later = profile.CATALOGUE + (("hosting.region", lambda snapshot, failed: profile._unknown("not asked")),)
+        with mock.patch.object(profile, "CATALOGUE", later), mock.patch.object(profile, "FACT_IDS", tuple(i for i, _ in later)):
+            self.assertEqual(profile.validate(written_today), written_today)
+            self.assertIn("| executions.mode | queue |", profile.render_markdown(written_today))
+            newer = build(Snapshot())
+            self.assertEqual(newer["facts"][-1]["id"], "hosting.region")
+        self.assertEqual(profile.validate(newer), newer)  # and this version opens the later file
+
+    def test_the_version_1_ids_are_frozen(self):
+        self.assertEqual(len(profile.FORMAT_1_FACT_IDS), 32)
+        self.assertLessEqual(profile.FORMAT_1_FACT_IDS, set(profile.FACT_IDS))  # the catalogue only grows
+        self.assertEqual(
+            sorted(profile.FORMAT_1_FACT_IDS)[:4],
+            ["binary_data.mode", "database.engine", "database.execution_count", "database.execution_table_bytes"],
+        )
+        for missing in sorted(profile.FORMAT_1_FACT_IDS):
+            data = self.valid()
+            data["facts"] = [f for f in data["facts"] if f["id"] != missing]
+            with self.subTest(missing=missing), self.assertRaises(profile.ProfileError):
+                profile.validate(data)
+
     def test_newer_format_version_is_refused_with_a_clear_message(self):
         with self.assertRaises(profile.ProfileError) as raised:
             profile.load_profile(self.write(self.valid(format_version=2)))
@@ -1285,6 +1408,27 @@ class CliProfileTest(unittest.TestCase):
                 self.assertEqual((code, out), (3, ""))
                 self.assertEqual(len(err.splitlines()), 1, err[:300])
                 self.assertTrue(err.startswith("error: cannot show profile"))
+
+    def test_error_messages_never_print_text_from_the_file(self):
+        hostile = "x\x1b[2J\x1b]0;pwned\x07<b>"
+        cases = []
+        for key, bad in (("provenance", "guessed"), ("value", ["a"]), ("source", 3), ("detail", None)):
+            data = build(Snapshot(env={"N8N_PORT": "1"}))
+            data["facts"][2].update({"id": hostile, key: bad})
+            cases.append(data)
+        for key, bad in (("state", "hidden"), ("value", 5), ("scope", None)):
+            data = build(Snapshot(env={"N8N_PORT": "1"}))
+            data["settings"][0].update({"name": hostile, "scope": hostile, key: bad})
+            cases.append(data)
+        for index, data in enumerate(cases):
+            with self.subTest(case=index):
+                with open(self.path, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh)
+                code, out, err = self.run_cli(["--show-profile", self.path])
+                self.assertEqual((code, out), (3, ""))
+                for raw in ("\x1b", "\x07", "pwned", "<b>"):
+                    self.assertNotIn(raw, err)
+                self.assertRegex(err, r"not a valid profile: \w+ of (fact 3|setting 1)\n$|setting 1\n$")
 
     def test_show_profile_survives_a_renderer_that_fails(self):
         with open(self.path, "w", encoding="utf-8") as fh:

@@ -150,13 +150,13 @@ this version applies": look the default up for the n8n version in `n8n.version`.
 | Id | Value | From |
 |---|---|---|
 | `n8n.version` | version | The version n8n reports on its metrics endpoint; otherwise the image tag, when every main container runs the official image with the same tag. The tag of any other image is not taken as a version. |
-| `n8n.image_official` | boolean | Kubernetes: `true` when every n8n container runs the image published by n8n, pulled from its usual location; `false` when none does (a custom build, or a copy in another registry). The image name is never written. |
+| `n8n.image_official` | boolean | Kubernetes: `true` when every n8n container runs `n8nio/n8n`, `docker.io/n8nio/n8n` or `docker.n8n.io/n8nio/n8n`; `false` when none does (a custom build, or a copy in another registry); unknown when they are mixed. The image name actually used is never written. |
 | `orchestrator` | `kubernetes` | `kubernetes` when Kubernetes was read. Otherwise unknown: the tool cannot tell Docker from a bare process. |
 | `executions.mode` | `regular`, `queue` | `EXECUTIONS_MODE`. |
 | `main.replicas` | integer | Kubernetes: replicas of the Deployments that run the main n8n process, summed. |
 | `worker.replicas` | integer | Same, for the worker process. |
 | `webhook.replicas` | integer | Same, for the webhook process. |
-| `worker.concurrency` | integer | Executions one worker runs at a time: `N8N_CONCURRENCY_PRODUCTION_LIMIT` unless it is not set or `-1`, otherwise the worker's `--concurrency` flag, otherwise 10. Needs the worker containers from Kubernetes. Unknown when the flag is there but is not a plain number. |
+| `worker.concurrency` | integer | Executions one worker runs at a time: `N8N_CONCURRENCY_PRODUCTION_LIMIT` unless it is not set or `-1`, otherwise the worker's `--concurrency` flag, otherwise 10. Needs the worker containers from Kubernetes. Unknown when the flag is there but is not a plain number, and when the limit is given through `N8N_CONCURRENCY_PRODUCTION_LIMIT_FILE`. The default of 10 is stated only for the official image; for any other image with neither set, the fact is unknown. |
 | `multi_main.enabled` | boolean | `N8N_MULTI_MAIN_SETUP_ENABLED`. |
 | `task_runners.enabled` | boolean | `N8N_RUNNERS_ENABLED`. |
 | `task_runners.mode` | `internal`, `external` | `N8N_RUNNERS_MODE`. |
@@ -170,7 +170,7 @@ this version applies": look the default up for the n8n version in `n8n.version`.
 | `database.max_connections` | integer | Postgres `max_connections`. |
 | `database.execution_count` | integer | Rows in n8n's execution table. An estimate above 100,000 rows. |
 | `database.execution_table_bytes` | integer | Size on disk of the execution tables, in bytes. |
-| `database.oldest_execution_age_days` | number | Age of the oldest stored execution, in days. |
+| `database.oldest_execution_age_days` | number | Age of the oldest stored execution, in days. Unknown, with the detail "there are no stored executions", when the table is empty. |
 | `queue.redis_version` | version | Redis server version. |
 | `queue.maxmemory_policy` | a Redis eviction policy, for example `noeviction` | Redis `maxmemory-policy`. |
 | `queue.maxmemory_bytes` | integer | Redis `maxmemory`, in bytes. `0` means no limit. |
@@ -187,7 +187,8 @@ Value shapes:
 - **version**: `digits.digits` or `digits.digits.digits`, the leading part of
   what the software reports (`16.4` for "16.4 (Debian ...)"). A longer dotted
   number is not a version and gives `unknown`.
-- **integer**, **number**: never negative.
+- **integer**, **number**: never negative. Read only from plain ASCII digits; a
+  value written any other way (`1_000`, digits of another script) is unknown.
 - **resources object**:
   `{"requests": {"cpu": "200m", "memory": "512Mi"}, "limits": {"cpu": null, "memory": "1Gi"}}`.
   Each quantity is a Kubernetes quantity as a string, or `null` when not set.
@@ -201,11 +202,26 @@ A measured `0` means a Deployment exists and is scaled to zero.
 `resources.*` and `probes.*` are `unknown` when the containers of the role are
 not all configured the same.
 
-The replica, resources and probes facts are also `unknown` when a container of
-the role runs an image that is not called exactly `n8n` (whatever the
-registry): the tool recognises a role by an image name that contains "n8n",
-which an exporter or a sidecar can have too, and it does not state a sum that
-may include one.
+**Which containers are n8n.** The tool takes a container for n8n when its image
+name contains "n8n", and tells the role by the start command (`worker`,
+`webhook`, anything else is main). An exporter or another server whose image
+name merely contains "n8n" would therefore look like a main container. So:
+
+- An image called exactly `n8n`, in any registry, is n8n.
+- In the main role, when at least one container is called exactly `n8n`, the
+  others are left out of every fact and of the settings: they are never
+  counted.
+- A role in which no container is called exactly `n8n` (a build under another
+  name, or only an unrelated image) gives `unknown` for its replica, resources
+  and probes facts, and no version is read from its tag.
+- A worker or webhook container under another name carries the role's own
+  command, so it may well be n8n: it is neither counted nor left out, and the
+  replica, resources, probes and concurrency facts of that role are `unknown`.
+
+One case cannot be told apart and is resolved as the common one: a main process
+built under another name (`example/n8n-custom`) running in the same namespace
+as a main container called `n8n` is treated like an exporter and left out, so
+`main.replicas` would not include it.
 
 `n8n.image_official` is `false` for a copy of the official image kept in
 another registry: it says where the image is pulled from, not what is in it.
@@ -239,8 +255,8 @@ does not mean "not an n8n setting".
    list. Variables that hold a host, URL, path, name, identifier, list of
    packages or nodes, or a credential are never written, and neither is the
    licence tenant id, although it is a number;
-3. the value is one: `true` or `false`; digits with an optional sign and
-   decimal part; exactly one of the documented words;
+3. the value is one: `true` or `false`; ASCII digits with an optional minus
+   sign and decimal part; exactly one of the documented words;
 4. for a Kubernetes scope, every container of the role has the variable with
    the same value.
 
@@ -297,9 +313,17 @@ document that quotes raw values as evidence; share it or not as before.
 
 - Removing or renaming a field or a fact id raises `format_version`.
 - Adding a fact id, or a value to one of the lists above, does not. A reader
-  should ignore fact ids it does not know rather than fail.
+  should ignore fact ids it does not know rather than fail, and must not
+  require an id that was added after version 0.2.0 of the tool.
 - `n8n-healthcheck` refuses to open a file with a higher `format_version` than
   it knows and says to update the tool, instead of showing part of it.
-- A version 1 file always has the six sources and every fact id of the
-  catalogue above. A file where one is missing is refused as invalid, so
-  nothing can be silently absent.
+- A version 1 file always has the six sources and the 32 fact ids listed in
+  the catalogue above, which are the ids of tool version 0.2.0. A file where
+  one of those is missing is refused as invalid, so nothing can be silently
+  absent. That list is frozen: ids a later tool version adds are written by
+  that version but are not required of a file, so a newer tool still opens a
+  file written by an older one.
+- When a file is opened, `run.reference` must obey the rules it is typed
+  under: one line, at most 200 characters, no control characters, no
+  surrounding spaces. A file that is not valid is refused with a message that
+  names the faulty entry by its position, never by text taken from the file.

@@ -151,6 +151,13 @@ The format is described for outside readers in a new `docs/profile-format.md`.
 A change that removes or renames a field or a fact id raises `format_version`.
 Adding a fact id does not.
 
+*Added after the reviews.* A file is complete or it is refused: a version 1
+file must hold the six sources and the 32 fact ids of the first release, kept
+as a frozen list (`FORMAT_1_FACT_IDS`) so that a later tool with a larger
+catalogue still opens it. On load `run.reference` is checked as when typed.
+Text from a file is never printed raw: the rendering drops control characters
+and escapes markup, and error messages name an entry by its position.
+
 ## Fact catalogue, version 1
 
 Ids are this project's own vocabulary. One line each is enough for a reader of
@@ -159,11 +166,11 @@ the file to understand it.
 | Id | From |
 |---|---|
 | `n8n.version` | `Snapshot.n8n_version`; else the version in the image tag when every main container runs the official image and agrees (`image_version`). Never the tag of another image, never the start of a longer dotted number |
-| `n8n.image_official` | Kubernetes: true when the image is `n8nio/n8n` or `docker.n8n.io/n8nio/n8n`; the image name itself is never written |
+| `n8n.image_official` | Kubernetes: true when the image is `n8nio/n8n`, `docker.io/n8nio/n8n` (the same image with Docker Hub written out) or `docker.n8n.io/n8nio/n8n`; the image name itself is never written |
 | `orchestrator` | `kubernetes` when that source was collected, else unknown |
 | `executions.mode` | `EXECUTIONS_MODE`, default `regular` |
-| `main.replicas`, `worker.replicas`, `webhook.replicas` | Kubernetes Deployments, summed per role. A role with no container found is unknown, never 0: only Deployments are read, so a StatefulSet would be missed. Unknown too when a container of the role runs an image not called exactly `n8n` (an exporter or a sidecar whose name contains "n8n"); the same holds for `resources.*` and `probes.*` |
-| `worker.concurrency` | Same precedence as rule SCAL in `rules/scalability.py`: `N8N_CONCURRENCY_PRODUCTION_LIMIT` on the workers unless unset or -1, else the `--concurrency` flag, else 10. Needs worker containers; with an env file only it is unknown. A flag that is present but not a literal number (`--concurrency=$N`) is unknown |
+| `main.replicas`, `worker.replicas`, `webhook.replicas` | Kubernetes Deployments, summed per role. A role with no container found is unknown, never 0: only Deployments are read, so a StatefulSet would be missed. An image called exactly `n8n` is n8n. In the main role, containers under another name (an exporter or another server whose name contains "n8n") are left out when one called `n8n` exists, never counted; a role with no container called `n8n`, and a worker or webhook role with one under another name, is unknown. The same holds for `resources.*` and `probes.*` |
+| `worker.concurrency` | Same precedence as rule SCAL in `rules/scalability.py`: `N8N_CONCURRENCY_PRODUCTION_LIMIT` on the workers unless unset or -1, else the `--concurrency` flag, else 10. Needs worker containers; with an env file only it is unknown. A flag that is present but not a literal number (`--concurrency=$N`) is unknown; so is a limit given through `<NAME>_FILE`, and the default of 10 on an image that is not the official one |
 | `multi_main.enabled` | `N8N_MULTI_MAIN_SETUP_ENABLED` |
 | `task_runners.enabled`, `task_runners.mode` | `N8N_RUNNERS_ENABLED`, `N8N_RUNNERS_MODE` |
 | `binary_data.mode` | `N8N_DEFAULT_BINARY_DATA_MODE` |
@@ -173,7 +180,7 @@ the file to understand it.
 | `database.version` | Postgres |
 | `database.pool_size` | `DB_POSTGRESDB_POOL_SIZE` |
 | `database.max_connections` | Postgres |
-| `database.execution_count`, `database.execution_table_bytes`, `database.oldest_execution_age_days` | Postgres |
+| `database.execution_count`, `database.execution_table_bytes`, `database.oldest_execution_age_days` | Postgres. The age is unknown when the table is empty (the collector stores 0.0 for it) |
 | `queue.redis_version`, `queue.maxmemory_policy`, `queue.maxmemory_bytes` | Redis |
 | `queue.waiting_jobs`, `queue.active_jobs`, `queue.failed_jobs` | Redis |
 | `resources.main`, `resources.worker` | Kubernetes requests and limits; value is an object `{requests, limits}`; unknown when containers of the role disagree |
@@ -281,7 +288,12 @@ what the customer had just withheld.)*
 ```
 
 `--save-profile` cannot be combined with `--snapshot`: a saved snapshot does
-not record which sources failed or when it was taken. `--reason`, `--reference` and
+not record which sources failed or when it was taken. `--save-profile ""` is a
+usage error. Abbreviations that were unambiguous before these flags existed
+(`--save` for `--save-snapshot`, `--re` for `--redis-url`) keep their meaning:
+the parser prefers the older flag when a prefix matches exactly one of them.
+This overrides a private argparse method (`_get_option_tuples`); a test fails
+if a Python release stops calling it. `--reason`, `--reference` and
 `--withhold` without `--save-profile` are usage errors. `--show-profile` takes
 no other flag except `-o`; an unreadable or invalid file is exit code 3. Exit
 codes of a normal run do not change.
