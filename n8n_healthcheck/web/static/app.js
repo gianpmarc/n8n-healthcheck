@@ -296,6 +296,10 @@
     else button.removeAttribute("aria-disabled");
     $("run-button-label").textContent = on ? "Running health check…" : "Run health check";
     $("run-progress").hidden = !on;
+    // A run ends by showing its report or its error: no other view may be opened meanwhile.
+    $("f-profile").disabled = on;
+    $("h-profile").hidden = !on;
+    if (!on) setFieldError("e-profile", null, [$("f-profile")]); // a refusal that only said "a check is running"
     clearInterval(timer);
     if (on) {
       const started = Date.now();
@@ -345,7 +349,7 @@
     }
 
     setRunning(true);
-    announce("Health check running. This can take up to a minute.");
+    announce("Health check running. This can take up to a minute. A profile can be opened when it has finished.");
     let failure = null;
     let data = null;
     const abort = new AbortController();
@@ -359,7 +363,10 @@
         referrerPolicy: "no-referrer",
         signal: abort.signal,
       });
-      data = await response.json().catch(() => null);
+      const text = await response.text().catch(() => "");
+      try { data = JSON.parse(text); } catch { data = null; }
+      // The profile keeps its numbers as the server wrote them, so the saved file is the server's text.
+      if (response.ok && data && data.profile) data.profile = parseExact(text).profile;
       // The deadline can also pass while the body is still arriving; that is a timeout, not a bad report.
       if (abort.signal.aborted) throw new Error("timeout");
       if (!response.ok) {
@@ -376,6 +383,7 @@
     setRunning(false);
 
     if (failure) {
+      if ($("view-form").hidden) showView("form"); // an error is never written to a hidden view
       showFormError(failure[0], failure[1], true);
       $("form-error").focus();
       return;
@@ -444,9 +452,7 @@
     $("warnings-block").hidden = warnings.length === 0;
     $("warnings").replaceChildren(...warnings.map((line) => el("li", null, String(line))));
 
-    // A new run is a new profile: earlier choices do not carry over to it.
-    withheld.clear();
-    $("share-status").textContent = "";
+    resetShare();
     $("share-block").hidden = !data.profile;
     if (data.profile) renderShare();
 
@@ -489,7 +495,7 @@
   }
 
   function severityTag(severity) {
-    const known = SEVERITY[severity];
+    const known = Object.hasOwn(SEVERITY, severity) ? SEVERITY[severity] : null;
     return el("span", { class: `tag tag--${known ? severity : "area"}` }, icon(known ? severity : "info"), known ? known.one : String(severity));
   }
 
@@ -632,6 +638,9 @@
   // reader withholds and adds the reason and the reference. The format and the rules of
   // a valid file are those of n8n_healthcheck/profile.py (docs/profile-format.md).
 
+  // profile-core:start
+  // Everything from here to "profile-core:end" touches no page element, so that
+  // tests/test_web_profile.py can run it as it is and compare it with profile.py.
   const PROFILE_FORMAT = "n8n-healthcheck-profile";
   const PROFILE_VERSION = 1;
   const PROFILE_REASONS = {
@@ -654,8 +663,26 @@
     "queue.maxmemory_policy", "queue.maxmemory_bytes", "queue.waiting_jobs", "queue.active_jobs",
     "queue.failed_jobs", "resources.main", "resources.worker", "probes.main", "probes.worker",
   ];
+  const PROFILE_SOURCES = ["health", "metrics", "env", "postgres", "redis", "kubernetes"];
+  // What a withheld entry is left with (profile.apply_withholding).
+  const WITHHELD_FACT = { value: null, provenance: "withheld", source: null, detail: "" };
+  const WITHHELD_SETTING = { state: "withheld", value: null };
+  const WITHHELD_CHECK = { withheld: true };
 
-  // profile-edit:start — tests/test_web_profile.py runs this block against profile.py.
+  // A number JavaScript would spell differently from the text it came in (0.0, 1e0, a
+  // whole number of 2^53 or more) is kept as that text, so it is saved and shown exactly
+  // as written and a float is never taken for a whole number. Browsers without
+  // JSON.rawJSON keep plain numbers: there 0.0 is saved as 0 and 1.0 passes for 1.
+  const isRaw = (value) => typeof JSON.isRawJSON === "function" && JSON.isRawJSON(value);
+  const numberText = (value) => (isRaw(value) ? value.rawJSON : String(value));
+  function parseExact(text) {
+    if (typeof JSON.rawJSON !== "function") return JSON.parse(text);
+    return JSON.parse(text, (key, value, context) => (
+      typeof value === "number" && Number.isFinite(value) && context && typeof context.source === "string" && context.source !== String(value)
+        ? JSON.rawJSON(context.source)
+        : value));
+  }
+
   const REFERENCE_MAX = 200;
   // What Python's str.strip() removes, so a reference is stored exactly as profile.py would.
   const REFERENCE_EDGES = /^[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
@@ -670,40 +697,50 @@
     return null;
   }
 
-  /** A copy of `profile` with the entries in `ids` blanked. Same result as profile.apply_withholding. */
+  /** The id a setting is withheld by (profile.setting_id). */
+  const settingKey = (setting) => `setting:${setting.scope}:${setting.name}`;
+
+  /** `profile` with the entries in `ids` blanked, the reason and the reference. Same result as profile.apply_withholding. */
   function withholdEntries(profile, ids, reason, reference) {
-    const copy = JSON.parse(JSON.stringify(profile));
-    copy.run = { reason, reference: stripReference(reference) };
-    for (const fact of copy.facts) {
-      if (ids.has(fact.id)) Object.assign(fact, { value: null, provenance: "withheld", source: null, detail: "" });
-    }
-    for (const setting of copy.settings) {
-      if (ids.has(`setting:${setting.scope}:${setting.name}`)) Object.assign(setting, { state: "withheld", value: null });
-    }
-    if (ids.has("check")) copy.check = { withheld: true };
-    return copy;
+    return {
+      ...profile,
+      run: { reason, reference: stripReference(reference) },
+      facts: profile.facts.map((fact) => (ids.has(fact.id) ? { ...fact, ...WITHHELD_FACT } : fact)),
+      settings: profile.settings.map((setting) => (ids.has(settingKey(setting)) ? { ...setting, ...WITHHELD_SETTING } : setting)),
+      check: ids.has("check") ? WITHHELD_CHECK : profile.check,
+    };
   }
-  // profile-edit:end
+
+  /** The text of the file, as profile.to_json writes it. */
+  const profileText = (profile) => `${JSON.stringify(profile, null, 2)}\n`;
 
   /** Why `data` is not a profile this page can show, or null. Mirrors profile.validate(). */
   function profileProblem(data) {
     // An entry is named by its position, never by text taken from the file.
     const bad = (what) => `This file is not a valid environment profile: ${what}. Nothing of it is shown.`;
-    const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+    const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value) && !isRaw(value);
     const isText = (value) => typeof value === "string";
-    const wellFormed = (value) => (isText(value)
-      ? !/\p{Cs}/u.test(value)
-      : value === null || typeof value !== "object" || Object.entries(value).every(([key, item]) => wellFormed(key) && wellFormed(item)));
-    const isValue = (value, depth = 0) => (isObject(value)
-      ? depth < 2 && Object.values(value).every((item) => isValue(item, depth + 1))
-      : value !== undefined && !Array.isArray(value));
+    // A whole number written as one: 1, not 1.0 or 1e0 (Python reads those as floats).
+    const isWhole = (value) => Number.isInteger(value) || (isRaw(value) && /^-?[0-9]+$/.test(value.rawJSON));
+    // No half of a surrogate pair in any string or key, and no number beyond what JSON can say (1E400).
+    const sound = (value) => {
+      if (isText(value)) return !/\p{Cs}/u.test(value);
+      if (typeof value === "number") return Number.isFinite(value);
+      if (value === null || typeof value !== "object") return true;
+      return Object.entries(value).every(([key, item]) => sound(key) && sound(item));
+    };
+    const isValue = (value, depth = 0) => {
+      if (isRaw(value)) return true; // a number
+      if (isObject(value)) return depth < 2 && Object.values(value).every((item) => isValue(item, depth + 1));
+      return value !== undefined && !Array.isArray(value);
+    };
 
     if (!isObject(data)) return bad("it does not hold a JSON object");
     if (data.format !== PROFILE_FORMAT) return `This file is not an environment profile of n8n-healthcheck: its “format” is not “${PROFILE_FORMAT}”. Nothing of it is shown.`;
     const version = data.format_version;
-    if (!Number.isInteger(version) || version < 1) return bad("“format_version”");
-    if (version > PROFILE_VERSION) return `This profile has format version ${version}, newer than this page reads (${PROFILE_VERSION}). Update n8n-healthcheck to open it. Nothing of it is shown.`;
-    if (!wellFormed(data)) return bad("it holds something that is not text");
+    if (!isWhole(version) || Number(numberText(version)) < 1) return bad("“format_version”");
+    if (Number(numberText(version)) > PROFILE_VERSION) return `This profile has format version ${numberText(version)}, newer than this page reads (${PROFILE_VERSION}). Update n8n-healthcheck to open it. Nothing of it is shown.`;
+    if (!sound(data)) return bad("it holds a value that is not valid JSON text");
     if (!isText(data.tool_version)) return bad("“tool_version”");
     if (!isText(data.created_at)) return bad("“created_at”");
     const run = data.run;
@@ -711,7 +748,7 @@
     if (!Object.hasOwn(PROFILE_REASONS, run.reason)) return bad("“run.reason”");
     if (!isText(run.reference) || stripReference(run.reference) !== run.reference || referenceProblem(run.reference)) return bad("“run.reference”");
     if (!isObject(data.sources) || !Object.values(data.sources).every((state) => SOURCE_STATES.includes(state))) return bad("“sources”");
-    if (!Object.keys(SECTIONS).every((name) => Object.hasOwn(data.sources, name))) return bad("a source is missing");
+    if (!PROFILE_SOURCES.every((name) => Object.hasOwn(data.sources, name))) return bad("a source is missing");
 
     if (!Array.isArray(data.facts)) return bad("“facts”");
     for (const [index, fact] of data.facts.entries()) {
@@ -719,7 +756,8 @@
       if (!isObject(fact) || !isText(fact.id)) return bad(`fact ${number} has no id`);
       if (!PROVENANCES.includes(fact.provenance)) return bad(`provenance of fact ${number}`);
       if (!isValue(fact.value)) return bad(`value of fact ${number}`);
-      if (fact.source !== null && !isText(fact.source)) return bad(`source of fact ${number}`);
+      // As in profile.py, a fact without the key has no source.
+      if (fact.source !== undefined && fact.source !== null && !isText(fact.source)) return bad(`source of fact ${number}`);
       if (!isText(fact.detail)) return bad(`detail of fact ${number}`);
     }
     const ids = new Set(data.facts.map((fact) => fact.id));
@@ -732,14 +770,14 @@
       if (!SETTING_STATES.includes(setting.state)) return bad(`state of setting ${number}`);
       if (setting.value !== null && !isText(setting.value)) return bad(`value of setting ${number}`);
     }
-    if (!Number.isInteger(data.settings_not_listed) || data.settings_not_listed < 0) return bad("“settings_not_listed”");
+    if (!isWhole(data.settings_not_listed) || Number(numberText(data.settings_not_listed)) < 0) return bad("“settings_not_listed”");
 
     const check = data.check;
     if (!isObject(check)) return bad("“check”");
     if (check.withheld !== true) {
       if (typeof check.partial !== "boolean") return bad("“check.partial”");
       if (!Array.isArray(check.scores)
-        || !check.scores.every((row) => isObject(row) && isText(row.area) && (row.score === null || Number.isInteger(row.score)))) return bad("“check.scores”");
+        || !check.scores.every((row) => isObject(row) && isText(row.area) && (row.score === null || isWhole(row.score)))) return bad("“check.scores”");
       if (!Array.isArray(check.findings)
         || !check.findings.every((finding) => isObject(finding) && ["rule_id", "severity", "area", "title"].every((key) => isText(finding[key])))) return bad("“check.findings”");
     }
@@ -750,6 +788,7 @@
   function shown(value) {
     if (value === null) return "not set";
     if (typeof value === "boolean") return value ? "yes" : "no";
+    if (isRaw(value)) return value.rawJSON;
     if (typeof value === "object") {
       return Object.entries(value)
         .map(([key, item]) => (item !== null && typeof item === "object" ? `${key} (${shown(item)})` : `${key}: ${shown(item)}`))
@@ -757,6 +796,7 @@
     }
     return String(value);
   }
+  // profile-core:end
 
   const stateTag = (state) => el("span", { class: `tag tag--${state === "withheld" ? "withheld" : state === "unknown" ? "partial" : "reason"}` }, state);
 
@@ -766,6 +806,8 @@
    * Every string of the profile is inserted as text.
    */
   function profileSections(profile, edit) {
+    // An id or a variable name may break after a dot or an underscore, not in the middle of a word.
+    const breakable = (text) => text.split(/(?<=[._])/).flatMap((piece, index) => (index ? [el("wbr"), piece] : [piece]));
     const part = (title, ...children) => el("section", { class: edit ? "ppart" : "block" }, el(edit ? "h4" : "h3", null, title), ...children);
     const tick = (id, key, name) => el("label", { class: "check" },
       el("input", { type: "checkbox", id, "data-withhold": key, checked: withheld.has(key) }),
@@ -797,7 +839,7 @@
         el("dt", null, "Reason"), el("dd", null, `${PROFILE_REASONS[profile.run.reason]} (${profile.run.reason})`),
         el("dt", null, "Reference"), el("dd", null, profile.run.reference || "none"));
     }
-    details.append(el("dt", null, "Written by"), el("dd", null, `n8n-healthcheck ${profile.tool_version}, profile format ${profile.format_version}`));
+    details.append(el("dt", null, "Written by"), el("dd", null, `n8n-healthcheck ${profile.tool_version}, profile format ${numberText(profile.format_version)}`));
 
     const sources = el("table", { class: "ptable" },
       el("thead", null, el("tr", null, el("th", { scope: "col" }, "Source"), el("th", { scope: "col" }, "State"))),
@@ -808,7 +850,7 @@
     const facts = grouped(profile.facts, (fact) => fact.id.split(".")[0], (fact, index) => {
       const known = fact.provenance === "measured" || fact.provenance === "declared";
       return el("tr", null,
-        el("th", { scope: "row" }, fact.id),
+        el("th", { scope: "row" }, ...breakable(fact.id)),
         el("td", null,
           el("p", { class: "pline" },
             known ? el("span", { class: "pvalue" }, shown(fact.value)) : null,
@@ -821,12 +863,12 @@
     const factsWithheld = profile.facts.filter((fact) => fact.provenance === "withheld").length;
 
     const settings = grouped(profile.settings, (setting) => setting.scope, (setting, index) => el("tr", null,
-      el("th", { scope: "row" }, setting.name),
+      el("th", { scope: "row" }, ...breakable(setting.name)),
       el("td", null, el("p", { class: "pline" },
         setting.state === "value" ? el("span", { class: "pvalue" }, setting.value || "(empty)")
           : setting.state === "set" ? el("span", { class: "pdetail" }, "set (value not written)")
             : stateTag("withheld"))),
-      edit ? el("td", { class: "ptable__withhold" }, tick(`w-setting-${index}`, `setting:${setting.scope}:${setting.name}`, `the setting ${setting.name} of ${setting.scope}`)) : null));
+      edit ? el("td", { class: "ptable__withhold" }, tick(`w-setting-${index}`, settingKey(setting), `the setting ${setting.name} of ${setting.scope}`)) : null));
 
     const check = profile.check;
     const outcome = [];
@@ -842,7 +884,7 @@
         el("thead", null, el("tr", null, el("th", { scope: "col" }, "Area"), el("th", { scope: "col" }, "Score"))),
         el("tbody", null, ...check.scores.map((row) => el("tr", null,
           el("th", { scope: "row" }, row.area),
-          el("td", null, row.score === null ? "n/a" : `${row.score}/100${row.partial ? " (partial)" : ""}`))))));
+          el("td", null, row.score === null ? "n/a" : `${numberText(row.score)}/100${row.partial ? " (partial)" : ""}`))))));
       if (check.partial) outcome.push(el("p", { class: "block__note" }, "The check was partial: not every source was collected or not every rule ran."));
       outcome.push(check.findings.length
         ? el("ul", { class: "pfindings" }, ...check.findings.map((finding) => el("li", null,
@@ -872,7 +914,7 @@
         bulk("settings", profile.settings),
         profile.settings.length ? table("Setting", settings) : null,
         profile.settings_not_listed
-          ? el("p", { class: "block__note" }, `Other distinct variables that were set and are not listed, not even by name: ${profile.settings_not_listed}.`)
+          ? el("p", { class: "block__note" }, `Other distinct variables that were set and are not listed, not even by name: ${numberText(profile.settings_not_listed)}.`)
           : null),
       part("Check outcome", ...outcome),
     ];
@@ -882,6 +924,15 @@
 
   function currentProfile() {
     return withholdEntries(report.profile, withheld, $("f-reason").value, $("f-reference").value);
+  }
+
+  /** A new run is a new profile: no choice, reason or reference of the run before carries over to it. */
+  function resetShare() {
+    withheld.clear();
+    $("f-reason").value = Object.keys(PROFILE_REASONS)[0];
+    $("f-reference").value = "";
+    checkReference();
+    $("share-status").textContent = "";
   }
 
   function renderShare() {
@@ -911,32 +962,38 @@
     }
     const profile = currentProfile();
     const day = /^\d{4}-\d{2}-\d{2}/.exec(String(profile.created_at));
-    download(`n8n-profile-${day ? day[0] : "undated"}.json`, "application/json", `${JSON.stringify(profile, null, 2)}\n`, "share-status");
+    download(`n8n-profile-${day ? day[0] : "undated"}.json`, "application/json", profileText(profile), "share-status");
   }
 
   // Viewer ("Open a profile" on the start page).
+
+  const RUNNING_NO_PROFILE = "A health check is running. Open the profile when the check has finished.";
 
   async function openProfile() {
     const input = $("f-profile");
     const file = input.files && input.files[0];
     if (!file) return;
-    setFieldError("e-profile", null);
+    setFieldError("e-profile", null, [input]);
     let problem = null;
     let data = null;
-    if (file.size > MAX_BODY_BYTES) {
+    if (running) {
+      // The field is disabled during a run; this is for a file chosen just before it started.
+      problem = RUNNING_NO_PROFILE;
+    } else if (file.size > MAX_BODY_BYTES) {
       problem = `“${file.name}” is ${formatBytes(file.size)}. A profile is a small JSON file; choose the n8n-profile file itself.`;
     } else {
       try {
         // Strict UTF-8 and no byte-order mark, as the command line reads it.
-        data = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await file.arrayBuffer()));
-        problem = profileProblem(data);
+        data = parseExact(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await file.arrayBuffer()));
+        // A check that started while the file was being read owns the page: its result is shown, not this.
+        problem = running ? RUNNING_NO_PROFILE : profileProblem(data);
       } catch {
         problem = `“${file.name}” is not a JSON file this page can read. Choose the n8n-profile file itself, as it was downloaded.`;
       }
     }
     input.value = ""; // so choosing the same file again fires "change"
     if (problem) {
-      setFieldError("e-profile", problem);
+      setFieldError("e-profile", problem, [input]);
       input.focus();
       return;
     }
@@ -965,7 +1022,7 @@
     if (!button) return;
     const keys = button.dataset.bulk === "facts"
       ? report.profile.facts.map((fact) => fact.id)
-      : report.profile.settings.map((setting) => `setting:${setting.scope}:${setting.name}`);
+      : report.profile.settings.map(settingKey);
     for (const key of keys) {
       if (button.dataset.on === "true") withheld.add(key);
       else withheld.delete(key);
@@ -977,6 +1034,7 @@
   $("profile-print").addEventListener("click", () => window.print());
   $("profile-close").addEventListener("click", () => {
     $("profile-body").replaceChildren(); // nothing of the file is kept
+    $("profile-meta").textContent = "";
     showView("form");
   });
 

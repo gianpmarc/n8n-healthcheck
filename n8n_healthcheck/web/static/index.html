@@ -150,7 +150,8 @@
       <p class="block__note">Received an environment profile (a file named like <code>n8n-profile-2026-11-18.json</code>)? Open it here to read it. It needs no access to the instance.</p>
       <div class="field">
         <label for="f-profile">Choose a profile file <span class="field__note">(read in this browser, not uploaded, not kept)</span></label>
-        <input id="f-profile" type="file" accept=".json,application/json" aria-describedby="e-profile">
+        <input id="f-profile" type="file" accept=".json,application/json" aria-describedby="h-profile e-profile">
+        <p class="field__hint" id="h-profile" hidden>A health check is running. A profile can be opened when it has finished.</p>
         <p class="field__error" id="e-profile" hidden></p>
       </div>
     </section>
