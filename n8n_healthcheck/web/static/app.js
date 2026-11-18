@@ -13,6 +13,8 @@
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   const $ = (id) => document.getElementById(id);
+  /** True when `key` is the object's own property, not one every object inherits. */
+  const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
   /** Create an element. Children are nodes or strings; strings become text nodes. */
   function el(tag, attrs, ...children) {
@@ -495,7 +497,7 @@
   }
 
   function severityTag(severity) {
-    const known = Object.hasOwn(SEVERITY, severity) ? SEVERITY[severity] : null;
+    const known = has(SEVERITY, severity) ? SEVERITY[severity] : null;
     return el("span", { class: `tag tag--${known ? severity : "area"}` }, icon(known ? severity : "info"), known ? known.one : String(severity));
   }
 
@@ -669,16 +671,21 @@
   const WITHHELD_SETTING = { state: "withheld", value: null };
   const WITHHELD_CHECK = { withheld: true };
 
-  // A number JavaScript would spell differently from the text it came in (0.0, 1e0, a
-  // whole number of 2^53 or more) is kept as that text, so it is saved and shown exactly
-  // as written and a float is never taken for a whole number. Browsers without
-  // JSON.rawJSON keep plain numbers: there 0.0 is saved as 0 and 1.0 passes for 1.
+  // Only a whole number written in plain digits that JavaScript writes back the same way
+  // stays a number. Any other (0.0, 2.5, 1e0, 1e+21, a whole number of 2^53 or more) is
+  // kept as the text it came in, so it is saved and shown exactly as written, and whether
+  // a number is whole is decided on that text, as Python does.
+  // A browser without JSON.rawJSON keeps plain numbers instead. There a float that is
+  // whole is saved without its ".0" (0.0 as 0) and passes for a whole number in an opened
+  // file, and a whole number of 2^53 or more is saved as the nearest number JavaScript
+  // has, which is a different number (18446744073709551616 as 18446744073709552000).
   const isRaw = (value) => typeof JSON.isRawJSON === "function" && JSON.isRawJSON(value);
   const numberText = (value) => (isRaw(value) ? value.rawJSON : String(value));
   function parseExact(text) {
     if (typeof JSON.rawJSON !== "function") return JSON.parse(text);
     return JSON.parse(text, (key, value, context) => (
-      typeof value === "number" && Number.isFinite(value) && context && typeof context.source === "string" && context.source !== String(value)
+      typeof value === "number" && Number.isFinite(value) && context && typeof context.source === "string"
+        && !(/^-?[0-9]+$/.test(context.source) && context.source === String(value))
         ? JSON.rawJSON(context.source)
         : value));
   }
@@ -720,7 +727,8 @@
     const bad = (what) => `This file is not a valid environment profile: ${what}. Nothing of it is shown.`;
     const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value) && !isRaw(value);
     const isText = (value) => typeof value === "string";
-    // A whole number written as one: 1, not 1.0 or 1e0 (Python reads those as floats).
+    // A whole number written as one: 1, not 1.0, 1e0 or 1e+21 (Python reads those as floats).
+    // With JSON.rawJSON a plain number is always one; the second case is 2^53 and above.
     const isWhole = (value) => Number.isInteger(value) || (isRaw(value) && /^-?[0-9]+$/.test(value.rawJSON));
     // No half of a surrogate pair in any string or key, and no number beyond what JSON can say (1E400).
     const sound = (value) => {
@@ -745,10 +753,10 @@
     if (!isText(data.created_at)) return bad("“created_at”");
     const run = data.run;
     if (!isObject(run)) return bad("“run”");
-    if (!Object.hasOwn(PROFILE_REASONS, run.reason)) return bad("“run.reason”");
+    if (!isText(run.reason) || !has(PROFILE_REASONS, run.reason)) return bad("“run.reason”");
     if (!isText(run.reference) || stripReference(run.reference) !== run.reference || referenceProblem(run.reference)) return bad("“run.reference”");
     if (!isObject(data.sources) || !Object.values(data.sources).every((state) => SOURCE_STATES.includes(state))) return bad("“sources”");
-    if (!PROFILE_SOURCES.every((name) => Object.hasOwn(data.sources, name))) return bad("a source is missing");
+    if (!PROFILE_SOURCES.every((name) => has(data.sources, name))) return bad("a source is missing");
 
     if (!Array.isArray(data.facts)) return bad("“facts”");
     for (const [index, fact] of data.facts.entries()) {
@@ -791,7 +799,7 @@
     if (isRaw(value)) return value.rawJSON;
     if (typeof value === "object") {
       return Object.entries(value)
-        .map(([key, item]) => (item !== null && typeof item === "object" ? `${key} (${shown(item)})` : `${key}: ${shown(item)}`))
+        .map(([key, item]) => (item !== null && typeof item === "object" && !isRaw(item) ? `${key} (${shown(item)})` : `${key}: ${shown(item)}`))
         .join(", ") || "empty";
     }
     return String(value);
@@ -807,7 +815,8 @@
    */
   function profileSections(profile, edit) {
     // An id or a variable name may break after a dot or an underscore, not in the middle of a word.
-    const breakable = (text) => text.split(/(?<=[._])/).flatMap((piece, index) => (index ? [el("wbr"), piece] : [piece]));
+    // (No lookbehind: where it is not supported it stops the whole script from loading.)
+    const breakable = (text) => text.match(/[^._]*[._]?/g).filter(Boolean).flatMap((piece, index) => (index ? [el("wbr"), piece] : [piece]));
     const part = (title, ...children) => el("section", { class: edit ? "ppart" : "block" }, el(edit ? "h4" : "h3", null, title), ...children);
     const tick = (id, key, name) => el("label", { class: "check" },
       el("input", { type: "checkbox", id, "data-withhold": key, checked: withheld.has(key) }),
@@ -844,7 +853,7 @@
     const sources = el("table", { class: "ptable" },
       el("thead", null, el("tr", null, el("th", { scope: "col" }, "Source"), el("th", { scope: "col" }, "State"))),
       el("tbody", null, ...Object.entries(profile.sources).map(([name, state]) => el("tr", null,
-        el("th", { scope: "row" }, Object.hasOwn(SECTIONS, name) ? `${SECTIONS[name].label} (${name})` : name),
+        el("th", { scope: "row" }, has(SECTIONS, name) ? `${SECTIONS[name].label} (${name})` : name),
         el("td", null, state.replace("_", " "))))));
 
     const facts = grouped(profile.facts, (fact) => fact.id.split(".")[0], (fact, index) => {
