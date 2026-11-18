@@ -78,7 +78,7 @@ The only text a person types is `run.reference`.
 | `sources` | What the tool was able to read. See "Sources". |
 | `facts` | The fact catalogue, always complete and in the same order. See "Facts". |
 | `settings` | The n8n settings that were set. See "Settings". |
-| `settings_not_listed` | How many other variables were set and are not listed, not even by name. |
+| `settings_not_listed` | How many other distinct variables were set and are not listed, not even by name. |
 | `check` | The outcome of the health check on that day. See "Check". |
 
 ## Sources
@@ -210,9 +210,11 @@ name merely contains "n8n" would therefore look like a main container. So:
 - An image called exactly `n8n`, in any registry, is n8n.
 - In the main role, when at least one container is called exactly `n8n`, the
   others are left out of every fact and of the settings: they are never
-  counted. Every measured fact that was read from the main containers then
-  says so in its `detail`, with the number only and never a name: "1 other
-  container with n8n in its image name was left out".
+  counted. The facts a left-out container could change if it were a main
+  process after all (`main.replicas`, `resources.main`, `probes.main`,
+  `n8n.image_official`, and `n8n.version` when it comes from the image tag)
+  then say so in their `detail`, with the number only and never a name: "1
+  other container with n8n in its image name was left out".
 - A role in which no container is called exactly `n8n` (a build under another
   name, or only an unrelated image) gives `unknown` for its replica, resources
   and probes facts, and no version is read from its tag.
@@ -242,10 +244,10 @@ The n8n settings that were set, one entry each:
 **Which names are listed.** Only the variables n8n documents in its environment
 variable reference (the tool carries the list; version 0.2.0 has the reference
 as published on 2026-11-18, plus `NODE_ENV`), and `<NAME>_FILE` of one of them.
-Any other variable is counted in `settings_not_listed` (once per scope it
-appears in) and is not named, even when its name starts with `N8N_`: a custom
+Any other variable is counted in `settings_not_listed` and is not named, even when its name starts with `N8N_`: a custom
 variable name can identify a company or a product. A variable n8n adds after
-the list was made is counted too, until the tool is updated; so "not listed"
+the list was made is counted too, until the tool is updated. The count is of
+distinct variables: one that is set in three roles counts once. So "not listed"
 does not mean "not an n8n setting".
 
 **When the value is written** (`state` is `value`). Only when all of these hold:

@@ -128,8 +128,10 @@ def _role_containers(snapshot: Snapshot, role: str) -> list:
     return exact if exact and role == "main" else found
 
 
-# Measured from Kubernetes without looking at the main containers.
-NOT_FROM_MAIN = ("orchestrator", "worker.replicas", "webhook.replicas", "worker.concurrency", "resources.worker", "probes.worker")
+# The facts whose value a container left out of the main role could change, were it a
+# main process after all: what is counted or read off the containers themselves. A fact
+# read from a variable is not among them; the note on these is enough to warn the reader.
+SHAPED_BY_MAIN_CONTAINERS = ("main.replicas", "resources.main", "probes.main", "n8n.version", "n8n.image_official")
 
 
 def _fact(fact_id: str, build: Callable, snapshot: Snapshot, failed: tuple) -> dict:
@@ -139,7 +141,7 @@ def _fact(fact_id: str, build: Callable, snapshot: Snapshot, failed: tuple) -> d
     must see that something was left out. Only how many: never an image or Deployment name.
     """
     fact = {"id": fact_id, **build(snapshot, failed)}
-    if fact["source"] == "kubernetes" and fact_id not in NOT_FROM_MAIN:
+    if fact["source"] == "kubernetes" and fact_id in SHAPED_BY_MAIN_CONTAINERS:
         every = sum(role == "main" for _, _, role in n8n_containers(snapshot.kubernetes or {}))
         left_out = every - len(_role_containers(snapshot, "main"))
         if left_out:
@@ -537,7 +539,7 @@ def setting_value(name: str, value) -> Optional[str]:
 
 
 def _settings(snapshot: Snapshot) -> tuple:
-    """(settings, how many variables were not listed)."""
+    """(settings, how many distinct variables were not listed)."""
     scopes = []
     if snapshot.env is not None:
         scopes.append(("instance", [snapshot.env]))
@@ -545,11 +547,11 @@ def _settings(snapshot: Snapshot) -> tuple:
         envs = [container.get("env") or {} for _, container in _role_containers(snapshot, role)]
         if envs:
             scopes.append((role, envs))
-    settings, not_listed = [], 0
+    settings, not_listed = [], set()
     for scope, envs in scopes:
         for name in sorted({name for env in envs for name in env}, key=str):
             if not setting_listed(name):
-                not_listed += 1
+                not_listed.add(name)  # once, in however many scopes it is set
                 continue
             # Containers of one role that disagree, one of them not having it included.
             values = {env[name] if name in env else _UNSET for env in envs}
@@ -558,7 +560,7 @@ def _settings(snapshot: Snapshot) -> tuple:
                 settings.append({"scope": scope, "name": name, "state": "value", "value": value})
             else:
                 settings.append({"scope": scope, "name": name, "state": "set", "value": None})
-    return settings, not_listed
+    return settings, len(not_listed)
 
 
 def setting_id(setting: dict) -> str:
@@ -841,7 +843,7 @@ def render_markdown(profile: dict) -> str:
     if not profile["settings"]:
         lines.append("No n8n setting is listed.")
     if profile["settings_not_listed"]:
-        lines += ["", f"Other variables that were set and are not listed, not even by name: {profile['settings_not_listed']}."]
+        lines += ["", f"Other distinct variables that were set and are not listed, not even by name: {profile['settings_not_listed']}."]
 
     check = profile["check"]
     lines += ["", "## Check outcome", ""]

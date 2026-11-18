@@ -567,11 +567,19 @@ class KubernetesFactTest(unittest.TestCase):
             ("probes.main", two),
             ("n8n.image_official", two),
             ("n8n.version", "from the image tag; " + two),
-            ("executions.mode", two),
-            ("database.engine", "n8n default, variable not set; " + two),
+            # Read from a variable of the containers that are n8n: no note, it would be noise.
+            ("executions.mode", ""),
+            ("database.engine", "n8n default, variable not set"),
+            ("multi_main.enabled", "n8n default, variable not set"),
         ):
             found = fact(snapshot, fact_id)
             self.assertEqual((found["provenance"], found["detail"]), ("measured", detail), fact_id)
+        noted = [f["id"] for f in build(snapshot)["facts"] if "left out" in f["detail"]]
+        self.assertEqual(noted, ["n8n.version", "n8n.image_official", "main.replicas", "resources.main", "probes.main"])
+        # The version n8n reports itself does not depend on which containers were read.
+        reported = self.beside_unrelated()
+        reported.n8n_version = "2.47.0"
+        self.assertEqual(fact(reported, "n8n.version")["detail"], "")
         text = profile.to_json(build(snapshot)) + profile.render_markdown(build(snapshot))
         for hidden in ("exporter", "mcp", "example"):
             self.assertNotIn(hidden, text)
@@ -976,6 +984,21 @@ class SettingsTest(unittest.TestCase):
             },
         )
         self.assertEqual(build(snapshot)["settings_not_listed"], 1)
+
+    def test_unlisted_variables_are_counted_once_whatever_the_number_of_scopes(self):
+        custom = {"ACME_FLAG": "1", "ACME_REGION": "eu"}
+        snapshot = Snapshot(
+            env={**custom, "ACME_ONLY_IN_FILE": "1"},
+            kubernetes=kube(
+                ("main", 1, container(env=custom)),
+                ("worker", 1, worker(custom)),
+                ("webhook", 1, container(command=["webhook"], env={**custom, "ACME_ONLY_ON_WEBHOOK": "1"})),
+            ),
+        )
+        built = build(snapshot)
+        self.assertEqual(built["settings_not_listed"], 4)  # distinct names, not 2 x 4 scopes + 2
+        self.assertEqual(built["settings"], [])
+        self.assertIn("Other distinct variables that were set and are not listed, not even by name: 4.", profile.render_markdown(built))
 
     def test_both_sources_are_listed(self):
         snapshot = Snapshot(env={"DB_TYPE": "postgresdb"}, kubernetes=main_kube({"DB_TYPE": "sqlite"}))
