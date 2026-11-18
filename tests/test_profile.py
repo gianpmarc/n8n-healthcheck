@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 import n8n_healthcheck
-from n8n_healthcheck import cli, engine, profile
+from n8n_healthcheck import cli, engine, n8n_settings, profile
 from n8n_healthcheck.collectors import envfile, kubernetes
 from n8n_healthcheck.models import REDACTED, Finding, Snapshot
 from n8n_healthcheck.rules import ALL_RULES
@@ -103,8 +103,21 @@ N8N_INNOCENT_FOUR=admin@{MARK}.example
 N8N_INNOCENT_FIVE=/data/{MARK}
 N8N_INNOCENT_SIX=redis://:{MARK}pw@cache:6379
 N8N_INNOCENT_SEVEN={MARK} with spaces
+N8N_INNOCENT_EIGHT={MARK}
 EXECUTIONS_DATA_MAX_AGE={MARK}.hours
 N8N_RUNNERS_MODE=https://{MARK}.example
+QUEUE_BULL_REDIS_CLUSTER_NODES={MARK}-redis-0,{MARK}-redis-1
+N8N_CUSTOM_EXTENSIONS={MARK}-nodes
+NODE_FUNCTION_ALLOW_EXTERNAL={MARK}-internal-sdk,lodash
+N8N_RUNNERS_EXTERNAL_ALLOW={MARK}lib
+N8N_LICENSE_TENANT_ID=471147
+N8N_SMTP_AUTH={MARK}hunter2
+DB_POSTGRESDB_SSL_CA=MIIB{MARK}base64
+N8N_{MARK.upper()}CORP_SSO_BRIDGE=enabled
+N8N_PORT={MARK}
+N8N_METRICS={MARK}
+N8N_LOG_LEVEL={MARK}
+EXECUTIONS_MODE_FILE=/run/secrets/{MARK}
 {MARK.upper()}CORP_FEATURE=1
 N8N_{MARK}.example=1
 n8n_{MARK}_lower=1
@@ -122,7 +135,7 @@ LEAKY_CONFIGMAPS = {
 }
 
 
-def leaky_deployment(name, args):
+def leaky_deployment(name, args, resources):
     return {
         "metadata": {"name": f"{MARK}-{name}", "namespace": f"{MARK}-namespace"},
         "spec": {
@@ -147,10 +160,7 @@ def leaky_deployment(name, args):
                                 },
                                 {"name": f"{MARK.upper()}_SERVICE_NAME", "value": "1"},
                             ],
-                            "resources": {
-                                "requests": {"cpu": "250m", f"{MARK}.example/gpu": "1"},
-                                "limits": {"memory": f"{MARK}Gi"},
-                            },
+                            "resources": resources,
                             "livenessProbe": {"httpGet": {"path": f"/{MARK}/healthz"}},
                         }
                     ]
@@ -161,7 +171,18 @@ def leaky_deployment(name, args):
 
 
 def leaky_snapshot():
-    deployments = {"items": [leaky_deployment("main", []), leaky_deployment("worker", ["worker"])]}
+    # Each role leaks through a different part of its resources, so that one bad value
+    # making a whole fact unknown cannot hide another.
+    deployments = {
+        "items": [
+            # a resource name that is a domain, next to quantities that are fine
+            leaky_deployment("main", [], {"requests": {"cpu": "250m", f"{MARK}.example/gpu": "1"}, "limits": {"memory": "1Gi"}}),
+            # a quantity that is an address
+            leaky_deployment("worker", ["worker"], {"requests": {"cpu": "10.11.12.13"}}),
+            # a quantity that is free text
+            leaky_deployment("webhook", ["webhook"], {"limits": {"memory": f"{MARK}Gi"}}),
+        ]
+    }
     return Snapshot(
         health={"healthz": True, "readiness": True, "metrics_disabled": False},
         metrics={f'n8n_version_info{{version="v2.40.1",instance="{MARK}.example:5678"}}': 1.0},
@@ -194,7 +215,7 @@ class ZeroLeakTest(unittest.TestCase):
         built = profile.build_profile(snapshot, findings, failed=("redis",))
         for text in (profile.to_json(built), profile.render_markdown(built)):
             self.assertNotIn(MARK, text.lower())
-            for ip in SEEDED_IPS:
+            for ip in SEEDED_IPS + ("471147",):  # ... and the seeded tenant id
                 self.assertNotIn(ip, text)
             # No URL, e-mail or path can be written at all: these never appear in a profile.
             for fragment in ("://", "@", "\\", "<redacted>", "<valueFrom>"):
@@ -214,14 +235,20 @@ class ZeroLeakTest(unittest.TestCase):
         built = self.assert_clean(leaky_snapshot())
         # ... and the profile is not clean merely because it is empty.
         facts = {f["id"]: f for f in built["facts"]}
-        self.assertEqual(facts["executions.mode"]["value"], "queue")
+        self.assertEqual(facts["executions.mode"]["provenance"], "unknown")  # EXECUTIONS_MODE_FILE is there
+        self.assertEqual(facts["database.engine"]["value"], "postgresdb")
+        self.assertEqual(
+            facts["resources.main"]["value"],
+            {"requests": {"cpu": "250m", "memory": None}, "limits": {"cpu": None, "memory": "1Gi"}},
+        )
         self.assertEqual(facts["database.version"]["value"], "16.4")
         self.assertEqual(facts["n8n.version"]["value"], "2.40.1")
         self.assertEqual(facts["n8n.image_official"]["value"], False)
         self.assertEqual(facts["worker.replicas"]["value"], 2)
         states = {profile.setting_id(s): s["state"] for s in built["settings"]}
         self.assertEqual(states["setting:instance:EXECUTIONS_MODE"], "value")
-        self.assertEqual(states["setting:instance:N8N_HOST"], "set")
+        for name in ("N8N_HOST", "QUEUE_BULL_REDIS_CLUSTER_NODES", "N8N_LICENSE_TENANT_ID", "N8N_PORT", "N8N_METRICS"):
+            self.assertEqual(states[f"setting:instance:{name}"], "set")
         self.assertGreater(built["settings_not_listed"], 0)
         self.assertTrue(built["check"]["findings"])
 
@@ -387,6 +414,40 @@ class EnvFactTest(unittest.TestCase):
                 self.assertEqual((found["provenance"], found["value"]), ("unknown", None), raw)
 
 
+class DefaultsTest(unittest.TestCase):
+    """A default is a fact only when the variable is provably not set."""
+
+    DEFAULTS = [row for row in ENV_FACTS if row[4] is not None]
+
+    def test_a_file_variant_makes_the_fact_unknown(self):
+        for fact_id, name, raw, *_ in ENV_FACTS:
+            for env in ({name + "_FILE": "/run/secrets/x"}, {name: raw, name + "_FILE": "/run/secrets/x"}):
+                for snapshot in (Snapshot(env=env), Snapshot(kubernetes=main_kube(env))):
+                    with self.subTest(fact=fact_id, env=sorted(env)):
+                        found = fact(snapshot, fact_id)
+                        self.assertEqual((found["value"], found["provenance"]), (None, "unknown"))
+                        self.assertEqual(found["detail"], "set through a file, which this tool does not read")
+
+    def test_no_default_for_an_image_that_is_not_the_official_one(self):
+        custom = "registry.example/platform/n8n-custom:7.3.1"
+        for fact_id, _name, _raw, _expected, default in self.DEFAULTS:
+            with self.subTest(fact=fact_id):
+                for snapshot in (
+                    Snapshot(kubernetes=main_kube({}, image=custom)),
+                    Snapshot(env={}, kubernetes=main_kube({}, image=custom)),
+                    Snapshot(kubernetes=kube(("a", 1, container()), ("b", 1, container(image=custom)))),
+                ):
+                    found = fact(snapshot, fact_id)
+                    self.assertEqual((found["value"], found["provenance"]), (None, "unknown"))
+                    self.assertIn("the image is not the official one", found["detail"])
+                # A value that is set is still read from a custom image.
+                self.assertEqual(fact(Snapshot(env={}), fact_id)["value"], default)
+
+    def test_a_set_value_is_read_whatever_the_image(self):
+        snapshot = Snapshot(kubernetes=main_kube({"EXECUTIONS_MODE": "queue"}, image="example/custom-n8n:1"))
+        self.assertEqual(fact(snapshot, "executions.mode")["value"], "queue")
+
+
 class SectionFactTest(unittest.TestCase):
     def test_measured_missing_failed_and_wrong_shape(self):
         for fact_id, section, key, raw, expected in SECTION_FACTS:
@@ -396,7 +457,7 @@ class SectionFactTest(unittest.TestCase):
                 label = "Postgres" if section == "postgres" else "Redis"
                 self.assertEqual(fact(Snapshot(), fact_id)["detail"], f"{label} was not provided")
                 self.assertEqual(fact(Snapshot(), fact_id, (section,))["detail"], f"{label} could not be collected")
-                for bad in (None, "", "db.internal.example", -1, float("nan"), "allkeys-custom"):
+                for bad in (None, "", "db.internal.example", -1, float("nan"), "allkeys-custom", "192.168.77.5", "7.2.4.1"):
                     found = fact(Snapshot(**{section: {key: bad}}), fact_id)
                     self.assertEqual((found["provenance"], found["value"]), ("unknown", None), bad)
 
@@ -442,6 +503,25 @@ class KubernetesFactTest(unittest.TestCase):
         snapshot = Snapshot(kubernetes=kube(("main", 2, container())))
         snapshot.kubernetes["deployments"][0]["containers"].append(container())
         self.assertEqual(fact(snapshot, "main.replicas")["value"], 2)
+
+    def test_containers_that_may_not_be_n8n_itself_are_never_counted(self):
+        # An image name that contains "n8n" is enough for a role, not for a fact.
+        snapshot = Snapshot(
+            kubernetes=kube(
+                ("n8n", 2, container()),
+                ("exporter", 1, container(image="example/n8n-metrics-exporter:1.0.0")),
+                ("mcp", 3, container(image="example/n8n-mcp:0.4.0")),
+            )
+        )
+        for fact_id in ("main.replicas", "resources.main", "probes.main"):
+            found = fact(snapshot, fact_id)
+            self.assertEqual((found["value"], found["provenance"]), (None, "unknown"), fact_id)
+            self.assertEqual(found["detail"], "a container of this role runs an image that may not be n8n itself")
+        alone = Snapshot(kubernetes=kube(("mcp", 3, container(image="example/n8n-mcp:0.4.0"))))
+        self.assertEqual(fact(alone, "main.replicas")["provenance"], "unknown")
+        # A copy of n8n in another registry is still n8n.
+        mirror = Snapshot(kubernetes=kube(("a", 2, container()), ("b", 1, container(image="registry.example:5000/mirror/n8n:2.40.1"))))
+        self.assertEqual(fact(mirror, "main.replicas")["value"], 3)
 
     def test_replicas_unknown_when_not_stated(self):
         snapshot = Snapshot(kubernetes=kube(("main", None, container())))
@@ -506,6 +586,23 @@ class VersionAndMetricsTest(unittest.TestCase):
             snapshot = Snapshot(kubernetes=kube(*((f"m{i}", 1, container(image=image)) for i, image in enumerate(images))))
             self.assertEqual(fact(snapshot, "n8n.version")["provenance"], "unknown", images)
         self.assertEqual(fact(Snapshot(kubernetes=kube(("w", 1, worker()))), "n8n.version")["provenance"], "unknown")
+
+    def test_no_version_from_the_tag_of_an_image_that_is_not_official(self):
+        for images in (("registry.example/platform/n8n-custom:7.3.1",), ("n8nio/n8n:2.40.1", "example/n8n:2.40.1")):
+            snapshot = Snapshot(kubernetes=kube(*((f"m{i}", 1, container(image=image)) for i, image in enumerate(images))))
+            found = fact(snapshot, "n8n.version")
+            self.assertEqual((found["value"], found["provenance"]), (None, "unknown"), images)
+        # ... but what n8n reports about itself is taken whatever the image.
+        custom = Snapshot(n8n_version="2.40.1", kubernetes=kube(("m", 1, container(image="example/n8n-custom:7.3.1"))))
+        self.assertEqual(fact(custom, "n8n.version")["value"], "2.40.1")
+
+    def test_a_version_is_not_the_start_of_a_longer_dotted_number(self):
+        for raw in ("192.168.77.5", "2.47.0.1", "10.0.0.1:5678", "2.47."):
+            self.assertEqual(fact(Snapshot(n8n_version=raw), "n8n.version")["provenance"], "unknown", raw)
+            tagged = Snapshot(kubernetes=kube(("m", 1, container(image=f"n8nio/n8n:{raw.split(':')[0]}"))))
+            self.assertEqual(fact(tagged, "n8n.version")["provenance"], "unknown", raw)
+        for raw, expected in (("2.47.0", "2.47.0"), ("16.4 (Debian 16.4-1)", "16.4"), ("7.2.4-rc1", "7.2.4"), ("2.47", "2.47")):
+            self.assertEqual(fact(Snapshot(n8n_version=raw), "n8n.version")["value"], expected)
         self.assertEqual(fact(Snapshot(n8n_version="unknown"), "n8n.version")["provenance"], "unknown")
 
     def test_metrics_enabled(self):
@@ -561,6 +658,21 @@ class WorkerConcurrencyTest(unittest.TestCase):
             snapshot = Snapshot(kubernetes=kube(*((f"w{i}", 1, w) for i, w in enumerate(workers))))
             self.assertEqual(self.value(snapshot), (None, "unknown", None))
 
+    def test_a_flag_that_is_not_a_plain_number_is_unknown(self):
+        for command in (
+            ["sh", "-c", "n8n worker --concurrency=$WORKER_CONC"],
+            ["worker", "--concurrency", "$(CONC)"],
+            ["worker", "--concurrency="],
+            ["worker", "--concurrency"],
+        ):
+            with self.subTest(command=command):
+                found = fact(Snapshot(kubernetes=kube(("w", 1, worker({}, command)))), "worker.concurrency")
+                self.assertEqual((found["value"], found["provenance"]), (None, "unknown"))
+                self.assertEqual(found["detail"], "the --concurrency flag on a worker is not a plain number")
+        # The limit variable overrides the flag, so then the flag does not matter.
+        limited = Snapshot(kubernetes=kube(("w", 1, worker({LIMIT: "7"}, ["worker", "--concurrency=$X"]))))
+        self.assertEqual(self.value(limited)[0], 7)
+
     def test_workers_that_reach_the_same_number_differently_agree(self):
         snapshot = Snapshot(kubernetes=kube(("a", 1, worker({LIMIT: "5"})), ("b", 1, worker({}, ["worker", "--concurrency=5"]))))
         self.assertEqual(self.value(snapshot)[0], 5)
@@ -602,7 +714,7 @@ class SourcesTest(unittest.TestCase):
 
 
 class SettingsTest(unittest.TestCase):
-    def test_which_names_are_listed(self):
+    def test_only_documented_n8n_variables_are_listed(self):
         env = {
             "N8N_PORT": "5678",
             "EXECUTIONS_MODE": "queue",
@@ -613,64 +725,102 @@ class SettingsTest(unittest.TestCase):
             "NODE_FUNCTION_ALLOW_BUILTIN": "crypto",
             "NODE_ENV": "production",
             "NODE_OPTIONS": "--max-old-space-size=4096",
+            "GENERIC_TIMEZONE": "Europe/Rome",
+            "N8N_ENCRYPTION_KEY_FILE": "/run/secrets/key",
             # Not listed, not even by name:
             "ACME_FEATURE_FLAG": "1",
             "PATH": "/usr/bin",
             "NODE_EXTRA_CA_CERTS": "/certs/ca.pem",
-            "n8n_lowercase": "1",
+            "n8n_port": "1",
             "N8N_odd.name": "1",
             "N8N": "1",
-            "GENERIC_TIMEZONE": "Europe/Rome",
+            "N8N_ACMECORP_SSO_BRIDGE": "enabled",  # looks like n8n's, names a company
+            "N8N_SMTP_AUTH": "hunter2hunter2",  # not a variable n8n documents
+            "ACME_SECRET_FILE": "/run/secrets/acme",
         }
         built = build(Snapshot(env=env))
-        self.assertEqual(
-            [s["name"] for s in built["settings"]],
-            sorted(n for n in env if n.isupper() and n.startswith(("N8N_", "EXECUTIONS_", "QUEUE_", "DB_", "WEBHOOK_", "OFFLOAD_", "NODE_FUNCTION_", "NODE_ENV", "NODE_OPTIONS")) and "." not in n),
-        )
-        self.assertEqual(built["settings_not_listed"], 7)
+        self.assertEqual([s["name"] for s in built["settings"]], sorted(list(env)[:11]))
+        self.assertEqual(built["settings_not_listed"], 9)
         self.assertEqual({s["scope"] for s in built["settings"]}, {"instance"})
-        text = profile.to_json(built)
-        for hidden in ("ACME", "GENERIC_TIMEZONE", "lowercase", "odd.name"):
+        text = profile.to_json(built) + profile.render_markdown(built)
+        for hidden in ("ACME", "n8n_port", "odd.name", "SMTP_AUTH", "hunter2", "NODE_EXTRA"):
             self.assertNotIn(hidden, text)
 
-    def test_value_blocked_by_name_even_when_it_looks_harmless(self):
-        # A host without dots, a database called like the company, a plain user name.
-        for name in (
-            "N8N_HOST", "DB_POSTGRESDB_HOST", "WEBHOOK_URL", "N8N_EDITOR_BASE_URL", "N8N_REDIS_URI",
-            "N8N_EXTERNAL_STORAGE_S3_ENDPOINT", "N8N_COOKIE_DOMAIN", "N8N_LISTEN_ADDRESS", "N8N_PROXY_HOPS",
-            "N8N_PATH", "N8N_USER_FOLDER", "N8N_CUSTOM_EXTENSIONS_DIR", "N8N_LOG_FILE_COUNT_MAX",
-            "N8N_EXTERNAL_STORAGE_S3_BUCKET_REGION", "N8N_EMAIL_MODE", "DB_POSTGRESDB_USER", "N8N_SMTP_SENDER",
-            "N8N_INSTANCE_NAME", "NODE_OPTIONS", "DB_TABLE_PREFIX", "DB_POSTGRESDB_DATABASE",
-            "DB_POSTGRESDB_SCHEMA", "N8N_SOME_TABLE",
-        ):  # fmt: skip
-            with self.subTest(name=name):
-                self.assertFalse(profile.setting_value_written(name, "acme"))
-                self.assertEqual(settings(Snapshot(env={name: "acme"})), {f"setting:instance:{name}": ("set", None)})
-
-    def test_value_blocked_by_shape_even_when_the_name_is_innocent(self):
-        for value in (
-            "https://n8n.example.com/", "n8n.example.com", "10.0.0.1", "ops@example.com", "/data/n8n",
-            "C:\\n8n", "redis:6379", "two words", "0 3 * * *", "a.b", "x" * 65, "tab\tseparated",
-            "line\nbreak", "caf\u00e9", "a;b", "$(OTHER)", "a=b", REDACTED, "<valueFrom>",
-        ):  # fmt: skip
-            with self.subTest(value=value):
-                self.assertFalse(profile.setting_value_written("N8N_INNOCENT", value))
-                self.assertEqual(settings(Snapshot(env={"N8N_INNOCENT": value})), {"setting:instance:N8N_INNOCENT": ("set", None)})
-
-    def test_value_written_when_both_tests_pass(self):
-        for name, value in (
-            ("EXECUTIONS_MODE", "queue"),
-            ("EXECUTIONS_DATA_MAX_AGE", "336"),
-            ("N8N_PORT", "5678"),
-            ("NODE_FUNCTION_ALLOW_BUILTIN", "crypto,fs"),
-            ("N8N_LOG_LEVEL", "debug"),
-            ("N8N_CONCURRENCY_PRODUCTION_LIMIT", "-1"),
-            ("NODE_ENV", "production"),
-            ("N8N_RUNNERS_MODE", ""),
-            ("N8N_INNOCENT", "x" * 64),
+    def test_value_written_only_for_a_boolean_a_number_or_a_fixed_word(self):
+        for name, value, written in (
+            ("EXECUTIONS_DATA_PRUNE", "true", "true"),
+            ("N8N_METRICS", " FALSE ", "false"),
+            ("N8N_PORT", "5678", "5678"),
+            ("N8N_CONCURRENCY_PRODUCTION_LIMIT", "-1", "-1"),
+            ("N8N_OTEL_TRACES_SAMPLE_RATE", "0.25", "0.25"),
+            ("EXECUTIONS_MODE", "queue", "queue"),
+            ("N8N_LOG_LEVEL", "debug", "debug"),
+            ("N8N_WORKFLOW_CALLER_POLICY_DEFAULT_OPTION", "workflowsFromSameOwner", "workflowsFromSameOwner"),
+            ("NODE_ENV", "production", "production"),
         ):
             with self.subTest(name=name):
-                self.assertEqual(settings(Snapshot(env={name: value})), {f"setting:instance:{name}": ("value", value)})
+                self.assertEqual(settings(Snapshot(env={name: value})), {f"setting:instance:{name}": ("value", written)})
+
+    def test_a_value_that_does_not_fit_its_type_is_only_set(self):
+        for name, values in (
+            ("N8N_METRICS", ("yes", "1", "enabled", "", "acme", "true false")),
+            ("N8N_PORT", ("acme", "10.0.0.1", "1e3", "1,000", "5678/tcp", "", "9" * 16, "0.1234567", "--1", "redis:6379")),
+            ("EXECUTIONS_MODE", ("Queue", "acme", "", "queue,regular", "queue.internal")),
+            ("N8N_LOG_OUTPUT", ("console,file", "/var/log/n8n.log")),
+        ):
+            for value in values:
+                with self.subTest(name=name, value=value):
+                    self.assertIsNone(profile.setting_value(name, value))
+                    self.assertEqual(settings(Snapshot(env={name: value})), {f"setting:instance:{name}": ("set", None)})
+
+    def test_other_documented_variables_are_never_written_whatever_they_hold(self):
+        # Hosts without dots, a relative path, package names, a tenant id, a short secret.
+        for name, value in (
+            ("QUEUE_BULL_REDIS_CLUSTER_NODES", "acme-redis-0,acme-redis-1"),
+            ("N8N_CUSTOM_EXTENSIONS", "acme-nodes"),
+            ("NODE_FUNCTION_ALLOW_EXTERNAL", "acme-internal-sdk,lodash"),
+            ("N8N_LICENSE_TENANT_ID", "4711"),
+            ("DB_POSTGRESDB_SSL_CA", "MIIBacme"),
+            ("N8N_HOST", "n8n"),
+            ("DB_POSTGRESDB_DATABASE", "acme"),
+            ("DB_POSTGRESDB_USER", "acme"),
+            ("DB_TABLE_PREFIX", "acme"),
+            ("QUEUE_BULL_PREFIX", "acme"),
+            ("N8N_ENDPOINT_WEBHOOK", "acme"),
+            ("N8N_DEFAULT_LOCALE", "en"),
+            ("GENERIC_TIMEZONE", "UTC"),
+            ("NODES_EXCLUDE", "[]"),
+            ("N8N_EMAIL_MODE", "smtp"),
+            ("N8N_ENCRYPTION_KEY_FILE", "true"),
+        ):
+            with self.subTest(name=name):
+                self.assertIsNone(profile.setting_value(name, value))
+                self.assertEqual(settings(Snapshot(env={name: value})), {f"setting:instance:{name}": ("set", None)})
+
+    def test_an_unreadable_value_is_refused_by_its_own_check(self):
+        # Explicit, not left to the type tests: this fails if the check is removed.
+        for value in (REDACTED, "<valueFrom>", None, 5, True):
+            self.assertFalse(profile.value_readable(value), value)
+        self.assertTrue(profile.value_readable("true"))
+        for name in ("N8N_METRICS", "N8N_PORT", "EXECUTIONS_MODE"):
+            for value in (REDACTED, "<valueFrom>"):
+                self.assertIsNone(profile.setting_value(name, value))
+
+    def test_the_known_list_is_well_formed(self):
+        groups = (n8n_settings.BOOLEANS, n8n_settings.NUMBERS, frozenset(n8n_settings.ENUMS), n8n_settings.SET_ONLY)
+        self.assertEqual(sum(len(group) for group in groups), len(n8n_settings.KNOWN))  # no name in two groups
+        for name in n8n_settings.KNOWN:
+            self.assertRegex(name, r"^[A-Z][A-Z0-9_]*$")
+        for name, words in n8n_settings.ENUMS.items():
+            for word in words:
+                self.assertRegex(word, r"^[A-Za-z0-9_]{1,40}$", name)
+        # Numbers and words that identify a customer, or free text, are not in a value group.
+        for name in ("N8N_LICENSE_TENANT_ID", "QUEUE_BULL_REDIS_CLUSTER_NODES", "NODE_FUNCTION_ALLOW_EXTERNAL",
+                     "N8N_CUSTOM_EXTENSIONS", "N8N_HOST", "WEBHOOK_URL", "NODE_OPTIONS", "DB_POSTGRESDB_SSL_CA"):  # fmt: skip
+            self.assertIn(name, n8n_settings.SET_ONLY)
+        # The facts read these with the same words as the settings list.
+        for name in ("EXECUTIONS_MODE", "DB_TYPE", "N8N_RUNNERS_MODE", "N8N_DEFAULT_BINARY_DATA_MODE"):
+            self.assertIn(name, n8n_settings.ENUMS)
 
     def test_kubernetes_scopes_are_the_roles(self):
         snapshot = Snapshot(
@@ -678,7 +828,7 @@ class SettingsTest(unittest.TestCase):
                 ("main", 1, container(env={"EXECUTIONS_MODE": "queue", "ACME": "1"})),
                 ("worker-a", 1, worker({"EXECUTIONS_MODE": "queue", "N8N_LOG_LEVEL": "debug", "N8N_PORT": "1"})),
                 ("worker-b", 1, worker({"EXECUTIONS_MODE": "queue", "N8N_LOG_LEVEL": "info"})),
-                ("redis", 1, container(image="redis:7", env={"N8N_NOT_AN_N8N_CONTAINER": "1"})),
+                ("redis", 1, container(image="redis:7", env={"N8N_PORT": "1"})),
             )
         )
         self.assertEqual(
@@ -848,7 +998,7 @@ class FileTest(unittest.TestCase):
             "| database.version |  | unknown |  | Postgres was not provided |",
             "| probes.main |  | withheld |  |  |",
             "| resources.main | requests (cpu: 200m, memory: 512Mi), limits (cpu: not set, memory: 1Gi) | measured | kubernetes |  |",
-            "| instance | EXECUTIONS_MODE | `queue` |",
+            "| instance | EXECUTIONS_MODE | queue |",
             "| instance | N8N_HOST | set (value not written) |",
             "| reliability | 85/100 (partial) |",
             "- REL-002 (warning, reliability): A fixed title",
@@ -873,6 +1023,26 @@ class FileTest(unittest.TestCase):
         markdown = profile.render_markdown(profile.validate(data))
         self.assertIn("a \\| b", markdown)
         self.assertIn("one two \\| three |", markdown)
+
+    def test_text_from_a_file_cannot_reach_the_terminal_or_become_markup(self):
+        data = self.valid()
+        data["run"]["reference"] = "<img src=x onerror=1> [click](http://x.example) `code` end\\"
+        data["facts"][0]["detail"] = "\x1b[2J\x1b]0;title\x07 bell \u202e reversed"
+        data["facts"][1]["source"] = "tail\\"
+        data["settings"][0].update(state="value", value="a`b|c")
+        data["check"]["findings"][0]["title"] = "<script>alert(1)</script>"
+        markdown = profile.render_markdown(profile.validate(data))
+        for raw in ("\x1b", "\x07", "\u202e"):
+            self.assertNotIn(raw, markdown)
+        # Every character that could start markup is escaped (table pipes aside).
+        self.assertIsNone(re.search(r"(?<!\\)[<>\[\]`]", markdown))
+        self.assertIn(r"\<img src=x onerror=1\> \[click\](http://x.example) \`code\` end\\", markdown)
+        self.assertIn(r"| tail\\ |", markdown)  # the backslash is escaped, the cell still closes
+        self.assertIn(r"a\`b\|c", markdown)
+        self.assertIn(r"\<script\>alert(1)\</script\>", markdown)
+        for line in markdown.splitlines():
+            if line.startswith("| n8n.version"):
+                self.assertEqual(len(re.findall(r"(?<!\\)\|", line)), 6)
 
     def test_a_fact_id_this_version_does_not_know_is_shown(self):
         data = self.valid()
@@ -930,6 +1100,22 @@ class FileTest(unittest.TestCase):
             changed(("check", "scores"), [{"area": "security", "score": "high"}]),
             changed(("check", "findings"), [{"rule_id": "X"}]),
             changed(("check", "partial"), "yes"),
+            changed(("check", "scores"), [{"area": "security", "partial": True}]),  # no score at all
+            changed(("settings", 0), {"scope": "instance", "name": "N8N_PORT", "state": "set"}),  # no value key
+            # Nothing may be silently absent from a version 1 file.
+            changed(("facts",), self.valid()["facts"][:1]),
+            changed(("facts",), self.valid()["facts"][1:]),
+            changed(("facts",), []),
+            changed(("sources",), {}),
+            changed(("sources",), {"health": "collected"}),
+            # The reference obeys the same rules as when it is typed.
+            changed(("run", "reference"), "x" * 500),
+            changed(("run", "reference"), "\x1b[2J\x1b]0;title\x07"),
+            changed(("run", "reference"), "two\nlines"),
+            changed(("run", "reference"), " padded "),
+            changed(("run", "reference"), "\ud800"),
+            changed(("facts", 0, "detail"), "\udfff"),
+            changed(("facts", 0, "value"), float("nan")),
         ]
         cases += [without(key) for key in self.valid()]
         for index, case in enumerate(cases):
@@ -943,6 +1129,10 @@ class FileTest(unittest.TestCase):
             fh.write(b"\xff\xfe\x00{")
         with self.assertRaises(profile.ProfileError):
             profile.load_profile(path)
+
+    def test_a_file_nested_without_end_is_refused(self):
+        with self.assertRaises(profile.ProfileError):
+            profile.load_profile(self.write("[" * 200_000))
 
 
 # --- command line ------------------------------------------------------------------
@@ -1081,11 +1271,73 @@ class CliProfileTest(unittest.TestCase):
             self.assertEqual((code, out), (3, ""))
             self.assertIn(message, err)
 
+    def test_show_profile_never_ends_in_a_traceback(self):
+        good = build(Snapshot())
+        no_score = json.loads(json.dumps(good))
+        del no_score["check"]["scores"][0]["score"]
+        surrogate = json.loads(json.dumps(good))
+        surrogate["facts"][0]["detail"] = "\ud800"
+        for content in (json.dumps(no_score), json.dumps(surrogate), "[" * 200_000, '{"format": ' * 5000, "{}", "null", "1e999"):
+            with self.subTest(content=content[:30]):
+                with open(self.path, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                code, out, err = self.run_cli(["--show-profile", self.path])
+                self.assertEqual((code, out), (3, ""))
+                self.assertEqual(len(err.splitlines()), 1, err[:300])
+                self.assertTrue(err.startswith("error: cannot show profile"))
+
+    def test_show_profile_survives_a_renderer_that_fails(self):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(profile.to_json(build(Snapshot())))
+        with mock.patch("n8n_healthcheck.profile.render_markdown", side_effect=KeyError("score")):
+            code, out, err = self.run_cli(["--show-profile", self.path])
+        self.assertEqual((code, out), (3, ""))
+        self.assertEqual(len(err.splitlines()), 1)
+
+    def test_an_empty_profile_path_is_a_usage_error(self):
+        for value in ("", "  "):
+            code, out, err = self.run_cli(SOURCES + ["--save-profile", value])
+            self.assertEqual((code, out), (3, ""))
+            self.assertIn("--save-profile must not be empty", err)
+            code, _, err = self.run_cli(SOURCES + ["--save-profile", value, "--reason", "incident"])
+            self.assertEqual(code, 3)
+            self.assertIn("--save-profile must not be empty", err)
+
+    def test_abbreviations_that_worked_before_the_profile_flags_still_work(self):
+        # Before the profile flags existed these prefixes were unambiguous.
+        for argv, dest, value in (
+            (["--save", "s.json"], "save_snapshot", "s.json"),
+            (["--save-", "s.json"], "save_snapshot", "s.json"),
+            (["--sav", "s.json"], "save_snapshot", "s.json"),
+            (["--sa", "s.json"], "save_snapshot", "s.json"),
+            (["--re", "redis://cache.example:6379"], "redis_url", "redis://cache.example:6379"),
+            (["--r", "redis://cache.example:6379"], "redis_url", "redis://cache.example:6379"),
+            (["--sn", "s.json"], "snapshot", "s.json"),
+            (["--o", "r.md"], "output", "r.md"),
+        ):
+            with self.subTest(argv=argv):
+                args = cli._parse_args(["--url", "https://n8n.example.com"] + argv)
+                self.assertEqual(getattr(args, dest), value)
+                self.assertIsNone(args.save_profile)
+        # The new flags can be shortened where nothing older starts the same way.
+        args = cli._parse_args(SOURCES + ["--save-p", "p.json", "--reas", "incident", "--ref", "x", "--w", "check"])
+        self.assertEqual((args.save_profile, args.reason, args.reference, args.withhold), ("p.json", "incident", "x", ["check"]))
+        self.assertEqual(cli._parse_args(["--sh", "p.json"]).show_profile, "p.json")
+        # What was ambiguous before still is.
+        for argv in (["--s", "x"], ["--k", "x"]):
+            code, _, err = self.run_cli(argv)
+            self.assertEqual(code, 3)
+            self.assertIn("ambiguous option", err)
+
     def test_help_lists_the_profile_flags(self):
         code, out, _ = self.run_cli(["--help"])
         self.assertEqual(code, 0)
         for flag in ("--save-profile", "--reason", "--reference", "--withhold", "--show-profile"):
             self.assertIn(flag, out)
+        # Withholding a fact leaves the setting and the finding that say the same.
+        self.assertIn("does not remove the setting", " ".join(out.split()))
+        with open(os.path.join(os.path.dirname(DOCS), "..", "README.md"), encoding="utf-8") as fh:
+            self.assertIn("does not remove the setting", " ".join(fh.read().split()))
 
 
 if __name__ == "__main__":

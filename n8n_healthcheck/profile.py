@@ -12,18 +12,21 @@ from __future__ import annotations
 import copy
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from . import __version__, report
+from . import __version__, n8n_settings, report
 from .models import REDACTED, Finding, Snapshot
 from .rules._helpers import (
     VALUE_FROM,
     Env,
+    command_words,
     concurrency_flag,
     container_env,
     env_flag,
     env_int,
+    image_tag,
     image_version,
     is_queue_mode,
     n8n_containers,
@@ -64,23 +67,11 @@ REDIS_POLICIES = (
 DEFAULT_WORKER_CONCURRENCY = 10
 CONCURRENCY_LIMIT = "N8N_CONCURRENCY_PRODUCTION_LIMIT"
 
-# Settings: which variables are listed at all. Any other name is only counted, because a
-# custom variable name can identify a company or a product.
-SETTING_PREFIXES = ("N8N_", "EXECUTIONS_", "QUEUE_", "DB_", "WEBHOOK_", "OFFLOAD_", "NODE_FUNCTION_")
-SETTING_NAMES = ("NODE_ENV", "NODE_OPTIONS")
-_SETTING_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
-# Settings: a name containing one of these holds a host, URL, path, address or a free
-# identifier, so its value is never written, whatever it looks like.
-VALUE_BLOCKED_NAME_PARTS = (
-    "HOST", "URL", "URI", "ENDPOINT", "DOMAIN", "ADDRESS", "PROXY", "PATH", "FOLDER",
-    "DIR", "FILE", "BUCKET", "EMAIL", "USER", "SENDER", "NAME", "OPTIONS", "PREFIX",
-    "DATABASE", "SCHEMA", "TABLE",
-)  # fmt: skip
-# Settings: the only value shape that is written. No dot, slash, colon, @ or space, so
-# no host, URL, path, IP address or e-mail can pass.
-_SAFE_VALUE = re.compile(r"[A-Za-z0-9_,-]{0,64}")
+# Settings: the shape of a value that is written for a variable known to hold a number.
+_NUMBER = re.compile(r"-?\d{1,15}(\.\d{1,6})?")
 
-_VERSION = re.compile(r"\d+\.\d+(\.\d+)?")
+# Not followed by a further digit or dot: three parts of a longer dotted number are not a version.
+_VERSION = re.compile(r"\d+\.\d+(\.\d+)?(?![\d.])")
 # Stricter than Kubernetes itself: one decimal point at most, so nothing dotted passes.
 _QUANTITY = re.compile(r"[0-9]+(\.[0-9]+)?[a-zA-Z]{0,2}")
 _UNSET = object()
@@ -114,6 +105,17 @@ def _role_containers(snapshot: Snapshot, role: str) -> list:
     return [(d, c) for d, c, r in n8n_containers(snapshot.kubernetes or {}) if r == role]
 
 
+def _image_name(container: dict) -> str:
+    """The image without its tag or digest."""
+    image = (container.get("image") or "").split("@")[0]
+    head, _, last = image.rpartition("/")
+    return (head + "/" if head else "") + last.split(":")[0]
+
+
+def _official(container: dict) -> bool:
+    return _image_name(container) in OFFICIAL_IMAGES
+
+
 def _read_env(snapshot: Snapshot, role: str, name: str, failed: tuple = ()) -> tuple:
     """One variable as (raw, source, detail).
 
@@ -132,6 +134,8 @@ def _read_env(snapshot: Snapshot, role: str, name: str, failed: tuple = ()) -> t
         return None, None, _missing("env", failed)["detail"]
     seen = set()
     for env in envs:
+        if name + "_FILE" in env:
+            return None, None, "set through a file, which this tool does not read"
         if unknown(env, name):
             if name in env:
                 return None, None, "set, but the value could not be read"
@@ -179,6 +183,9 @@ def _env_fact(name: str, parse: Callable, default=None) -> Callable:
         if raw is _UNSET:
             if default is None:
                 return _unknown(NOT_SET_DETAIL)
+            # An image that is not the official one may set the variable itself.
+            if not all(_official(c) for _, c in _role_containers(snapshot, "main")):
+                return _unknown("not set here, but the image is not the official one and may set it")
             return _measured(default, source, "n8n default, variable not set")
         value = parse(raw)
         if value is None:
@@ -225,7 +232,16 @@ def _n8n_version(snapshot: Snapshot, failed: tuple) -> dict:
         return _measured(version, "metrics")
     if snapshot.kubernetes is None:
         return _unknown("n8n did not report its version and Kubernetes was not provided")
-    versions = {image_version(c.get("image")) for _, c in _role_containers(snapshot, "main")}
+    mains = [c for _, c in _role_containers(snapshot, "main")]
+    if not all(_official(c) for c in mains):
+        # The tag of an image built by someone else is their own numbering.
+        return _unknown("n8n did not report its version and the image is not the official one")
+    versions = set()
+    for container in mains:
+        image = container.get("image")
+        version = image_version(image)
+        # The whole tag must start with a version, not with part of a longer dotted number.
+        versions.add(version if version == _version((image_tag(image) or "").removeprefix("v")) else None)
     if len(versions) != 1 or None in versions:
         return _unknown("the image tags of the main containers do not give one version")
     return _measured(versions.pop(), "kubernetes", "from the image tag")
@@ -234,11 +250,7 @@ def _n8n_version(snapshot: Snapshot, failed: tuple) -> dict:
 def _image_official(snapshot: Snapshot, failed: tuple) -> dict:
     if snapshot.kubernetes is None:
         return _missing("kubernetes", failed)
-    official = set()
-    for _deployment, container, _role in n8n_containers(snapshot.kubernetes):
-        image = (container.get("image") or "").split("@")[0]
-        head, _, last = image.rpartition("/")
-        official.add((head + "/" if head else "") + last.split(":")[0] in OFFICIAL_IMAGES)
+    official = {_official(container) for _deployment, container, _role in n8n_containers(snapshot.kubernetes)}
     if not official:
         return _unknown("no n8n container was found in Kubernetes")
     if len(official) > 1:
@@ -265,6 +277,10 @@ def _kube_fact(role: str, read: Callable) -> Callable:
         if not found:
             # Not 0: only Deployments are read, so a StatefulSet would be missed.
             return _unknown(f"no {role} container was found in the Deployments")
+        # Roles are told by an image name that contains "n8n", which an exporter or a
+        # sidecar can also have: only an image called exactly n8n is known to be n8n itself.
+        if any(_image_name(c).rpartition("/")[2] != "n8n" for _, c in found):
+            return _unknown("a container of this role runs an image that may not be n8n itself")
         return read(found)
 
     return fact
@@ -347,6 +363,9 @@ def _worker_concurrency(snapshot: Snapshot, failed: tuple) -> dict:
             found.add((own_limit, f"from {CONCURRENCY_LIMIT}"))
         elif flag is not None:
             found.add((flag, "from the --concurrency flag"))
+        elif any(word.startswith("--concurrency") for word in command_words(container)):
+            # e.g. --concurrency=$WORKERS: the flag is there, its number is not.
+            return _unknown("the --concurrency flag on a worker is not a plain number")
         else:
             found.add((DEFAULT_WORKER_CONCURRENCY, "worker default, neither the limit variable nor the flag is set"))
     if len({value for value, _ in found}) > 1:
@@ -368,25 +387,22 @@ CATALOGUE = (
     ("n8n.version", _n8n_version),
     ("n8n.image_official", _image_official),
     ("orchestrator", _orchestrator),
-    ("executions.mode", _env_fact("EXECUTIONS_MODE", _enum("regular", "queue"), default="regular")),
+    ("executions.mode", _env_fact("EXECUTIONS_MODE", _enum(*n8n_settings.ENUMS["EXECUTIONS_MODE"]), default="regular")),
     ("main.replicas", _kube_fact("main", _replicas)),
     ("worker.replicas", _kube_fact("worker", _replicas)),
     ("webhook.replicas", _kube_fact("webhook", _replicas)),
     ("worker.concurrency", _worker_concurrency),
     ("multi_main.enabled", _env_fact("N8N_MULTI_MAIN_SETUP_ENABLED", _bool, default=False)),
     ("task_runners.enabled", _env_fact("N8N_RUNNERS_ENABLED", _bool)),
-    ("task_runners.mode", _env_fact("N8N_RUNNERS_MODE", _enum("internal", "external"))),
+    ("task_runners.mode", _env_fact("N8N_RUNNERS_MODE", _enum(*n8n_settings.ENUMS["N8N_RUNNERS_MODE"]))),
     (
         "binary_data.mode",
-        _env_fact("N8N_DEFAULT_BINARY_DATA_MODE", _enum("default", "filesystem", "s3", "database")),
+        _env_fact("N8N_DEFAULT_BINARY_DATA_MODE", _enum(*n8n_settings.ENUMS["N8N_DEFAULT_BINARY_DATA_MODE"])),
     ),
     ("metrics.enabled", _metrics_enabled),
     ("pruning.enabled", _env_fact("EXECUTIONS_DATA_PRUNE", _bool)),
     ("pruning.max_age_hours", _env_fact("EXECUTIONS_DATA_MAX_AGE", _count)),
-    (
-        "database.engine",
-        _env_fact("DB_TYPE", _enum("sqlite", "postgresdb", "mysqldb", "mariadb"), default="sqlite"),
-    ),
+    ("database.engine", _env_fact("DB_TYPE", _enum(*n8n_settings.ENUMS["DB_TYPE"]), default="sqlite")),
     ("database.version", _section_fact("postgres", "version", _version)),
     ("database.pool_size", _env_fact("DB_POSTGRESDB_POOL_SIZE", _count)),
     ("database.max_connections", _section_fact("postgres", "max_connections", _whole)),
@@ -411,19 +427,36 @@ FACT_IDS = tuple(fact_id for fact_id, _ in CATALOGUE)
 
 
 def setting_listed(name) -> bool:
-    """True when a variable may appear in the profile by name."""
-    if not isinstance(name, str) or not _SETTING_NAME.fullmatch(name):
+    """True when a variable may appear in the profile by name: only the ones n8n documents.
+
+    `<NAME>_FILE` of a documented variable is listed too; its value is a path, never written.
+    """
+    if not isinstance(name, str):
         return False
-    return name.startswith(SETTING_PREFIXES) or name in SETTING_NAMES
+    return name in n8n_settings.KNOWN or (name.endswith("_FILE") and name[:-5] in n8n_settings.KNOWN)
 
 
-def setting_value_written(name: str, value) -> bool:
-    """True when the value may be written: two independent tests, by name and by shape."""
-    if not isinstance(value, str) or value in (REDACTED, VALUE_FROM):
-        return False
-    if any(part in name for part in VALUE_BLOCKED_NAME_PARTS):
-        return False
-    return bool(_SAFE_VALUE.fullmatch(value))
+def value_readable(value) -> bool:
+    """False for a value the collectors could not or must not read."""
+    return isinstance(value, str) and value not in (REDACTED, VALUE_FROM)
+
+
+def setting_value(name: str, value) -> Optional[str]:
+    """The value to write for a setting, or None when only "set" may be said.
+
+    Written only for a variable known to hold a boolean, a number or one word of a fixed
+    list, and only when the value really is one.
+    """
+    if not value_readable(value):
+        return None
+    value = value.strip()
+    if name in n8n_settings.BOOLEANS:
+        return value.lower() if value.lower() in ("true", "false") else None
+    if name in n8n_settings.NUMBERS:
+        return value if _NUMBER.fullmatch(value) else None
+    if value in n8n_settings.ENUMS.get(name, ()):
+        return value
+    return None
 
 
 def _settings(snapshot: Snapshot) -> tuple:
@@ -443,8 +476,8 @@ def _settings(snapshot: Snapshot) -> tuple:
                 continue
             # Containers of one role that disagree, one of them not having it included.
             values = {env[name] if name in env else _UNSET for env in envs}
-            value = values.pop() if len(values) == 1 else None
-            if setting_value_written(name, value):
+            value = setting_value(name, values.pop()) if len(values) == 1 else None
+            if value is not None:
                 settings.append({"scope": scope, "name": name, "state": "value", "value": value})
             else:
                 settings.append({"scope": scope, "name": name, "state": "set", "value": None})
@@ -578,6 +611,10 @@ def validate(data) -> dict:
     Fact ids are not checked against the catalogue: a newer tool may add ids without
     raising the format version.
     """
+    try:
+        json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (ValueError, TypeError, RecursionError):  # lone surrogates, NaN, endless nesting
+        raise ProfileError("not a valid profile: it holds something that is not JSON text") from None
     _require(isinstance(data, dict), "the file does not hold a JSON object")
     _require(data.get("format") == FORMAT, f'"format" is not "{FORMAT}"')
     version = data.get("format_version")
@@ -592,11 +629,16 @@ def validate(data) -> dict:
     run = data.get("run")
     _require(isinstance(run, dict), '"run"')
     _require(run.get("reason") in REASONS, '"run.reason"')
-    _require(isinstance(run.get("reference"), str), '"run.reference"')
+    reference = run.get("reference")
+    try:
+        _require(isinstance(reference, str) and check_reference(reference) == reference, '"run.reference"')
+    except ProfileError:
+        raise ProfileError('not a valid profile: "run.reference"') from None
     sources = data.get("sources")
     _require(isinstance(sources, dict), '"sources"')
     for name, state in sources.items():
         _require(isinstance(name, str) and state in SOURCE_STATES, '"sources"')
+    _require(set(report.SECTIONS) <= set(sources), "a source is missing")
 
     facts = data.get("facts")
     _require(isinstance(facts, list), '"facts"')
@@ -606,6 +648,8 @@ def validate(data) -> dict:
         _require("value" in fact and _is_value(fact["value"]), f'value of fact "{fact["id"]}"')
         _require(fact.get("source") is None or isinstance(fact["source"], str), f'source of fact "{fact["id"]}"')
         _require(isinstance(fact.get("detail"), str), f'detail of fact "{fact["id"]}"')
+    # Every fact of the catalogue is there, so nothing can be silently absent.
+    _require(set(FACT_IDS) <= {fact["id"] for fact in facts}, "a fact of the catalogue is missing")
 
     settings = data.get("settings")
     _require(isinstance(settings, list), '"settings"')
@@ -613,7 +657,8 @@ def validate(data) -> dict:
         _require(isinstance(setting, dict), '"settings"')
         _require(isinstance(setting.get("scope"), str) and isinstance(setting.get("name"), str), "a setting")
         _require(setting.get("state") in SETTING_STATES, f'state of setting "{setting["name"]}"')
-        value = setting.get("value")
+        _require("value" in setting, f'value of setting "{setting["name"]}"')
+        value = setting["value"]
         _require(value is None or isinstance(value, str), f'value of setting "{setting["name"]}"')
     count = data.get("settings_not_listed")
     _require(isinstance(count, int) and not isinstance(count, bool) and count >= 0, '"settings_not_listed"')
@@ -625,7 +670,8 @@ def validate(data) -> dict:
         _require(isinstance(check.get("scores"), list), '"check.scores"')
         for row in check["scores"]:
             _require(isinstance(row, dict) and isinstance(row.get("area"), str), '"check.scores"')
-            score = row.get("score")
+            _require("score" in row, '"check.scores"')
+            score = row["score"]
             _require(score is None or (isinstance(score, int) and not isinstance(score, bool)), '"check.scores"')
         _require(isinstance(check.get("findings"), list), '"check.findings"')
         for finding in check["findings"]:
@@ -640,7 +686,7 @@ def load_profile(path: str) -> dict:
     with open(path, encoding="utf-8") as handle:
         try:
             data = json.load(handle)
-        except ValueError:  # includes a file that is not UTF-8
+        except (ValueError, RecursionError):  # includes a file that is not UTF-8
             raise ProfileError("not a valid profile: the file is not JSON") from None
     return validate(data)
 
@@ -648,9 +694,17 @@ def load_profile(path: str) -> dict:
 # --- rendering ---------------------------------------------------------------------
 
 
+_MARKUP = re.compile(r"([\\`|<>\[\]])")
+
+
 def _cell(text) -> str:
-    """Text that cannot break out of a Markdown table cell."""
-    return " ".join(str(text).split()).replace("|", "\\|")
+    """Text from a file made harmless for a terminal and for a Markdown table cell.
+
+    Control and format characters become spaces; the characters that start markup, a code
+    span, a link or a new cell are escaped.
+    """
+    text = "".join(" " if unicodedata.category(char)[0] == "C" else char for char in str(text))
+    return _MARKUP.sub(r"\\\1", " ".join(text.split()))
 
 
 def _shown(value) -> str:
@@ -700,7 +754,7 @@ def render_markdown(profile: dict) -> str:
         lines += ["| Scope | Name | Value |", "|---|---|---|"]
     for setting in profile["settings"]:
         if setting["state"] == "value":
-            value = f"`{_cell(setting['value'])}`" if setting["value"] else "(empty)"
+            value = _cell(setting["value"]) or "(empty)"
         elif setting["state"] == "set":
             value = "set (value not written)"
         else:

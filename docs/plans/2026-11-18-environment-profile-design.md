@@ -92,7 +92,8 @@ Chosen by the user: 1.
 - One JSON file is the profile.
 - Environment variables: facts derived from them, plus the n8n settings
   themselves with their value, except those that hold hosts, URLs or paths,
-  which are recorded only as "set".
+  which are recorded only as "set". (After the review: the value only for
+  settings known to be a boolean, a number or a fixed word; see "Settings".)
 
 ## The file
 
@@ -157,12 +158,12 @@ the file to understand it.
 
 | Id | From |
 |---|---|
-| `n8n.version` | `Snapshot.n8n_version`; else the version in the image tag when every main container agrees (`image_version`) |
+| `n8n.version` | `Snapshot.n8n_version`; else the version in the image tag when every main container runs the official image and agrees (`image_version`). Never the tag of another image, never the start of a longer dotted number |
 | `n8n.image_official` | Kubernetes: true when the image is `n8nio/n8n` or `docker.n8n.io/n8nio/n8n`; the image name itself is never written |
 | `orchestrator` | `kubernetes` when that source was collected, else unknown |
 | `executions.mode` | `EXECUTIONS_MODE`, default `regular` |
-| `main.replicas`, `worker.replicas`, `webhook.replicas` | Kubernetes Deployments, summed per role. A role with no container found is unknown, never 0: only Deployments are read, so a StatefulSet would be missed |
-| `worker.concurrency` | Same precedence as rule SCAL in `rules/scalability.py`: `N8N_CONCURRENCY_PRODUCTION_LIMIT` on the workers unless unset or -1, else the `--concurrency` flag, else 10. Needs worker containers; with an env file only it is unknown |
+| `main.replicas`, `worker.replicas`, `webhook.replicas` | Kubernetes Deployments, summed per role. A role with no container found is unknown, never 0: only Deployments are read, so a StatefulSet would be missed. Unknown too when a container of the role runs an image not called exactly `n8n` (an exporter or a sidecar whose name contains "n8n"); the same holds for `resources.*` and `probes.*` |
+| `worker.concurrency` | Same precedence as rule SCAL in `rules/scalability.py`: `N8N_CONCURRENCY_PRODUCTION_LIMIT` on the workers unless unset or -1, else the `--concurrency` flag, else 10. Needs worker containers; with an env file only it is unknown. A flag that is present but not a literal number (`--concurrency=$N`) is unknown |
 | `multi_main.enabled` | `N8N_MULTI_MAIN_SETUP_ENABLED` |
 | `task_runners.enabled`, `task_runners.mode` | `N8N_RUNNERS_ENABLED`, `N8N_RUNNERS_MODE` |
 | `binary_data.mode` | `N8N_DEFAULT_BINARY_DATA_MODE` |
@@ -189,7 +190,10 @@ Rules for every fact:
 - **Defaults.** Only three are stable across n8n versions and are reported as
   measured when the variable is provably unset (environment read and complete):
   `executions.mode` = `regular`, `database.engine` = `sqlite`,
-  `multi_main.enabled` = false. For every other fact an unset variable gives
+  `multi_main.enabled` = false. "Provably unset" also requires that
+  `<NAME>_FILE` is absent (then the fact is unknown whatever else is set) and,
+  when Kubernetes was read, that the main containers run the official image:
+  another image may set the variable itself. For every other fact an unset variable gives
   unknown with the detail "not set, the n8n default for this version applies".
   *(My call: the other defaults changed between releases, and a wrong default
   stated as a fact is worse than a gap.)*
@@ -209,30 +213,37 @@ mostly empty for no gain.)*
 
 The n8n settings themselves, from the same environment the rules use.
 
-- **Which names**: those starting with `N8N_`, `EXECUTIONS_`, `QUEUE_`, `DB_`,
-  `WEBHOOK_`, `OFFLOAD_`, `NODE_FUNCTION_`, plus `NODE_ENV` and `NODE_OPTIONS`.
-  Any other variable is not listed, not even by name: `settings_not_listed`
-  carries only how many there were. *(My call: custom variable names can
-  identify a company or a product.)*
+*Changed after the review of the first implementation, approved by the user. The
+first version listed names by prefix and wrote a value unless the name or the
+shape looked unsafe. A blocklist cannot know every name: host names without
+dots, package names, a tenant id and short secrets under unremarkable names all
+passed. The filter is now an allowlist.*
+
+- **Which names**: only the variables n8n documents, kept as a list in
+  `n8n_healthcheck/n8n_settings.py` (taken from the environment variable
+  reference of n8n's documentation, plus `NODE_ENV`), and `<NAME>_FILE` of one
+  of them. Any other variable is not listed, not even by name, including one
+  that starts with `N8N_`: `settings_not_listed` carries only how many there
+  were. Custom variable names can identify a company or a product. A variable
+  n8n adds later stays counted until the list is updated.
 - **Scope**: `instance` for an env file; for Kubernetes one entry per n8n role
   (`main`, `worker`, `webhook`) that has the variable. With both sources, both
   are listed. Containers of one role that disagree on a variable give
   `state: "set"` with no value.
 - **When the value is written** (`state: "value"`): only when all of these hold,
   otherwise `state: "set"`:
-  - the stored value is not `<redacted>` or `<valueFrom>`;
-  - the name does not contain `HOST`, `URL`, `URI`, `ENDPOINT`, `DOMAIN`,
-    `ADDRESS`, `PROXY`, `PATH`, `FOLDER`, `DIR`, `FILE`, `BUCKET`, `EMAIL`,
-    `USER`, `SENDER`, `NAME`, `OPTIONS`, `PREFIX`, `DATABASE`, `SCHEMA`,
-    `TABLE` (the last four are free identifiers such as `acme_prod`);
-  - the value has a safe shape: at most 64 characters of letters, digits, `_`,
-    `-` and `,` only. No dots, slashes, colons, `@` or spaces, so no host, URL,
-    path, address or e-mail can pass.
+  - the stored value is not `<redacted>` or `<valueFrom>` (an explicit check,
+    with its own test);
+  - the list marks the variable as a boolean, a number or one word of a fixed
+    enumeration. Hosts, URLs, paths, free identifiers, lists of packages or
+    nodes, credentials and the licence tenant id are marked "set only". When in
+    doubt a variable is "set only";
+  - the value actually is of that type: `true` or `false`; digits with an
+    optional sign and decimal part; exactly one of the listed words.
 
-*(My call: two independent tests, by name and by shape, because either alone has
-obvious holes. The cost is that a few harmless values, a cron expression or a
-dotted list, show as "set". A missing value is acceptable; a leaked host is
-not.)*
+The cost: a setting n8n documents as free text is never shown with its value,
+and a new n8n variable is invisible by name until the list is updated. A
+missing value is acceptable; a leaked host is not.
 
 ## Withholding
 
@@ -305,9 +316,11 @@ codes of a normal run do not change.
   the point of the piece and must not be weakened later.
 - Every fact: measured, default applied, unknown because the source is missing,
   unknown because the environment is incomplete, unknown because roles disagree.
-- Safe-shape and name tests, with the awkward cases (a host without dots is
-  still blocked by name; a URL in an innocently named variable is blocked by
-  shape).
+- Settings: only documented names are listed; a value is written only for a
+  typed variable whose value fits the type. The awkward cases are seeded in the
+  zero-leak test: host names without dots, relative paths, package names, a
+  tenant id, a short secret under an unredacted name, a custom `N8N_<COMPANY>_`
+  name.
 - Withholding: fact, setting, check, unknown id.
 - Round trip: build, save, load, render. Invalid and newer-version files.
 - Catalogue: every id emitted is documented in `docs/profile-format.md`.

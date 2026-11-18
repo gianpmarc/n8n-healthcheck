@@ -74,7 +74,9 @@ python3 -m n8n_healthcheck --url https://n8n.example.com --kube-namespace n8n \
 
 Read the file before you share it: `--show-profile` prints exactly what is in it. A withheld entry stays in the file marked `withheld`, so the reader knows it was removed rather than unknown.
 
-The profile never contains a secret, a host name, a URL, an IP address, a file path, an e-mail address, or a Deployment, namespace or registry name. Settings that can hold one of those are listed as "set" without their value, and variables that are not n8n settings are counted, not named. Anything the tool cannot tell for certain is `unknown`, never guessed. The tool does not send the file anywhere.
+The profile never contains a secret, a host name, a URL, an IP address, a file path, an e-mail address, or a Deployment, namespace or registry name. A setting's value is written only when n8n documents the variable as a boolean, a number or one word of a fixed list; every other documented variable is listed as "set" without its value, and variables n8n does not document are counted, not named. Anything the tool cannot tell for certain is `unknown`, never guessed. The tool does not send the file anywhere.
+
+Withholding a fact does not remove the setting it was read from, or a finding that mentions it: `--withhold executions.mode` leaves the `EXECUTIONS_MODE` setting and any finding about queue mode in the file. Withhold those too (`setting:instance:EXECUTIONS_MODE`, `check`) if you want the datum gone.
 
 Withholding applies to the profile only. The report is a separate document and quotes raw values as evidence.
 

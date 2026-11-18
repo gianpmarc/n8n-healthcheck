@@ -23,9 +23,10 @@ This is enforced by how the file is built, not by search and replace:
 
 - no fact holds free text; every fact value has a fixed shape (see below), and
   a value that does not fit is not written;
-- a setting's value is written only when both its name and its shape pass a
-  test (see "Settings");
-- variables that are not n8n settings are counted, not named.
+- a setting's value is written only for a variable n8n documents as a boolean,
+  a number or one word of a fixed list, and only when the value is one (see
+  "Settings");
+- variables n8n does not document are counted, not named.
 
 The only text a person types is `run.reference`.
 
@@ -121,8 +122,9 @@ Provenance:
 A fact is `unknown` rather than guessed when: its source was not read; the
 variable it depends on is set but its value could not be read (it comes from a
 Kubernetes Secret, or it was redacted); part of the container environment could
-not be read, so "not set" cannot be proven; the containers of the role disagree
-on it; or the value does not have the shape the fact allows.
+not be read, so "not set" cannot be proven; the variable is given through a file
+(`<NAME>_FILE`); the containers of the role disagree on it; or the value does
+not have the shape the fact allows.
 
 ### Which environment a fact is read from
 
@@ -137,7 +139,9 @@ something else still give an answer.
 Three facts are reported as measured, with the detail "n8n default, variable
 not set", when the variable is provably not set, because their default is the
 same in every n8n version: `executions.mode` (`regular`), `database.engine`
-(`sqlite`) and `multi_main.enabled` (`false`). For every other fact, a variable
+(`sqlite`) and `multi_main.enabled` (`false`). When Kubernetes was read and the
+main containers do not run the official image, even these are `unknown`: an
+image built by someone else may set the variable itself. For every other fact, a variable
 that is not set gives `unknown` with the detail "not set, the n8n default for
 this version applies": look the default up for the n8n version in `n8n.version`.
 
@@ -145,18 +149,18 @@ this version applies": look the default up for the n8n version in `n8n.version`.
 
 | Id | Value | From |
 |---|---|---|
-| `n8n.version` | version | The version n8n reports on its metrics endpoint; otherwise the image tag, when every main container has the same one. |
+| `n8n.version` | version | The version n8n reports on its metrics endpoint; otherwise the image tag, when every main container runs the official image with the same tag. The tag of any other image is not taken as a version. |
 | `n8n.image_official` | boolean | Kubernetes: `true` when every n8n container runs the image published by n8n, pulled from its usual location; `false` when none does (a custom build, or a copy in another registry). The image name is never written. |
 | `orchestrator` | `kubernetes` | `kubernetes` when Kubernetes was read. Otherwise unknown: the tool cannot tell Docker from a bare process. |
 | `executions.mode` | `regular`, `queue` | `EXECUTIONS_MODE`. |
 | `main.replicas` | integer | Kubernetes: replicas of the Deployments that run the main n8n process, summed. |
 | `worker.replicas` | integer | Same, for the worker process. |
 | `webhook.replicas` | integer | Same, for the webhook process. |
-| `worker.concurrency` | integer | Executions one worker runs at a time: `N8N_CONCURRENCY_PRODUCTION_LIMIT` unless it is not set or `-1`, otherwise the worker's `--concurrency` flag, otherwise 10. Needs the worker containers from Kubernetes. |
+| `worker.concurrency` | integer | Executions one worker runs at a time: `N8N_CONCURRENCY_PRODUCTION_LIMIT` unless it is not set or `-1`, otherwise the worker's `--concurrency` flag, otherwise 10. Needs the worker containers from Kubernetes. Unknown when the flag is there but is not a plain number. |
 | `multi_main.enabled` | boolean | `N8N_MULTI_MAIN_SETUP_ENABLED`. |
 | `task_runners.enabled` | boolean | `N8N_RUNNERS_ENABLED`. |
 | `task_runners.mode` | `internal`, `external` | `N8N_RUNNERS_MODE`. |
-| `binary_data.mode` | `default`, `filesystem`, `s3`, `database` | `N8N_DEFAULT_BINARY_DATA_MODE`. |
+| `binary_data.mode` | `default`, `filesystem`, `s3`, `azure`, `database` | `N8N_DEFAULT_BINARY_DATA_MODE`. |
 | `metrics.enabled` | boolean | `true` when the metrics endpoint answered, `false` when it answered "not found". |
 | `pruning.enabled` | boolean | `EXECUTIONS_DATA_PRUNE`. |
 | `pruning.max_age_hours` | integer | `EXECUTIONS_DATA_MAX_AGE`. |
@@ -181,7 +185,8 @@ this version applies": look the default up for the n8n version in `n8n.version`.
 Value shapes:
 
 - **version**: `digits.digits` or `digits.digits.digits`, the leading part of
-  what the software reports (`16.4` for "16.4 (Debian ...)").
+  what the software reports (`16.4` for "16.4 (Debian ...)"). A longer dotted
+  number is not a version and gives `unknown`.
 - **integer**, **number**: never negative.
 - **resources object**:
   `{"requests": {"cpu": "200m", "memory": "512Mi"}, "limits": {"cpu": null, "memory": "1Gi"}}`.
@@ -196,6 +201,15 @@ A measured `0` means a Deployment exists and is scaled to zero.
 `resources.*` and `probes.*` are `unknown` when the containers of the role are
 not all configured the same.
 
+The replica, resources and probes facts are also `unknown` when a container of
+the role runs an image that is not called exactly `n8n` (whatever the
+registry): the tool recognises a role by an image name that contains "n8n",
+which an exporter or a sidecar can have too, and it does not state a sum that
+may include one.
+
+`n8n.image_official` is `false` for a copy of the official image kept in
+another registry: it says where the image is pulled from, not what is in it.
+
 ## Settings
 
 The n8n settings that were set, one entry each:
@@ -207,36 +221,40 @@ The n8n settings that were set, one entry each:
 | `state` | `value`, `set` or `withheld`. |
 | `value` | The value as a string when `state` is `value`; otherwise `null`. |
 
-**Which names are listed.** Names made of capital letters, digits and `_` that
-start with `N8N_`, `EXECUTIONS_`, `QUEUE_`, `DB_`, `WEBHOOK_`, `OFFLOAD_` or
-`NODE_FUNCTION_`, plus `NODE_ENV` and `NODE_OPTIONS`. Any other variable is
-counted in `settings_not_listed` (once per scope it appears in) and is not
-named, because a custom variable name can identify a company or a product.
+**Which names are listed.** Only the variables n8n documents in its environment
+variable reference (the tool carries the list; version 0.2.0 has the reference
+as published on 2026-11-18, plus `NODE_ENV`), and `<NAME>_FILE` of one of them.
+Any other variable is counted in `settings_not_listed` (once per scope it
+appears in) and is not named, even when its name starts with `N8N_`: a custom
+variable name can identify a company or a product. A variable n8n adds after
+the list was made is counted too, until the tool is updated; so "not listed"
+does not mean "not an n8n setting".
 
 **When the value is written** (`state` is `value`). Only when all of these hold:
 
 1. the tool could read it: it is not a secret (secrets are removed when the
    environment is read, before the profile is built) and does not come from a
    Kubernetes Secret;
-2. the name does not contain `HOST`, `URL`, `URI`, `ENDPOINT`, `DOMAIN`,
-   `ADDRESS`, `PROXY`, `PATH`, `FOLDER`, `DIR`, `FILE`, `BUCKET`, `EMAIL`,
-   `USER`, `SENDER`, `NAME`, `OPTIONS`, `PREFIX`, `DATABASE`, `SCHEMA` or
-   `TABLE`;
-3. the value is at most 64 characters of letters, digits, `_`, `-` and `,`,
-   and nothing else: no dot, slash, colon, `@` or space;
+2. n8n documents the variable as a boolean, a number, or one word of a fixed
+   list. Variables that hold a host, URL, path, name, identifier, list of
+   packages or nodes, or a credential are never written, and neither is the
+   licence tenant id, although it is a number;
+3. the value is one: `true` or `false`; digits with an optional sign and
+   decimal part; exactly one of the documented words;
 4. for a Kubernetes scope, every container of the role has the variable with
    the same value.
 
 Otherwise the entry says `set`: the variable is there and its value is not in
-the file. The two tests, by name and by shape, are deliberately strict. Some
-harmless values (a cron expression, a dotted list, a version number) show as
-`set`. That is the intended trade: a missing value can be asked for, a leaked
-host cannot be taken back.
+the file. This is deliberately strict. A setting n8n documents as free text
+never shows its value, even when the value is harmless. That is the intended
+trade: a missing value can be asked for, a leaked host cannot be taken back.
 
 `withheld` means the person who ran the tool removed the value.
 
-A fact and the setting it is read from are separate entries. Withholding
-`executions.mode` does not withhold the `EXECUTIONS_MODE` setting.
+A fact and the setting it is read from are separate entries, and a finding in
+`check` can say the same thing again. Withholding `executions.mode` does not
+withhold the `EXECUTIONS_MODE` setting or a finding about queue mode: withhold
+those too.
 
 ## Check
 
@@ -282,3 +300,6 @@ document that quotes raw values as evidence; share it or not as before.
   should ignore fact ids it does not know rather than fail.
 - `n8n-healthcheck` refuses to open a file with a higher `format_version` than
   it knows and says to update the tool, instead of showing part of it.
+- A version 1 file always has the six sources and every fact id of the
+  catalogue above. A file where one is missing is refused as invalid, so
+  nothing can be silently absent.

@@ -60,7 +60,17 @@ def _port(text: str) -> int:
     return port
 
 
+# Flags added with the environment profile. An abbreviation that was unambiguous before
+# them (`--save` for --save-snapshot, `--re` for --redis-url) keeps its meaning.
+PROFILE_FLAGS = ("save_profile", "reason", "reference", "withhold", "show_profile")
+
+
 class _Parser(argparse.ArgumentParser):
+    def _get_option_tuples(self, option_string):
+        matches = super()._get_option_tuples(option_string)
+        older = [match for match in matches if match[0].dest not in PROFILE_FLAGS]
+        return older if len(matches) > 1 and len(older) == 1 else matches
+
     def error(self, message: str):
         # argparse exits 2 by default, which here means "critical finding".
         self.print_usage(sys.stderr)
@@ -90,7 +100,9 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     group = parser.add_argument_group(
         "environment profile",
         "One JSON file of facts about the environment, to review and share. "
-        "It never holds a secret, host, URL, IP address, path or name.",
+        "It never holds a secret, host, URL, IP address, path or name. Withholding a fact "
+        "does not remove the setting it was read from or a finding that mentions it: "
+        "withhold those too.",
     )
     group.add_argument("--save-profile", metavar="FILE", help="write the environment profile as JSON")
     group.add_argument("--reason", choices=profile.REASONS, help="why the profile was taken (default: baseline)")
@@ -109,10 +121,12 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         if others:
             parser.error("--show-profile takes no other flag except -o")
         return args
-    if not args.save_profile:
+    if args.save_profile is None:
         for flag in ("reason", "reference", "withhold"):
-            if getattr(args, flag):
+            if getattr(args, flag) not in (None, []):
                 parser.error(f"--{flag} needs --save-profile")
+    elif not args.save_profile.strip():
+        parser.error("--save-profile must not be empty")
     elif args.snapshot:
         parser.error(
             "--save-profile cannot be combined with --snapshot: a saved snapshot does not "
@@ -203,6 +217,8 @@ def _show_profile(path: str, output: Optional[str]) -> int:
         return _error(f"cannot read profile {path}: {exc.strerror}")
     except profile.ProfileError as exc:
         return _error(f"cannot show profile {path}: {exc}")
+    except Exception as exc:  # whatever a hand-edited file holds, never a traceback
+        return _error(f"cannot show profile {path}: not a valid profile ({type(exc).__name__})")
     try:
         if output:
             with open(output, "w", encoding="utf-8") as fh:
@@ -211,6 +227,8 @@ def _show_profile(path: str, output: Optional[str]) -> int:
             sys.stdout.write(markdown)
     except OSError as exc:
         return _error(f"cannot write {exc.filename}: {exc.strerror}")
+    except ValueError:  # text the output encoding cannot represent
+        return _error(f"cannot show profile {path}: it holds text that cannot be written here")
     return 0
 
 
@@ -261,7 +279,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     findings = engine.run(snapshot, ALL_RULES)
     markdown = report.render_markdown(snapshot, findings, failed=tuple(failed))
-    if args.save_profile:
+    if args.save_profile is not None:
         try:
             saved_profile = profile.build_profile(
                 snapshot, findings, tuple(failed), args.reason or "baseline", args.reference, tuple(args.withhold)
@@ -273,7 +291,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             with open(args.save_snapshot, "w", encoding="utf-8") as fh:
                 # A metric can be NaN or +Inf, which json would write as invalid JSON.
                 json.dump(json_safe(asdict(snapshot)), fh, indent=2, allow_nan=False)
-        if args.save_profile:
+        if args.save_profile is not None:
             with open(args.save_profile, "w", encoding="utf-8") as fh:
                 fh.write(profile.to_json(saved_profile))
         if args.output:
