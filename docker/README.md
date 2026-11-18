@@ -8,6 +8,10 @@
 
 If you downloaded the repository as a ZIP, macOS may refuse to open the launcher (not tested; this is our understanding of Gatekeeper). Run `bash "Start Health Check.command"` in Terminal from the repository root instead. To keep double-clicking, allow the file once: on macOS 15 and later in System Settings → Privacy & Security → Open Anyway, on older versions with right-click → Open. A `git clone` is not affected.
 
+## After a run: the environment profile
+
+Under the report the page offers "Share the environment profile": review each fact and setting, withhold what you do not want to share, and download `n8n-profile-YYYY-MM-DD.json`. The file is made in your browser and saved by it, so it lands in your downloads folder on your machine, not in the container; nothing is written to the container and nothing is sent anywhere. "Open a profile" on the start page reads a saved profile the same way, in the browser, without uploading it. What the file holds and never holds: [Environment profile](../README.md#environment-profile).
+
 ## What is in the image, and why
 
 | Content | Why |

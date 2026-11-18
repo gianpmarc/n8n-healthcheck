@@ -32,7 +32,7 @@ Without Docker:
 python3 -m n8n_healthcheck serve
 ```
 
-The interface listens on `localhost` only, has no login, and stores nothing.
+The interface listens on `localhost` only, has no login, and stores nothing. After a run it also offers the [environment profile](#environment-profile) to review and download, and the start page can open a saved one.
 
 ## Usage: command line
 
@@ -79,6 +79,12 @@ The profile never contains a secret, a host name, a URL, an IP address, a file p
 Withholding a fact does not remove the setting it was read from, or a finding that mentions it: `--withhold executions.mode` leaves the `EXECUTIONS_MODE` setting and any finding about queue mode in the file. Withhold those too (`setting:instance:EXECUTIONS_MODE`, `check`) if you want the datum gone.
 
 Withholding applies to the profile only. The report is a separate document and quotes raw values as evidence.
+
+### In the web interface
+
+After a run, the page shows a step under the report, "Share the environment profile". It lists every fact and every setting exactly as it will be written, each with a box to withhold it, plus one box for the check outcome, the reason and the reference. "Download profile" saves `n8n-profile-YYYY-MM-DD.json` on your computer; the page sends it nowhere. The same rule as on the command line applies: each row is its own entry, so withhold the fact, the setting and the check outcome separately if you want a datum gone.
+
+To read a profile someone sent you, use "Open a profile" on the start page. The file is read in the browser, not uploaded, and shown with its run details, sources, facts, settings and check outcome: the same content as `--show-profile`. A file that is not a profile, was written by a newer version, or is incomplete is refused with a message; nothing of it is shown.
 
 `--save-profile` needs a live run: it cannot be combined with `--snapshot`. The exit code is the one of the health check, with or without a profile. The file format is described in [docs/profile-format.md](docs/profile-format.md).
 

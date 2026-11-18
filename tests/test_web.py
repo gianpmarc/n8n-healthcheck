@@ -12,7 +12,7 @@ from dataclasses import asdict
 from unittest import mock
 
 import n8n_healthcheck
-from n8n_healthcheck import cli
+from n8n_healthcheck import cli, engine, profile
 from n8n_healthcheck.models import Finding, Snapshot
 from n8n_healthcheck.web import server as web
 
@@ -144,7 +144,7 @@ class WebTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             set(result),
-            {"n8n_version", "exit_code", "summary", "partial", "scores", "not_assessed", "findings", "warnings", "markdown", "snapshot"},
+            {"n8n_version", "exit_code", "summary", "partial", "scores", "not_assessed", "findings", "warnings", "markdown", "snapshot", "profile"},
         )
         self.assertEqual(result["n8n_version"], "1.70.0")
         self.assertEqual(result["exit_code"], 2)
@@ -170,6 +170,66 @@ class WebTest(unittest.TestCase):
         target = self.collect.call_args.args[0]
         self.assertEqual(target.url, "http://n8n.internal:5678")
         self.assertIsNone(target.postgres_dsn)
+
+    def test_profile_is_the_one_profile_py_builds_with_nothing_withheld(self):
+        _, result, _ = self.run_api({"url": "http://n8n.internal:5678"})
+        built = result["profile"]
+        self.assertIs(profile.validate(built), built)
+        expected = profile.build_profile(SNAPSHOT, engine.run(SNAPSHOT, RULES), ())
+        self.assertEqual({**built, "created_at": ""}, {**expected, "created_at": ""})
+        self.assertEqual(built["run"], {"reason": "baseline", "reference": ""})
+        self.assertNotIn("withheld", [fact["provenance"] for fact in built["facts"]])
+        self.assertEqual([f["rule_id"] for f in built["check"]["findings"]], [f["rule_id"] for f in result["findings"]])
+        self.assertEqual(built["sources"]["postgres"], "not_provided")
+
+    def test_profile_marks_a_source_that_failed(self):
+        with mock.patch("n8n_healthcheck.collectors.redis.collect", side_effect=RuntimeError("connection refused")):
+            with mock.patch("n8n_healthcheck.rules.ALL_RULES", RULES):
+                _, _, raw = self.request("POST", "/api/run", {"env_text": "EXECUTIONS_MODE=queue\n", "redis_url": REDIS_URL})
+        built = json.loads(raw)["profile"]
+        self.assertEqual(built["sources"]["redis"], "failed")
+        self.assertEqual(built["sources"]["env"], "collected")
+
+    def test_profile_holds_nothing_from_the_request_and_no_host_or_secret(self):
+        mark = "zqleak"
+        snapshot = Snapshot(
+            health={"healthz": True, "readiness": True},
+            env={
+                "EXECUTIONS_MODE": "queue",
+                "N8N_HOST": f"{mark}.internal",
+                "WEBHOOK_URL": f"https://{mark}.internal/",
+                "N8N_ENCRYPTION_KEY": "<redacted>",
+                f"{mark.upper()}_COMPANY_FLAG": "1",
+            },
+            n8n_version="1.70.0",
+        )
+        body = {
+            "url": f"http://{mark}-n8n.internal:5678",
+            "env_text": f"N8N_HOST={mark}.internal\nN8N_ENCRYPTION_KEY={PASSWORD}\n",
+            "postgres_dsn": DSN.replace("db.internal", f"{mark}-db.internal"),
+            "redis_url": REDIS_URL.replace("redis.internal", f"{mark}-redis.internal"),
+            "kube_namespace": f"{mark}-namespace",
+            "kube_context": f"{mark}-context",
+        }
+        status, result, _ = self.run_api(body, snapshot=snapshot)
+        self.assertEqual(status, 200)
+        text = profile.to_json(result["profile"])
+        for fragment in (mark, PASSWORD, "internal", "://", "<redacted>"):
+            self.assertNotIn(fragment, text.lower())
+        # The settings are still there, by name: the host as "set", the mode with its value.
+        listed = {s["name"]: (s["state"], s["value"]) for s in result["profile"]["settings"]}
+        self.assertEqual(listed["N8N_HOST"], ("set", None))
+        self.assertEqual(listed["EXECUTIONS_MODE"], ("value", "queue"))
+        self.assertEqual(result["profile"]["settings_not_listed"], 1)
+
+    def test_profile_from_the_real_env_collector_has_no_secret(self):
+        text = f"EXECUTIONS_MODE=regular\nN8N_ENCRYPTION_KEY={PASSWORD}\nN8N_HOST=n8n.internal\n"
+        with mock.patch("n8n_healthcheck.rules.ALL_RULES", RULES):
+            _, _, raw = self.request("POST", "/api/run", {"env_text": text})
+        built = json.loads(raw)["profile"]
+        self.assertNotIn(PASSWORD, json.dumps(built))
+        self.assertNotIn("internal", json.dumps(built))
+        self.assertEqual(profile.validate(built)["facts"][3]["value"], "regular")
 
     def test_markdown_equals_the_cli_output(self):
         _, result, _ = self.run_api({"url": "http://n8n.internal:5678"})
