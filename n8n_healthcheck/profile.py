@@ -128,6 +128,27 @@ def _role_containers(snapshot: Snapshot, role: str) -> list:
     return exact if exact and role == "main" else found
 
 
+# Measured from Kubernetes without looking at the main containers.
+NOT_FROM_MAIN = ("orchestrator", "worker.replicas", "webhook.replicas", "worker.concurrency", "resources.worker", "probes.worker")
+
+
+def _fact(fact_id: str, build: Callable, snapshot: Snapshot, failed: tuple) -> dict:
+    """One fact of the catalogue, saying so when containers were left out of the main role.
+
+    A main process built under another name cannot be told from an exporter, so the reader
+    must see that something was left out. Only how many: never an image or Deployment name.
+    """
+    fact = {"id": fact_id, **build(snapshot, failed)}
+    if fact["source"] == "kubernetes" and fact_id not in NOT_FROM_MAIN:
+        every = sum(role == "main" for _, _, role in n8n_containers(snapshot.kubernetes or {}))
+        left_out = every - len(_role_containers(snapshot, "main"))
+        if left_out:
+            noun = "container with n8n in its image name was" if left_out == 1 else "containers with n8n in their image name were"
+            note = f"{left_out} other {noun} left out"
+            fact["detail"] = f"{fact['detail']}; {note}" if fact["detail"] else note
+    return fact
+
+
 def _official(container: dict) -> bool:
     return _image_name(container) in OFFICIAL_IMAGES
 
@@ -600,7 +621,7 @@ def build_profile(
         "created_at": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "run": {"reason": reason, "reference": check_reference(reference)},
         "sources": _sources(snapshot, failed),
-        "facts": [{"id": fact_id, **build(snapshot, failed)} for fact_id, build in CATALOGUE],
+        "facts": [_fact(fact_id, build, snapshot, failed) for fact_id, build in CATALOGUE],
         "settings": settings,
         "settings_not_listed": not_listed,
         # Without the evidence: it quotes raw values. Titles are fixed text of the rules.

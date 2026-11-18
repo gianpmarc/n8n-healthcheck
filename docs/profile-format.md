@@ -210,7 +210,9 @@ name merely contains "n8n" would therefore look like a main container. So:
 - An image called exactly `n8n`, in any registry, is n8n.
 - In the main role, when at least one container is called exactly `n8n`, the
   others are left out of every fact and of the settings: they are never
-  counted.
+  counted. Every measured fact that was read from the main containers then
+  says so in its `detail`, with the number only and never a name: "1 other
+  container with n8n in its image name was left out".
 - A role in which no container is called exactly `n8n` (a build under another
   name, or only an unrelated image) gives `unknown` for its replica, resources
   and probes facts, and no version is read from its tag.

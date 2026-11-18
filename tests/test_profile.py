@@ -135,7 +135,7 @@ LEAKY_CONFIGMAPS = {
 }
 
 
-def leaky_deployment(name, args, resources):
+def leaky_deployment(name, args, resources, image=f"registry.{MARK}.example:5000/{MARK}team/n8n:2.40.1"):
     return {
         "metadata": {"name": f"{MARK}-{name}", "namespace": f"{MARK}-namespace"},
         "spec": {
@@ -145,7 +145,7 @@ def leaky_deployment(name, args, resources):
                     "containers": [
                         {
                             "name": f"{MARK}-container",
-                            "image": f"registry.{MARK}.example:5000/{MARK}team/n8n:2.40.1",
+                            "image": image,
                             "command": ["n8n"],
                             "args": args + [f"--config=/etc/{MARK}/n8n.json"],
                             "envFrom": [{"configMapRef": {"name": f"{MARK}-config"}}],
@@ -181,6 +181,8 @@ def leaky_snapshot():
             leaky_deployment("worker", ["worker"], {"requests": {"cpu": "10.11.12.13"}}),
             # a quantity that is free text
             leaky_deployment("webhook", ["webhook"], {"limits": {"memory": f"{MARK}Gi"}}),
+            # left out of the main role, and said so in the details without its name
+            leaky_deployment("exporter", [], {}, image=f"{MARK}/n8n-{MARK}-exporter:1.0.0"),
         ]
     }
     return Snapshot(
@@ -241,6 +243,9 @@ class ZeroLeakTest(unittest.TestCase):
             facts["resources.main"]["value"],
             {"requests": {"cpu": "250m", "memory": None}, "limits": {"cpu": None, "memory": "1Gi"}},
         )
+        # The note about what was left out is in the text the assertions above went through.
+        self.assertEqual(facts["resources.main"]["detail"], "1 other container with n8n in its image name was left out")
+        self.assertEqual(facts["main.replicas"]["value"], 2)
         self.assertEqual(facts["database.version"]["value"], "16.4")
         self.assertEqual(facts["n8n.version"]["value"], "2.40.1")
         self.assertEqual(facts["n8n.image_official"]["value"], False)
@@ -549,6 +554,38 @@ class KubernetesFactTest(unittest.TestCase):
             settings(snapshot),
             {"setting:main:EXECUTIONS_MODE": ("value", "queue"), "setting:main:N8N_PORT": ("value", "5678")},
         )
+
+    def test_the_reader_is_told_how_many_containers_were_left_out(self):
+        # A main built under another name cannot be told from an exporter: say that
+        # something was left out, with the count only.
+        one = "1 other container with n8n in its image name was left out"
+        two = "2 other containers with n8n in their image name were left out"
+        snapshot = self.beside_unrelated({"EXECUTIONS_MODE": "queue"})
+        for fact_id, detail in (
+            ("main.replicas", two),
+            ("resources.main", two),
+            ("probes.main", two),
+            ("n8n.image_official", two),
+            ("n8n.version", "from the image tag; " + two),
+            ("executions.mode", two),
+            ("database.engine", "n8n default, variable not set; " + two),
+        ):
+            found = fact(snapshot, fact_id)
+            self.assertEqual((found["provenance"], found["detail"]), ("measured", detail), fact_id)
+        text = profile.to_json(build(snapshot)) + profile.render_markdown(build(snapshot))
+        for hidden in ("exporter", "mcp", "example"):
+            self.assertNotIn(hidden, text)
+        single = Snapshot(kubernetes=kube(("n8n", 1, container()), ("x", 5, container(image=self.EXPORTER)), ("w", 2, worker())))
+        self.assertEqual(fact(single, "main.replicas")["detail"], one)
+        # Not on facts that do not come from the main containers, nor when nothing was left out.
+        for fact_id in ("worker.replicas", "worker.concurrency", "resources.worker", "probes.worker", "orchestrator"):
+            self.assertNotIn("left out", fact(single, fact_id)["detail"], fact_id)
+        with_file = Snapshot(env={"EXECUTIONS_MODE": "queue"}, kubernetes=single.kubernetes)
+        self.assertEqual(fact(with_file, "executions.mode")["detail"], "")  # read from the env file
+        self.assertEqual(fact(with_file, "main.replicas")["detail"], one)
+        clean = Snapshot(kubernetes=kube(("n8n", 1, container()), ("w", 2, worker())))
+        for found in build(clean)["facts"]:
+            self.assertNotIn("left out", found["detail"])
 
     def test_a_role_with_no_image_called_n8n_stays_unknown(self):
         # A build of n8n under another name cannot be told from an unrelated image.
