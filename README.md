@@ -55,6 +55,31 @@ Every source is optional. A source you do not provide is reported as "not assess
 
 `--kube-namespace` uses your current `kubectl` context (or `--kube-context`) and needs permission to `get` Deployments and ConfigMaps in that namespace. Without `--env-file`, the n8n settings are read from the main n8n Deployment, including values that come from ConfigMaps. Secrets are never read: a setting that comes from a Secret is reported as "set, value unknown" and no conclusion is drawn from it.
 
+## Environment profile
+
+The report says what will break. Whoever helps you with the instance also needs to know what the environment is. For that the tool can write a second output: one JSON file of facts (n8n version, execution mode, replicas, database and queue figures, the n8n settings that are set), each marked as measured, unknown or withheld.
+
+```bash
+python3 -m n8n_healthcheck --url https://n8n.example.com --kube-namespace n8n \
+  --save-profile n8n-profile-2026-11-18.json --reason pre_upgrade --reference "upgrade to 2.50"
+```
+
+| Flag | Meaning |
+|---|---|
+| `--save-profile FILE` | write the profile as JSON, next to the usual report |
+| `--reason REASON` | `baseline` (default), `pre_upgrade`, `post_upgrade`, `incident` or `other` |
+| `--reference TEXT` | one line of free text stored in the profile, at most 200 characters; do not put secrets in it |
+| `--withhold ID` | leave an entry out; repeatable. A fact id (`worker.replicas`), `setting:<scope>:<NAME>`, or `check` |
+| `--show-profile FILE` | print a saved profile as Markdown and exit; works offline, takes only `-o` |
+
+Read the file before you share it: `--show-profile` prints exactly what is in it. A withheld entry stays in the file marked `withheld`, so the reader knows it was removed rather than unknown.
+
+The profile never contains a secret, a host name, a URL, an IP address, a file path, an e-mail address, or a Deployment, namespace or registry name. Settings that can hold one of those are listed as "set" without their value, and variables that are not n8n settings are counted, not named. Anything the tool cannot tell for certain is `unknown`, never guessed. The tool does not send the file anywhere.
+
+Withholding applies to the profile only. The report is a separate document and quotes raw values as evidence.
+
+`--save-profile` needs a live run: it cannot be combined with `--snapshot`. The exit code is the one of the health check, with or without a profile. The file format is described in [docs/profile-format.md](docs/profile-format.md).
+
 ## Try it
 
 `lab/` contains a deliberately misconfigured queue-mode n8n stack and the fixed version, so you can see a report before and after.
