@@ -333,6 +333,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 snapshot, findings, tuple(failed), args.reason or "baseline", args.reference
             )
             saved_profile, dropped = profile.apply_answers(saved_profile, args.answer)
+        except profile.ProfileError as exc:
+            return _error(f"--answer: {exc}")
+        try:
             saved_profile = profile.apply_withholding(saved_profile, args.withhold)
         except profile.ProfileError as exc:
             return _error(f"--withhold: {exc}")

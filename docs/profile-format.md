@@ -36,8 +36,8 @@ The only text a person types is `run.reference`.
 {
   "format": "n8n-healthcheck-profile",
   "format_version": 1,
-  "tool_version": "0.2.0",
-  "created_at": "2026-11-18T10:22:00Z",
+  "tool_version": "0.3.0",
+  "created_at": "2026-11-19T10:22:00Z",
   "run": {"reason": "pre_upgrade", "reference": "upgrade to 2.50, change 1234"},
   "sources": {"health": "collected", "metrics": "disabled", "env": "not_provided",
               "postgres": "collected", "redis": "failed", "kubernetes": "collected"},
@@ -47,6 +47,8 @@ The only text a person types is `run.reference`.
     {"id": "database.version", "value": null, "provenance": "unknown",
      "source": null, "detail": "Postgres was not provided"},
     {"id": "worker.replicas", "value": null, "provenance": "withheld",
+     "source": null, "detail": ""},
+    {"id": "hosting.model", "value": "public_cloud", "provenance": "declared",
      "source": null, "detail": ""}
   ],
   "settings": [
@@ -63,7 +65,7 @@ The only text a person types is `run.reference`.
 }
 ```
 
-(The example shows three facts. A real file always has the full catalogue.)
+(The example shows four facts. A real file always has the full catalogue.)
 
 ## Top-level fields
 
@@ -261,7 +263,8 @@ Every question is optional.
 
 These ids are in every file written by tool version 0.3.0 or later, after the
 catalogue of version 1, in this order (`orchestrator` keeps its place in the
-catalogue above). A file written by version 0.2.0 does not have them.
+catalogue above). A file written by version 0.2.0 has `orchestrator` and none
+of the other fourteen.
 
 - **Not answered.** The fact is `unknown` with the detail "not answered".
 - **Answered.** `provenance` is `declared`, `value` is the chosen value,
@@ -296,7 +299,8 @@ still open, as Markdown in three parts:
    told.
 2. **Ask whoever runs the platform.** The questions above that are still
    `unknown`, with the values an answer may hold. A file written by version
-   0.2.0 has none of them, so all of them are listed.
+   0.2.0 has only `orchestrator` among them, so the other fourteen are always
+   listed for it, and `orchestrator` too unless it was measured or withheld.
 3. **Ask in conversation.** A fixed list of questions the tool never asks or
    stores (how users sign in, how upgrades are done, who is on call), each with
    a line on why it matters. Their answers belong wherever the reader keeps

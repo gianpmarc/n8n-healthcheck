@@ -678,23 +678,28 @@ def check_answers(answers: dict) -> dict:
     """{fact id: the value to store} for answers to operator questions; ProfileError otherwise.
 
     An answer is one value of the question's list as a string, or a list of them for a
-    `multi` question. Nothing but a value of the catalogue can come out of here.
+    `multi` question. Nothing but a value of the catalogue can come out of here: an id
+    or a value must be exactly a `str`, since a subclass can claim to equal anything.
     """
     values = {}
     for fact_id, answer in answers.items():
-        question = questions.OPERATOR_BY_ID.get(fact_id)
+        question = questions.OPERATOR_BY_ID.get(fact_id) if type(fact_id) is str else None
         if question is None:
             raise ProfileError(f"no question the tool asks has the id {fact_id!r}")
         allowed = [value for value, _label in question["values"]]
+
+        def listed(item) -> bool:
+            return type(item) is str and item in allowed
+
         if question["kind"] == "multi":
             chosen = list(answer) if isinstance(answer, (list, tuple)) else [None]
             # Membership first: once every item is a value of the list, they can be compared.
-            if not chosen or any(item not in allowed for item in chosen) or len(set(chosen)) != len(chosen):
+            if not chosen or not all(listed(item) for item in chosen) or len(set(chosen)) != len(chosen):
                 raise ProfileError(f"the answer to {fact_id} must be one or more of: {', '.join(allowed)}")
             if "none" in chosen and len(chosen) > 1:
                 raise ProfileError(f'the answer to {fact_id} cannot be "none" together with another value')
             values[fact_id] = {value: True for value in allowed if value in chosen}
-        elif not isinstance(answer, str) or answer not in allowed:
+        elif not listed(answer):
             raise ProfileError(f"the answer to {fact_id} must be one of: {', '.join(allowed)}")
         else:
             values[fact_id] = answer == "yes" if question["kind"] == "yes_no" else answer
@@ -954,7 +959,7 @@ def render_questions(profile: dict) -> str:
         "",
         "## 1. Could be measured",
         "",
-        "Facts the tool reads by itself when it is given the source. Each says why it is unknown.",
+        "Facts the tool measures by itself when it can. Each says why it could not this time.",
         "",
     ]
     measurable = [fact_id for fact_id in FACT_IDS if fact_id not in questions.OPERATOR_BY_ID and is_open(fact_id)]

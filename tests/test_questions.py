@@ -175,6 +175,32 @@ class AnswersTest(unittest.TestCase):
             answered({"hosting.model": "my-datacentre.example"})
         self.assertNotIn("datacentre", str(raised.exception))
 
+    def test_only_the_catalogue_s_own_text_comes_out(self):
+        # A str subclass can claim to equal anything; what it carries must never be stored.
+        class Liar(str):
+            __hash__ = str.__hash__
+
+            def __eq__(self, other):
+                return True
+
+        evil = "evil.example.com"
+        for answers in (
+            {"hosting.model": Liar(evil)},
+            {"worker.autoscaling": Liar(evil)},
+            {"observability.tools": [Liar(evil)]},
+            {"observability.tools": ["prometheus", Liar(evil)]},
+            {Liar("hosting.model"): "hybrid"},
+            {Liar(evil): "hybrid"},
+        ):
+            with self.subTest(answers=answers), self.assertRaises(profile.ProfileError):
+                found = profile.check_answers(answers)
+                self.fail(f"accepted: {json.dumps(found)}")
+        # What is accepted is exactly str, and equal to a value of the list.
+        found = profile.check_answers({"hosting.model": "hybrid", "observability.tools": ["grafana"]})
+        self.assertEqual(found, {"hosting.model": "hybrid", "observability.tools": {"grafana": True}})
+        for value in [*found, found["hosting.model"], *found["observability.tools"]]:
+            self.assertIs(type(value), str)
+
     def test_measured_wins(self):
         snapshot = Snapshot(kubernetes=base.kube(("m", 1, base.container())))
         measured = facts_of(base.build(snapshot))["orchestrator"]
@@ -334,6 +360,11 @@ class SheetTest(unittest.TestCase):
         # 1: what a probe can fill, with the profile's own detail.
         self.assertIn("- **Which Postgres version runs?** (`database.version`): Postgres could not be collected\n", measurable)
         self.assertIn("- **How many main replicas run?** (`main.replicas`): Kubernetes was not provided\n", measurable)
+        # ... also one whose source was read: the introduction must hold for it too.
+        self.assertEqual(built["sources"]["env"], "collected")
+        self.assertIn("(`pruning.enabled`): not set, the n8n default for this version applies\n", measurable)
+        self.assertEqual(measurable.strip().splitlines()[0], "Facts the tool measures by itself when it can. Each says why it could not this time.")
+        self.assertNotIn("given the source", sheet)
         self.assertNotIn("executions.mode", sheet)  # measured
         self.assertNotIn("queue.redis_version", sheet)  # measured
         # 2: operator questions still unknown, with their values; orchestrator here, once.
@@ -468,6 +499,16 @@ class CliTest(unittest.TestCase):
         code, _, err = self.run_cli(self.save("orchestrator=ecs"))
         self.assertEqual(err, "")
         self.assertEqual(self.saved_facts()["orchestrator"]["value"], "ecs")
+
+    def test_an_error_is_reported_under_the_flag_it_belongs_to(self):
+        argv = self.save("hosting.model=hybrid") + ["-o", os.path.join(self.dir, "report.md")]
+        with mock.patch("n8n_healthcheck.profile.apply_answers", side_effect=profile.ProfileError("refused")):
+            code, out, err = self.run_cli(argv)
+        self.assertEqual((code, out, err), (3, "", "error: --answer: refused\n"))
+        code, out, err = self.run_cli(argv + ["--withhold", "setting:instance:N8N_NOT_SET"])
+        self.assertEqual((code, out), (3, ""))
+        self.assertTrue(err.startswith("error: --withhold: nothing in the profile has this id"))
+        self.assertFalse(os.path.exists(self.path))
 
     def test_a_declared_fact_can_be_withheld(self):
         code, _, err = self.run_cli(self.save("hosting.model=hybrid") + ["--withhold", "hosting.model", "--withhold", "database.backups"])
