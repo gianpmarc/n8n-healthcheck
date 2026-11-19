@@ -667,7 +667,7 @@ class PageBehaviourTest(unittest.TestCase):
                 self.assert_saved(got["second"], profile.apply_withholding({**sent, "run": run}, WITHHELD[1:]), raw)
                 self.assertNotIn("2.40.1", got["first"])
                 self.assertEqual(got["status"], f"Download started: n8n-profile-{sent['created_at'][:10]}.json")
-                self.assertIn("1 of 32 facts, 2 of ", got["summary"])
+                self.assertIn("1 of 46 facts, 2 of ", got["summary"])
 
     def test_withhold_all_and_none_reach_every_entry(self):
         response = run_response()
@@ -686,7 +686,7 @@ class PageBehaviourTest(unittest.TestCase):
         )  # fmt: skip
         facts = [f["id"] for f in sent["facts"]]
         settings = [profile.setting_id(s) for s in sent["settings"]]
-        self.assertEqual(len(facts), 32)
+        self.assertEqual(len(facts), 46)
         self.assertGreater(len(settings), 3)
         for name, ids in (
             ("Withhold all facts", facts),

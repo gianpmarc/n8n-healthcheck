@@ -106,7 +106,7 @@ Every fact has the same five fields:
 | `id` | The fact, from the catalogue below. |
 | `provenance` | `measured`, `unknown`, `withheld`, or `declared` (see below). |
 | `value` | The value when `provenance` is `measured` or `declared`; otherwise `null`. |
-| `source` | Which source the value came from (a key of `sources`); `null` when there is no value. |
+| `source` | Which source a measured value came from (a key of `sources`); `null` for every other provenance. |
 | `detail` | One short fixed sentence when it helps, for example why a fact is unknown. May be empty. Never quotes what was observed. |
 
 Provenance:
@@ -116,8 +116,10 @@ Provenance:
   never means "no" or "zero".
 - `withheld`: the person who ran the tool chose to leave it out. It was not
   necessarily known.
-- `declared`: reserved for answers given by a person. Version 0.2.0 of the tool
-  never writes it, but a reader should accept it.
+- `declared`: the person who ran the tool answered a closed question (see
+  "Declared facts"). The value is one of a fixed list, never text they typed.
+  It was not checked by the tool: do not read it as measured. Version 0.2.0 of
+  the tool never writes it.
 
 A fact is `unknown` rather than guessed when: its source was not read; the
 variable it depends on is set but its value could not be read (it comes from a
@@ -151,7 +153,7 @@ this version applies": look the default up for the n8n version in `n8n.version`.
 |---|---|---|
 | `n8n.version` | version | The version n8n reports on its metrics endpoint; otherwise the image tag, when every main container runs the official image with the same tag. The tag of any other image is not taken as a version. |
 | `n8n.image_official` | boolean | Kubernetes: `true` when every n8n container runs `n8nio/n8n`, `docker.io/n8nio/n8n` or `docker.n8n.io/n8nio/n8n`; `false` when none does (a custom build, or a copy in another registry); unknown when they are mixed. The image name actually used is never written. |
-| `orchestrator` | `kubernetes` | `kubernetes` when Kubernetes was read. Otherwise unknown: the tool cannot tell Docker from a bare process. |
+| `orchestrator` | `kubernetes` | `kubernetes` when Kubernetes was read. Otherwise unknown: the tool cannot tell Docker from a bare process. From tool version 0.3.0 the person running the tool can then declare it, with more values: see "Declared facts". |
 | `executions.mode` | `regular`, `queue` | `EXECUTIONS_MODE`. |
 | `main.replicas` | integer | Kubernetes: replicas of the Deployments that run the main n8n process, summed. |
 | `worker.replicas` | integer | Same, for the worker process. |
@@ -229,6 +231,80 @@ as a main container called `n8n` is treated like an exporter and left out, so
 
 `n8n.image_official` is `false` for a copy of the official image kept in
 another registry: it says where the image is pulled from, not what is in it.
+
+## Declared facts
+
+Some of what decides whether a setup is risky cannot be read by any probe:
+where it runs, what sits in front of it, how the database is protected. For
+those the tool asks the person who runs it a short list of closed questions.
+Every question is optional.
+
+### Added in tool version 0.3.0
+
+| Id | Value | Question |
+|---|---|---|
+| `hosting.model` | `public_cloud`, `private_cloud`, `on_premises`, `hybrid` | Where does n8n run? |
+| `hosting.cloud_provider` | `aws`, `azure`, `gcp`, `other`, `none` | Which cloud provider? |
+| `orchestrator` | `kubernetes`, `ecs`, `docker_compose`, `docker_swarm`, `nomad`, `virtual_machine`, `other` | What runs the n8n containers or processes? |
+| `install.method` | `helm_chart`, `kubernetes_manifests`, `compose_file`, `task_definition`, `npm`, `other` | How is n8n installed and updated? |
+| `n8n.image_modified` | boolean | Is the n8n image built or modified by you (extra packages, patches, a different base)? |
+| `proxy.kind` | `nginx`, `traefik`, `haproxy`, `envoy`, `cloud_load_balancer`, `other`, `none` | What sits in front of n8n? |
+| `proxy.tls_termination` | `at_proxy`, `at_n8n`, `none` | Where does TLS end? |
+| `proxy.sticky_sessions` | boolean | Are sticky sessions enabled in front of the main instances? |
+| `database.service` | `managed_service`, `self_managed` | Who operates the database? |
+| `database.high_availability` | boolean | Does the database have a standby that takes over? |
+| `database.backups` | `point_in_time`, `scheduled`, `none` | How is the database backed up? |
+| `queue.redis_topology` | `single`, `sentinel`, `cluster`, `managed_service` | How is Redis deployed? |
+| `secrets.source` | `environment`, `orchestrator_secrets`, `external_store`, `files` | Where do n8n's own secrets come from at start? |
+| `worker.autoscaling` | boolean | Do workers scale automatically? |
+| `observability.tools` | object of the chosen values, each `true`: `prometheus`, `grafana`, `datadog`, `opentelemetry`, `cloudwatch`, `splunk`, `elastic`, `other`, `none` | What do you use to watch n8n? |
+
+These ids are in every file written by tool version 0.3.0 or later, after the
+catalogue of version 1, in this order (`orchestrator` keeps its place in the
+catalogue above). A file written by version 0.2.0 does not have them.
+
+- **Not answered.** The fact is `unknown` with the detail "not answered".
+- **Answered.** `provenance` is `declared`, `value` is the chosen value,
+  `source` is `null` and `detail` is empty. A yes or no question gives a
+  boolean. `observability.tools` takes several values and is stored as an
+  object holding only the chosen ones, in the order of the list:
+  `{"prometheus": true, "datadog": true}`. `none` cannot be chosen together
+  with another value.
+- **Measured wins.** An answer is taken only for a fact the tool could not
+  measure. `orchestrator` is the one question a probe can also answer: when
+  Kubernetes was read it is measured, and an answer given for it is dropped, so
+  a file never holds an answer that contradicts a measurement.
+- A declared fact can be withheld like any other.
+- No answer is free text. Where a list cannot be complete it has an `other`
+  value, and nothing more is said.
+
+`n8n.image_modified` is not `n8n.image_official`: the second is measured from
+where the image is pulled, the first is what the person says is in it. The two
+can legitimately differ.
+
+On the command line the questions are listed by `--list-questions` and answered
+with `--answer ID=VALUE` next to `--save-profile` (`--answer ID=a,b` for several
+values, `yes` or `no` for a yes or no question).
+
+## The question sheet
+
+`n8n-healthcheck --show-questions FILE` prints, from a saved profile, what is
+still open, as Markdown in three parts:
+
+1. **Could be measured.** Unknown facts a probe can fill, each with the
+   profile's own `detail`: which source was missing, or why it could not be
+   told.
+2. **Ask whoever runs the platform.** The questions above that are still
+   `unknown`, with the values an answer may hold. A file written by version
+   0.2.0 has none of them, so all of them are listed.
+3. **Ask in conversation.** A fixed list of questions the tool never asks or
+   stores (how users sign in, how upgrades are done, who is on call), each with
+   a line on why it matters. Their answers belong wherever the reader keeps
+   their own notes, not in the profile.
+
+Withheld facts are listed in one line at the end, by id: the sender chose to
+leave them out, so they are not questions to press on. The sheet is derived
+from the file and changes nothing in it.
 
 ## Settings
 
@@ -326,7 +402,8 @@ document that quotes raw values as evidence; share it or not as before.
   one of those is missing is refused as invalid, so nothing can be silently
   absent. That list is frozen: ids a later tool version adds are written by
   that version but are not required of a file, so a newer tool still opens a
-  file written by an older one.
+  file written by an older one. Version 0.3.0 added the ids under "Declared
+  facts" this way.
 - When a file is opened, `run.reference` must obey the rules it is typed
   under: one line, at most 200 characters, no control characters, no
   surrounding spaces. A file that is not valid is refused with a message that

@@ -10,7 +10,7 @@ from dataclasses import asdict
 from typing import Optional
 from urllib.parse import urlsplit
 
-from . import engine, profile, report
+from . import engine, profile, questions, report
 from .models import Snapshot, Target
 
 # Exit code when the check itself could not run (bad usage, I/O error, nothing
@@ -63,13 +63,19 @@ def _port(text: str) -> int:
 # Flags added with the environment profile. An abbreviation that was unambiguous before
 # them (`--save` for --save-snapshot, `--re` for --redis-url) keeps its meaning.
 PROFILE_FLAGS = ("save_profile", "reason", "reference", "withhold", "show_profile")
+# Flags added with the profile questions. They give way in the same manner, also to the
+# profile flags: `--sh` stays --show-profile.
+QUESTION_FLAGS = ("answer", "list_questions", "show_questions")
 
 
 class _Parser(argparse.ArgumentParser):
     def _get_option_tuples(self, option_string):
         matches = super()._get_option_tuples(option_string)
-        older = [match for match in matches if match[0].dest not in PROFILE_FLAGS]
-        return older if len(matches) > 1 and len(older) == 1 else matches
+        for newer in (QUESTION_FLAGS, QUESTION_FLAGS + PROFILE_FLAGS):
+            older = [match for match in matches if match[0].dest not in newer]
+            if len(matches) > 1 and len(older) == 1:
+                return older
+        return matches
 
     def error(self, message: str):
         # argparse exits 2 by default, which here means "critical finding".
@@ -86,7 +92,8 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         epilog="Exit codes: 0 no critical findings or warnings, 1 at least one warning, "
         "2 at least one critical finding, 3 the check could not run "
         "(usage error, unreadable or unwritable file, no requested source reachable, "
-        "every rule failed to run). --show-profile exits 0, or 3 when the file is not a usable profile.",
+        "every rule failed to run). --show-profile and --show-questions exit 0, or 3 when the file "
+        "is not a usable profile.",
     )
     parser.add_argument("--url", help="n8n base URL (health endpoints and /metrics)")
     parser.add_argument("--env-file", help="KEY=VALUE file with the n8n environment")
@@ -115,14 +122,34 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         help="leave this entry out of the profile: a fact id, setting:<scope>:<NAME> or check (repeatable)",
     )
     group.add_argument("--show-profile", metavar="FILE", help="print a saved profile as Markdown, then exit")
+    group = parser.add_argument_group(
+        "profile questions",
+        "Closed questions no probe can answer. Every one is optional. An answer is written "
+        'in the profile as "declared", and is dropped when the tool measured the fact itself.',
+    )
+    group.add_argument(
+        "--answer",
+        action="append",
+        default=[],
+        metavar="ID=VALUE",
+        help="answer one question in the profile (repeatable); several values as ID=a,b",
+    )
+    group.add_argument("--list-questions", action="store_true", help="print the questions and their values, then exit")
+    group.add_argument(
+        "--show-questions", metavar="FILE", help="print what a saved profile leaves open, as Markdown, then exit"
+    )
     args = parser.parse_args(argv)
-    if args.show_profile is not None:
-        others = [name for name, value in vars(args).items() if name not in ("show_profile", "output") and value]
-        if others:
-            parser.error("--show-profile takes no other flag except -o")
+    for flag in ("show_profile", "show_questions"):
+        if getattr(args, flag) is not None:
+            if [name for name, value in vars(args).items() if name not in (flag, "output") and value]:
+                parser.error(f"--{flag.replace('_', '-')} takes no other flag except -o")
+            return args
+    if args.list_questions:
+        if [name for name, value in vars(args).items() if name != "list_questions" and value]:
+            parser.error("--list-questions takes no other flag")
         return args
     if args.save_profile is None:
-        for flag in ("reason", "reference", "withhold"):
+        for flag in ("reason", "reference", "withhold", "answer"):
             if getattr(args, flag) not in (None, []):
                 parser.error(f"--{flag} needs --save-profile")
     elif not args.save_profile.strip():
@@ -140,6 +167,20 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         # A setting id can only be checked once the environment has been read.
         if item not in profile.FACT_IDS and item != "check" and not item.startswith("setting:"):
             parser.error(f"--withhold: nothing in the profile has the id {item!r}")
+    answers = {}
+    for item in args.answer:
+        fact_id, equals, value = (part.strip() for part in item.partition("="))
+        if not equals:
+            parser.error(f"--answer: {item!r} is not ID=VALUE")
+        if fact_id in answers:
+            parser.error(f"--answer: {fact_id!r} is answered twice")
+        several = questions.OPERATOR_BY_ID.get(fact_id, {}).get("kind") == "multi"
+        answers[fact_id] = [part.strip() for part in value.split(",")] if several else value
+    try:
+        profile.check_answers(answers)
+    except profile.ProfileError as exc:
+        parser.error(f"--answer: {exc} (see --list-questions)")
+    args.answer = answers
     for source in SOURCE_SECTION:
         value = getattr(args, source)
         # The collectors test `is None`, so "" would be collected, not ignored.
@@ -210,9 +251,10 @@ def _error(message: str) -> int:
     return EXIT_ERROR
 
 
-def _show_profile(path: str, output: Optional[str]) -> int:
+def _show_profile(path: str, output: Optional[str], render) -> int:
+    """Print a saved profile through `render`: as it is, or as its question sheet."""
     try:
-        markdown = profile.render_markdown(profile.load_profile(path))
+        markdown = render(profile.load_profile(path))
     except OSError as exc:
         return _error(f"cannot read profile {path}: {exc.strerror}")
     except profile.ProfileError as exc:
@@ -239,7 +281,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _serve(argv[1:])
     args = _parse_args(argv)
     if args.show_profile is not None:
-        return _show_profile(args.show_profile, args.output)
+        return _show_profile(args.show_profile, args.output, profile.render_markdown)
+    if args.show_questions is not None:
+        return _show_profile(args.show_questions, args.output, profile.render_questions)
+    if args.list_questions:
+        sys.stdout.write(questions.render_list())
+        return 0
     failed: list[str] = []  # sections requested on the command line but not collected
 
     if args.snapshot:
@@ -281,11 +328,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     markdown = report.render_markdown(snapshot, findings, failed=tuple(failed))
     if args.save_profile is not None:
         try:
+            # Probes, then answers, then withholding: a declared fact can be withheld too.
             saved_profile = profile.build_profile(
-                snapshot, findings, tuple(failed), args.reason or "baseline", args.reference, tuple(args.withhold)
+                snapshot, findings, tuple(failed), args.reason or "baseline", args.reference
             )
+            saved_profile, dropped = profile.apply_answers(saved_profile, args.answer)
+            saved_profile = profile.apply_withholding(saved_profile, args.withhold)
         except profile.ProfileError as exc:
             return _error(f"--withhold: {exc}")
+        for fact_id in dropped:
+            print(f"note: the answer to {fact_id} was dropped: the tool measured it", file=sys.stderr)
     try:
         if args.save_snapshot:
             with open(args.save_snapshot, "w", encoding="utf-8") as fh:
