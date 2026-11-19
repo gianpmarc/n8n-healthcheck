@@ -16,7 +16,7 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from . import __version__, n8n_settings, report
+from . import __version__, n8n_settings, questions, report
 from .models import REDACTED, Finding, Snapshot
 from .rules._helpers import (
     VALUE_FROM,
@@ -40,7 +40,7 @@ FORMAT_VERSION = 1
 REASONS = ("baseline", "pre_upgrade", "post_upgrade", "incident", "other")
 REFERENCE_MAX = 200
 SOURCE_STATES = ("collected", "disabled", "failed", "not_provided")
-# `declared` is reserved for a later version of the tool and never produced here.
+# `declared` is an answer to an operator question (questions.py), set by apply_answers().
 PROVENANCES = ("measured", "declared", "unknown", "withheld")
 SETTING_STATES = ("value", "set", "withheld")
 ROLES = ("main", "worker", "webhook")
@@ -77,6 +77,7 @@ _QUANTITY = re.compile(r"[0-9]+(\.[0-9]+)?[a-zA-Z]{0,2}")
 _UNSET = object()
 
 NOT_SET_DETAIL = "not set, the n8n default for this version applies"
+NOT_ANSWERED_DETAIL = "not answered"
 
 
 class ProfileError(ValueError):
@@ -447,6 +448,11 @@ def _metrics_enabled(snapshot: Snapshot, failed: tuple) -> dict:
     return _missing("metrics", failed)
 
 
+def _not_answered(snapshot: Snapshot, failed: tuple) -> dict:
+    """A fact no probe can fill: only an answer to its operator question gives it a value."""
+    return _unknown(NOT_ANSWERED_DETAIL)
+
+
 # (fact id, function(snapshot, failed) -> fact without its id), in the order of the file.
 CATALOGUE = (
     ("n8n.version", _n8n_version),
@@ -484,6 +490,10 @@ CATALOGUE = (
     ("resources.worker", _kube_fact("worker", _resources)),
     ("probes.main", _kube_fact("main", _probes)),
     ("probes.worker", _kube_fact("worker", _probes)),
+)
+# Added in tool version 0.3.0: the operator questions no probe can answer, after the rest.
+CATALOGUE += tuple(
+    (question["id"], _not_answered) for question in questions.OPERATOR if question["id"] not in dict(CATALOGUE)
 )
 FACT_IDS = tuple(fact_id for fact_id, _ in CATALOGUE)
 
@@ -662,6 +672,61 @@ def apply_withholding(profile: dict, ids) -> dict:
     if ids:
         raise ProfileError("nothing in the profile has this id: " + ", ".join(sorted(ids)))
     return profile
+
+
+def check_answers(answers: dict) -> dict:
+    """{fact id: the value to store} for answers to operator questions; ProfileError otherwise.
+
+    An answer is one value of the question's list as a string, or a list of them for a
+    `multi` question. Nothing but a value of the catalogue can come out of here: an id
+    or a value must be exactly a `str`, since a subclass can claim to equal anything.
+    """
+    values = {}
+    for fact_id, answer in answers.items():
+        question = questions.OPERATOR_BY_ID.get(fact_id) if type(fact_id) is str else None
+        if question is None:
+            raise ProfileError(f"no question the tool asks has the id {fact_id!r}")
+        allowed = [value for value, _label in question["values"]]
+
+        def listed(item) -> bool:
+            return type(item) is str and item in allowed
+
+        if question["kind"] == "multi":
+            chosen = list(answer) if isinstance(answer, (list, tuple)) else [None]
+            # Membership first: once every item is a value of the list, they can be compared.
+            if not chosen or not all(listed(item) for item in chosen) or len(set(chosen)) != len(chosen):
+                raise ProfileError(f"the answer to {fact_id} must be one or more of: {', '.join(allowed)}")
+            if "none" in chosen and len(chosen) > 1:
+                raise ProfileError(f'the answer to {fact_id} cannot be "none" together with another value')
+            values[fact_id] = {value: True for value in allowed if value in chosen}
+        elif not listed(answer):
+            raise ProfileError(f"the answer to {fact_id} must be one of: {', '.join(allowed)}")
+        else:
+            values[fact_id] = answer == "yes" if question["kind"] == "yes_no" else answer
+    return values
+
+
+def apply_answers(profile: dict, answers: dict) -> tuple:
+    """(a copy of `profile` with the answers as declared facts, the ids whose answer was dropped).
+
+    To be called after the probes and before apply_withholding(). An answer is taken
+    only for a fact that is `unknown`: a measured fact wins, and its answer is dropped.
+    Raises ProfileError for an answer check_answers() refuses, or a fact the profile lacks.
+    """
+    values = check_answers(answers)
+    profile = copy.deepcopy(profile)
+    facts = {}
+    for fact in profile["facts"]:
+        facts.setdefault(fact["id"], fact)
+    dropped = []
+    for fact_id, value in values.items():
+        if fact_id not in facts:
+            raise ProfileError(f"nothing in the profile has this id: {fact_id}")
+        if facts[fact_id]["provenance"] != "unknown":
+            dropped.append(fact_id)
+            continue
+        facts[fact_id].update(value=value, provenance="declared", source=None, detail="")
+    return profile, dropped
 
 
 def to_json(profile: dict) -> str:
@@ -866,5 +931,67 @@ def render_markdown(profile: dict) -> str:
             )
         if not check["findings"]:
             lines.append("No findings.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_questions(profile: dict) -> str:
+    """The question sheet of a saved profile (already validated) as Markdown.
+
+    What is still unknown, by who can answer it, then the questions that are only ever
+    asked in conversation. A fact the file does not hold counts as unknown: a profile
+    written before a question existed still gets it on its sheet.
+    """
+    run = profile["run"]
+    facts = {}
+    for fact in profile["facts"]:
+        facts.setdefault(fact["id"], fact)
+
+    def is_open(fact_id: str) -> bool:
+        return fact_id not in facts or facts[fact_id]["provenance"] == "unknown"
+
+    lines = [
+        "# n8n environment profile: questions still open",
+        "",
+        f"- **Taken:** {_cell(profile['created_at'])}",
+        f"- **Reason:** {run['reason']}",
+        f"- **Reference:** {_cell(run['reference']) or 'none'}",
+        "",
+        "## 1. Could be measured",
+        "",
+        "Facts the tool measures by itself when it can. Each says why it could not this time.",
+        "",
+    ]
+    measurable = [fact_id for fact_id in FACT_IDS if fact_id not in questions.OPERATOR_BY_ID and is_open(fact_id)]
+    for fact_id in measurable:
+        detail = _cell(facts[fact_id]["detail"]) if fact_id in facts else ""
+        lines.append(f"- **{questions.sentence(fact_id)}** (`{fact_id}`)" + (f": {detail}" if detail else ""))
+    if not measurable:
+        lines.append("Nothing is open here.")
+
+    lines += [
+        "",
+        "## 2. Ask whoever runs the platform",
+        "",
+        "Closed questions no probe can answer. The tool can store each answer as a declared fact.",
+        "",
+    ]
+    asked = [question for question in questions.OPERATOR if is_open(question["id"])]
+    lines += [questions.line(question) for question in asked]
+    if not asked:
+        lines.append("Nothing is open here.")
+
+    lines += [
+        "",
+        "## 3. Ask in conversation",
+        "",
+        "Never asked or stored by the tool. Record the answers where you keep your own notes.",
+        "",
+    ]
+    lines += [f"- **{question}** {why}" for question, why in questions.CONVERSATION]
+
+    withheld = [_cell(fact["id"]) for fact in profile["facts"] if fact["provenance"] == "withheld"]
+    if withheld:
+        lines += ["", "Withheld by the sender, not questions to press on: " + ", ".join(withheld) + "."]
     lines.append("")
     return "\n".join(lines)

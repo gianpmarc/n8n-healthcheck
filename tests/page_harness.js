@@ -6,7 +6,8 @@
 // cannot parse HTML at all, so a change that sends text through an HTML parser fails here.
 //
 // Input (stdin, JSON): { app: path of app.js, index: path of index.html, scenario: "async (page, input) => ...",
-//                        input: any, withoutRawJSON: boolean }
+//                        input: any, withoutRawJSON: boolean, meta: what GET /api/meta answers (the server's own),
+//                        noClipboard: boolean (the browser refuses to copy) }
 // Output (stdout, JSON): what the scenario returned.
 "use strict";
 
@@ -94,15 +95,18 @@ for (const [, id] of fs.readFileSync(request.index, "utf8").matchAll(/<[^>]*\bid
 for (const id of ["f-url", "f-env", "f-postgres", "f-redis", "f-kube-ns", "f-kube-ctx"]) new Element("fieldset").append(document.getElementById(id));
 
 const saved = []; // Blobs handed to URL.createObjectURL: the downloads
+const copied = []; // texts handed to the clipboard
 let answerRun = null; // resolves or rejects the page's pending POST /api/run
 const response = (status, text) => ({ ok: status === 200, status, text: async () => text, json: async () => JSON.parse(text) });
 const context = vm.createContext({
   document,
   window: { scrollTo() {}, print() {} },
   CSS: { supports: () => true },
+  // Without a clipboard the page falls back to document.execCommand, which this document does not have either.
+  navigator: request.noClipboard ? {} : { clipboard: { async writeText(text) { copied.push(text); } } },
   URL: { createObjectURL(blob) { saved.push(blob); return "blob:saved"; }, revokeObjectURL() {} },
   fetch(url) {
-    if (url === "/api/meta") return Promise.resolve(response(200, JSON.stringify({ version: "test", sources: [] })));
+    if (url === "/api/meta") return Promise.resolve(response(200, JSON.stringify({ version: "test", sources: [], ...request.meta })));
     if (url !== "/api/run") throw new Error(`the page asked for ${url}`);
     return new Promise((resolve, reject) => { answerRun = { resolve, reject }; });
   },
@@ -151,6 +155,21 @@ const page = {
     return boxes;
   },
   toggle(box) { box.checked = !box.checked; dispatch(box, "change"); },
+  /** The controls of "A few questions": { fact id: { value: input } }; "" is the "No answer" radio button. */
+  questions() {
+    const groups = {};
+    for (const node of walk(document.getElementById("questions-list"))) {
+      if (node.tagName === "input") (groups[node.dataset.question] = groups[node.dataset.question] || {})[node.value] = node;
+    }
+    return groups;
+  },
+  /** Select a radio button, as a browser does: the others of its group are cleared. */
+  choose(radio) {
+    for (const node of walk(document.getElementById("questions-list"))) if (node.attributes.name === radio.attributes.name) node.checked = false;
+    radio.checked = true;
+    dispatch(radio, "change");
+  },
+  copied,
   button(text) {
     const found = walk(document.getElementById("share-body")).filter((node) => node.tagName === "button" && node.textContent === text);
     if (found.length !== 1) throw new Error(`${found.length} buttons named ${text}`);

@@ -314,10 +314,17 @@ KUBE_FACTS = [
     "n8n.image_official", "orchestrator",
 ]  # fmt: skip
 
+# Added in 0.3.0: no probe fills these, only an answer does (tests/test_questions.py).
+DECLARED_FACTS = [
+    "hosting.model", "hosting.cloud_provider", "install.method", "n8n.image_modified", "proxy.kind",
+    "proxy.tls_termination", "proxy.sticky_sessions", "database.service", "database.high_availability",
+    "database.backups", "queue.redis_topology", "secrets.source", "worker.autoscaling", "observability.tools",
+]  # fmt: skip
+
 
 class CatalogueTest(unittest.TestCase):
     def test_every_table_in_this_file_covers_the_catalogue(self):
-        covered = {row[0] for row in ENV_FACTS + SECTION_FACTS} | set(KUBE_FACTS)
+        covered = {row[0] for row in ENV_FACTS + SECTION_FACTS} | set(KUBE_FACTS) | set(DECLARED_FACTS)
         self.assertEqual(covered | {"n8n.version", "metrics.enabled"}, set(profile.FACT_IDS))
 
     def test_full_catalogue_in_order_whatever_was_collected(self):
@@ -340,8 +347,10 @@ class CatalogueTest(unittest.TestCase):
 
     def test_every_fact_id_is_documented(self):
         with open(DOCS, encoding="utf-8") as handle:
-            catalogue = handle.read().split("### Catalogue, version 1")[1].split("\nValue shapes:")[0]
-        documented = set(re.findall(r"^\| `([a-z0-9_.]+)` \|", catalogue, re.MULTILINE))
+            text = handle.read()
+        catalogue = text.split("### Catalogue, version 1")[1].split("\nValue shapes:")[0]
+        added = text.split("### Added in tool version 0.3.0")[1].split("\nThese ids")[0]
+        documented = set(re.findall(r"^\| `([a-z0-9_.]+)` \|", catalogue + added, re.MULTILINE))
         self.assertEqual(documented, set(profile.FACT_IDS))
 
 

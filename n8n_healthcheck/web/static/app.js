@@ -114,6 +114,8 @@
   let timer = null;
   let report = null; // last 200 response of POST /api/run, plus finishedAt
   const withheld = new Set(); // ids the reader chose to withhold from the profile of this run
+  const answers = new Map(); // fact id -> the answer chosen in "A few questions": a value, or a list of values
+  const asked = new Map(); // fact id -> { inputs, note } of the question on screen
   const filters = { severity: "all", area: "all" };
 
   function announce(text) {
@@ -456,7 +458,10 @@
 
     resetShare();
     $("share-block").hidden = !data.profile;
-    if (data.profile) renderShare();
+    if (data.profile) {
+      renderQuestions();
+      renderShare();
+    }
 
     const counts = SEVERITIES.map((severity) => findings.filter((f) => f.severity === severity).length);
     announce(status.kind === "error"
@@ -804,6 +809,94 @@
     }
     return String(value);
   }
+
+  // What an answered fact is given besides its value (profile.apply_answers).
+  const DECLARED_FACT = { provenance: "declared", source: null, detail: "" };
+
+  /**
+   * The value an answer is stored as, or undefined when it is no answer. Same rules as
+   * profile.check_answers. `answer` is one value, or a list of values for a "multi"
+   * question; what is stored is taken from the question's own list, never from `answer`.
+   */
+  function answerValue(question, answer) {
+    const allowed = question.values.map((item) => item.value);
+    if (question.kind === "multi") {
+      const chosen = allowed.filter((value) => Array.isArray(answer) && answer.includes(value));
+      // Every item is a value of the list, once; "none" stands alone.
+      if (!chosen.length || chosen.length !== answer.length || (chosen.includes("none") && chosen.length > 1)) return undefined;
+      return Object.fromEntries(chosen.map((value) => [value, true]));
+    }
+    const value = allowed.find((item) => item === answer);
+    return question.kind === "yes_no" && value !== undefined ? value === "yes" : value;
+  }
+
+  /** `profile` with the answers as declared facts. Same result as profile.apply_answers: only an unknown fact takes one. */
+  function declareAnswers(profile, questions, answers) {
+    return {
+      ...profile,
+      facts: profile.facts.map((fact) => {
+        const question = fact.provenance === "unknown" ? questions.find((item) => item.id === fact.id) : undefined;
+        const value = question && answers.has(fact.id) ? answerValue(question, answers.get(fact.id)) : undefined;
+        return value === undefined ? fact : { ...fact, value, ...DECLARED_FACT };
+      }),
+    };
+  }
+
+  // The question sheet of a profile, as profile.render_questions writes it. The questions
+  // themselves come from GET /api/meta; only the sheet's own fixed text is written here.
+  const SHEET = {
+    title: "n8n environment profile: questions still open",
+    parts: [
+      ["1. Could be measured", "Facts the tool measures by itself when it can. Each says why it could not this time."],
+      ["2. Ask whoever runs the platform", "Closed questions no probe can answer. The tool can store each answer as a declared fact."],
+      ["3. Ask in conversation", "Never asked or stored by the tool. Record the answers where you keep your own notes."],
+    ],
+    none: "Nothing is open here.",
+    leftOut: "Withheld by the sender, not questions to press on: ",
+  };
+
+  /** Text of a file made harmless inside Markdown, as profile._cell does. */
+  const cell = (text) => String(text).replace(/\p{C}/gu, " ").split(/\s+/).filter(Boolean).join(" ").replace(/[\\`|<>[\]]/g, "\\$&");
+
+  /**
+   * What a profile leaves open, by who can answer it. A fact the file does not hold counts
+   * as unknown; of two entries with one id the first counts. `catalogue` is the "questions"
+   * of GET /api/meta.
+   */
+  function sheetOf(profile, catalogue) {
+    const facts = new Map();
+    for (const fact of profile.facts) if (!facts.has(fact.id)) facts.set(fact.id, fact);
+    const open = (item) => !facts.has(item.id) || facts.get(item.id).provenance === "unknown";
+    return {
+      measured: catalogue.measured.filter(open).map((item) => ({ ...item, detail: facts.has(item.id) ? facts.get(item.id).detail : "" })),
+      operator: catalogue.operator.filter(open),
+      conversation: catalogue.conversation,
+      leftOut: profile.facts.filter((fact) => fact.provenance === "withheld").map((fact) => fact.id),
+    };
+  }
+
+  /** The sheet as Markdown: the text `--show-questions` prints for the same file. */
+  function sheetMarkdown(profile, catalogue) {
+    const sheet = sheetOf(profile, catalogue);
+    const allowed = (item) => (item.kind === "yes_no"
+      ? "`yes` or `no`"
+      : (item.kind === "multi" ? "one or more of " : "one of ") + item.values.map((entry) => `\`${entry.value}\` (${entry.label})`).join(", "));
+    const items = [
+      sheet.measured.map((item) => `- **${item.question}** (\`${item.id}\`)${cell(item.detail) ? `: ${cell(item.detail)}` : ""}`),
+      sheet.operator.map((item) => `- **${item.question}** (\`${item.id}\`): ${allowed(item)}`),
+      sheet.conversation.map((item) => `- **${item.question}** ${item.why}`),
+    ];
+    const lines = [
+      `# ${SHEET.title}`,
+      "",
+      `- **Taken:** ${cell(profile.created_at)}`,
+      `- **Reason:** ${profile.run.reason}`,
+      `- **Reference:** ${cell(profile.run.reference) || "none"}`,
+    ];
+    SHEET.parts.forEach(([title, intro], index) => lines.push("", `## ${title}`, "", intro, "", ...(items[index].length ? items[index] : [SHEET.none])));
+    if (sheet.leftOut.length) lines.push("", `${SHEET.leftOut}${sheet.leftOut.map(cell).join(", ")}.`);
+    return `${lines.join("\n")}\n`;
+  }
   // profile-core:end
 
   const stateTag = (state) => el("span", { class: `tag tag--${state === "withheld" ? "withheld" : state === "unknown" ? "partial" : "reason"}` }, state);
@@ -931,13 +1024,53 @@
 
   // Share step (under the report).
 
+  /** The operator questions of GET /api/meta; none when the server did not send them. */
+  const operatorQuestions = () => (meta && meta.questions ? meta.questions.operator : []);
+
+  /** Answers first, then withholding: the order of the command line, so a declared fact can be withheld too. */
   function currentProfile() {
-    return withholdEntries(report.profile, withheld, $("f-reason").value, $("f-reference").value);
+    return withholdEntries(declareAnswers(report.profile, operatorQuestions(), answers), withheld, $("f-reason").value, $("f-reference").value);
+  }
+
+  /**
+   * "A few questions": one group of controls for each operator question whose fact came
+   * back unknown. A fact the tool measured is not asked about. Nothing is selected as an
+   * answer at the start, and a control holds only values of the list the server sent.
+   */
+  function renderQuestions() {
+    asked.clear();
+    const open = operatorQuestions().filter((question) => report.profile.facts.some((fact) => fact.id === question.id && fact.provenance === "unknown"));
+    $("questions-block").hidden = operatorQuestions().length === 0;
+    $("questions-empty").hidden = open.length > 0;
+    $("questions-list").replaceChildren(...open.map((question, index) => {
+      const multi = question.kind === "multi";
+      const inputs = [];
+      const option = (value, label, number) => {
+        const input = el("input", {
+          type: multi ? "checkbox" : "radio", name: `q-${index}`, id: `q-${index}-${number}`, value, "data-question": question.id, checked: !multi && value === "",
+        });
+        inputs.push(input);
+        return el("label", { class: `choice${value === "" ? " choice--none" : ""}` }, input, el("span", null, label));
+      };
+      const note = el("p", { class: "question__note", hidden: true }, "You withheld this fact below, so this answer is not written to the file.");
+      asked.set(question.id, { inputs, note });
+      return el("fieldset", { class: "question" },
+        el("legend", null,
+          el("span", { class: "question__text" }, question.question),
+          " ",
+          el("span", { class: "question__id", translate: "no" }, question.id),
+          multi ? el("span", { class: "question__kind" }, "Tick every one that applies") : null),
+        el("div", { class: "choices" },
+          multi ? null : option("", "No answer", 0),
+          ...question.values.map((item, number) => option(item.value, item.label, number + 1))),
+        note);
+    }));
   }
 
   /** A new run is a new profile: no choice, reason or reference of the run before carries over to it. */
   function resetShare() {
     withheld.clear();
+    answers.clear();
     $("f-reason").value = Object.keys(PROFILE_REASONS)[0];
     $("f-reference").value = "";
     checkReference();
@@ -952,7 +1085,9 @@
     if (focused && $(focused)) $(focused).focus({ preventScroll: true });
     const facts = profile.facts.filter((fact) => fact.provenance === "withheld").length;
     const settings = profile.settings.filter((setting) => setting.state === "withheld").length;
-    $("share-summary").textContent = `Withheld: ${facts} of ${plural(profile.facts.length, "fact")}, ${settings} of ${plural(profile.settings.length, "setting")}, check outcome ${profile.check.withheld === true ? "withheld" : "included"}.`;
+    for (const [id, question] of asked) question.note.hidden = !(answers.has(id) && withheld.has(id));
+    const answered = asked.size ? `Answered: ${answers.size} of ${plural(asked.size, "question")}. ` : "";
+    $("share-summary").textContent = `${answered}Withheld: ${facts} of ${plural(profile.facts.length, "fact")}, ${settings} of ${plural(profile.settings.length, "setting")}, check outcome ${profile.check.withheld === true ? "withheld" : "included"}.`;
   }
 
   /** Show the state of the reference field; return true when it can be stored. */
@@ -1007,9 +1142,66 @@
       return;
     }
     $("profile-meta").textContent = `${file.name} · read in this browser, not uploaded`;
-    $("profile-body").replaceChildren(...profileSections(data, false));
+    $("profile-body").replaceChildren(...profileSections(data, false), sheetSection(data));
     showView("profile");
     announce("Profile opened.");
+  }
+
+  /**
+   * "Questions still open" for an opened profile: what it leaves unknown, and a button that
+   * copies the sheet as Markdown. Made in this browser from the file and the questions of
+   * GET /api/meta; every string of the file is inserted as text.
+   */
+  function sheetSection(profile) {
+    const title = el("h3", null, "Questions still open");
+    const catalogue = meta && meta.questions;
+    if (!catalogue) {
+      return el("section", { class: "block" }, title,
+        el("p", { class: "block__note" }, "The list of questions did not load from the server, so the sheet cannot be made. Check that “n8n-healthcheck serve” is still running, reload the page and open the file again."));
+    }
+    const sheet = sheetOf(profile, catalogue);
+    const text = sheetMarkdown(profile, catalogue);
+    const status = el("p", { class: "action-status", role: "status", "aria-live": "polite" });
+    // Shown only when the browser refuses the clipboard: the same text, to copy by hand.
+    const byHand = el("textarea", { class: "sheet__text", id: "sheet-text", rows: "10", readonly: true, hidden: true, "aria-label": "The question sheet as Markdown" });
+    const button = el("button", { type: "button", class: "btn", id: "sheet-copy" }, "Copy as Markdown");
+    button.addEventListener("click", async () => {
+      const copied = await copyText(text, button);
+      byHand.hidden = copied;
+      if (!copied) {
+        byHand.value = text;
+        byHand.focus();
+        byHand.select();
+      }
+      status.textContent = copied
+        ? "Question sheet copied to the clipboard as Markdown."
+        : "The browser did not allow copying. The sheet is in the box below: copy it from there.";
+    });
+
+    const values = (item) => (item.kind === "yes_no"
+      ? "Yes or no."
+      : `${item.kind === "multi" ? "One or more of" : "One of"}: ${item.values.map((entry) => entry.label).join("; ")}.`);  // a label may hold a comma
+    const rows = [
+      sheet.measured.map((item) => el("li", null,
+        el("strong", null, item.question), " ", el("code", { translate: "no" }, item.id),
+        item.detail ? el("p", { class: "pdetail" }, item.detail) : null)),
+      sheet.operator.map((item) => el("li", null,
+        el("strong", null, item.question), " ", el("code", { translate: "no" }, item.id),
+        el("p", { class: "pdetail" }, values(item)))),
+      sheet.conversation.map((item) => el("li", null, el("strong", null, item.question), el("p", { class: "pdetail" }, item.why))),
+    ];
+    return el("section", { class: "block" }, title,
+      el("p", { class: "block__note" }, rows[0].length + rows[1].length
+        ? "What this profile leaves unknown, by who can answer it, ready for a call. “Copy as Markdown” copies this sheet with the profile's date, reason and reference at its top."
+        : "This profile leaves nothing unknown that the tool asks about. The questions for a conversation are always listed. “Copy as Markdown” copies this sheet with the profile's date, reason and reference at its top."),
+      el("div", { class: "sheet__actions" }, button),
+      status,
+      byHand,
+      ...SHEET.parts.map(([name, intro], index) => el("section", { class: "ppart" },
+        el("h4", null, `${name} (${rows[index].length})`),
+        el("p", { class: "block__note" }, intro),
+        rows[index].length ? el("ul", { class: "sheet" }, ...rows[index]) : el("p", { class: "block__note sheet__none" }, SHEET.none))),
+      sheet.leftOut.length ? el("p", { class: "block__note sheet__left-out" }, `${SHEET.leftOut}${sheet.leftOut.join(", ")}.`) : null);
   }
 
   for (const [value, label] of Object.entries(PROFILE_REASONS)) $("f-reason").append(el("option", { value }, label));
@@ -1018,6 +1210,23 @@
   $("share-form").addEventListener("submit", (event) => {
     event.preventDefault();
     downloadProfile();
+  });
+  $("questions-list").addEventListener("change", (event) => {
+    const input = event.target;
+    const id = input.dataset.question;
+    if (!id) return;
+    if (input.type === "radio") {
+      if (input.value) answers.set(id, input.value);
+      else answers.delete(id);
+    } else {
+      // "none" cannot be combined with another value: ticking either side unticks the other.
+      const boxes = asked.get(id).inputs;
+      if (input.checked) for (const box of boxes) if (box !== input && (input.value === "none" || box.value === "none")) box.checked = false;
+      const chosen = boxes.filter((box) => box.checked).map((box) => box.value);
+      if (chosen.length) answers.set(id, chosen);
+      else answers.delete(id);
+    }
+    renderShare();
   });
   $("share-body").addEventListener("change", (event) => {
     const key = event.target.dataset.withhold;
@@ -1064,21 +1273,27 @@
     $(statusId).textContent = `Download started: ${filename}`;
   }
 
-  async function copyMarkdown() {
-    let copied = false;
+  /** Put `text` on the clipboard; false when the browser did not allow it. `button` is the control that asked. */
+  async function copyText(text, button) {
     try {
-      await navigator.clipboard.writeText(report.markdown || "");
-      copied = true;
+      await navigator.clipboard.writeText(text);
+      return true;
     } catch {
       // Older browsers, or the clipboard permission was refused.
       const area = el("textarea", { class: "sr-only", readonly: true, "aria-hidden": "true", tabindex: "-1" });
-      area.value = report.markdown || "";
+      area.value = text;
       document.body.append(area);
       area.select();
+      let copied = false;
       try { copied = document.execCommand("copy"); } catch { copied = false; }
       area.remove();
-      $("act-copy").focus();
+      button.focus();
+      return copied;
     }
+  }
+
+  async function copyMarkdown() {
+    const copied = await copyText(report.markdown || "", $("act-copy"));
     $("action-status").textContent = copied
       ? "Markdown report copied to the clipboard."
       : "The browser did not allow copying. Use “Download Markdown” instead.";

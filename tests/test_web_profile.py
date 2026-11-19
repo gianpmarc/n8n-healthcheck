@@ -29,7 +29,7 @@ import sys
 import unittest
 from unittest import mock
 
-from n8n_healthcheck import cli, profile, report
+from n8n_healthcheck import cli, profile, questions, report
 from n8n_healthcheck.models import Finding, Snapshot
 from n8n_healthcheck.web import server as web
 
@@ -47,9 +47,10 @@ EXACT = bool(NODE) and subprocess.run(
 NO_NODE = (
     "Node.js is not installed, so the page's own code was NOT run. Unchecked on this machine: that the page "
     "refuses every file profile.validate refuses and no other; that the file it saves is the one profile.py "
-    "writes; that its controls do what they say (withhold, withhold all, download, open, a new run). Checked "
-    "as text all the same (PageSourceTest): the constants, the lines that blank an entry, the reference rules, "
-    "the lines that wire the controls."
+    "writes, with answers and without; that the question sheet it copies is the one profile.render_questions "
+    "prints; that its controls do what they say (answer, withhold, withhold all, download, open, copy, a new "
+    "run). Checked as text all the same (PageSourceTest): the constants, the lines that blank an entry, the "
+    "reference rules, the lines that wire the controls."
 )
 needs_exact = unittest.skipUnless(
     EXACT,
@@ -109,6 +110,58 @@ REFERENCES = [
 
 def built():
     return profile.build_profile(SNAPSHOT, [FINDING], ("postgres",))
+
+
+# The catalogue as GET /api/meta serves it: all the page knows of the questions.
+CATALOGUE = web.meta()["questions"]
+MULTI = "observability.tools"
+# An answer to every operator question, in the shape profile.apply_answers takes.
+EVERY_ANSWER = {
+    q["id"]: [v for v, _ in q["values"]][2::-1] if q["kind"] == "multi" else q["values"][-1][0] for q in questions.OPERATOR
+}
+
+
+def bare():
+    """A profile of a run that was given an env file and nothing else: nearly every fact is unknown."""
+    return profile.build_profile(Snapshot(env={"EXECUTIONS_MODE": "queue"}), [], ())
+
+
+def sheet_files():
+    """(label, profile): the files the page's question sheet is compared with profile.render_questions on."""
+    answered = profile.apply_answers(bare(), EVERY_ANSWER)[0]
+    nothing_open = copy.deepcopy(answered)
+    for fact in nothing_open["facts"]:
+        if fact["provenance"] == "unknown":
+            fact.update(value=1, provenance="measured", source="env")
+    withheld = profile.apply_withholding(answered, ["n8n.version", "hosting.model", MULTI, "executions.mode"])
+    older = bare()
+    older["tool_version"] = "0.2.0"
+    older["facts"] = [fact for fact in older["facts"] if fact["id"] in profile.FORMAT_1_FACT_IDS]
+    text = "a|b <b>bold</b> [link](x) `code` back\\slash *star* _under_ # <script>alert(1)</script>"
+    hostile = bare()
+    hostile["created_at"] = text
+    hostile["run"]["reference"] = text
+    hostile["facts"][0]["detail"] = text
+    hostile["facts"][3] = {**hostile["facts"][3], "provenance": "unknown", "value": None, "detail": " \ttab\nline\x00nul\x1f\x7f \u00a0\u2028\u200b\ufeff\u3000 wide \U0001F600 "}
+    hostile["facts"][4]["detail"] = " \n\u200b "  # nothing is left of it: no colon after the id
+    hostile["facts"].append({"id": text, "value": None, "provenance": "withheld", "source": None, "detail": ""})
+    hostile["facts"].append({"id": "x\n|y", "value": None, "provenance": "withheld", "source": None, "detail": ""})
+    hostile["facts"].append({"id": text + "2", "value": None, "provenance": "unknown", "source": None, "detail": text})  # no question: not on the sheet
+    # Two entries with one id: the first counts, whichever it is.
+    hostile["facts"].append({"id": "hosting.model", "value": "hybrid", "provenance": "declared", "source": None, "detail": ""})
+    hostile["facts"].insert(0, {"id": "proxy.kind", "value": "nginx", "provenance": "declared", "source": None, "detail": ""})
+    files = [
+        ("nothing answered", bare()),
+        ("everything answered", answered),
+        ("nothing open", nothing_open),
+        ("withheld facts", withheld),
+        ("written by 0.2.0", older),
+        ("Markdown and HTML in its text", hostile),
+        ("measured by every source", built()),
+    ]
+    for _, data in files:
+        profile.validate(data)
+    return files
 
 
 def js_constant(name):
@@ -202,7 +255,7 @@ class PageSourceTest(unittest.TestCase):
 
     def test_download_saves_the_blanked_profile_and_nothing_else(self):
         self.assertIn(
-            'return withholdEntries(report.profile, withheld, $("f-reason").value, $("f-reference").value);',
+            'return withholdEntries(declareAnswers(report.profile, operatorQuestions(), answers), withheld, $("f-reason").value, $("f-reference").value);',
             js_function("currentProfile"),
         )
         body = js_function("downloadProfile")
@@ -235,13 +288,15 @@ class PageSourceTest(unittest.TestCase):
         body = js_function("resetShare")
         for line in (
             "withheld.clear();",
+            "answers.clear();",
             '$("f-reason").value = Object.keys(PROFILE_REASONS)[0];',
             '$("f-reference").value = "";',
         ):
             self.assertIn(line, body)
         self.assertEqual(next(iter(js_constant("PROFILE_REASONS"))), "baseline")
         report_body = js_function("renderReport")
-        self.assertLess(report_body.index("resetShare();"), report_body.index("renderShare();"))
+        self.assertLess(report_body.index("resetShare();"), report_body.index("renderQuestions();"))
+        self.assertLess(report_body.index("renderQuestions();"), report_body.index("renderShare();"))
         self.assertEqual(APP_JS.count("report = {"), 1)  # one place receives a run, and it renders the report
         self.assertRegex(js_function("submit"), r"report = \{ \.\.\.data, finishedAt: new Date\(\) \};\n    renderReport\(\);")
 
@@ -268,6 +323,57 @@ class PageSourceTest(unittest.TestCase):
         # A run's error is written to the form, and the form is on screen when it is.
         failure = js_function("submit")
         self.assertLess(failure.index('if ($("view-form").hidden) showView("form");'), failure.index("showFormError(failure[0]"))
+
+    # --- questions: the page asks what the server lists and stores what profile.py stores
+
+    def test_an_answered_fact_is_left_with_what_apply_answers_leaves(self):
+        answered = profile.apply_answers(bare(), {"hosting.model": "hybrid"})[0]
+        fact = next(f for f in answered["facts"] if f["id"] == "hosting.model")
+        self.assertEqual(js_constant("DECLARED_FACT"), {k: v for k, v in fact.items() if k not in ("id", "value")})
+        body = js_function("declareAnswers")
+        for line in (
+            '        const question = fact.provenance === "unknown" ? questions.find((item) => item.id === fact.id) : undefined;',
+            "        const value = question && answers.has(fact.id) ? answerValue(question, answers.get(fact.id)) : undefined;",
+            "        return value === undefined ? fact : { ...fact, value, ...DECLARED_FACT };",
+        ):
+            self.assertIn(line + "\n", body)
+        self.assertEqual(APP_JS.count("declareAnswers("), 2)  # its definition, and the one profile the share step shows and saves
+        self.assertEqual(APP_JS.count('"declared"'), 4)  # the format's list, this constant, and twice where a known fact is shown or counted
+
+    def test_the_page_holds_no_copy_of_the_catalogue(self):
+        page = APP_JS + INDEX_HTML
+        for question in questions.OPERATOR:
+            self.assertNotIn(question["question"], page)
+            if question["id"] not in profile.FORMAT_1_FACT_IDS:
+                self.assertNotIn(question["id"], page)
+        for sentence in list(questions.MEASURED.values()) + [text for pair in questions.CONVERSATION for text in pair]:
+            self.assertNotIn(sentence, page)
+        for value, label in questions.OPERATOR_BY_ID[MULTI]["values"]:
+            if value != "none":  # the one value with a rule of its own
+                self.assertNotIn(f'"{value}"', page)
+            self.assertNotIn(f'"{label}"', page)
+        self.assertEqual(APP_JS.count("meta.questions"), 3)  # the share step's questions, and the viewer's sheet
+
+    def test_the_sheets_fixed_text_is_the_one_render_questions_prints(self):
+        block = re.search(r"const SHEET = \{\n(.*?)\n  \};", APP_JS, re.S).group(1)
+        texts = [json.loads(text) for text in re.findall(r'"(?:[^"\\]|\\.)*"', block)]
+        self.assertEqual(len(texts), 9)
+        printed = profile.render_questions(dict(sheet_files())["nothing open"]) + profile.render_questions(dict(sheet_files())["withheld facts"])
+        for text in texts:
+            self.assertIn(text, printed)
+
+    def test_a_question_is_a_labelled_group_with_nothing_chosen(self):
+        body = js_function("renderQuestions")
+        self.assertIn('return el("fieldset", { class: "question" },\n        el("legend", null,', body)
+        self.assertIn('type: multi ? "checkbox" : "radio"', body)
+        self.assertIn('checked: !multi && value === "",', body)  # only "No answer" starts selected
+        self.assertIn('multi ? null : option("", "No answer", 0),', body)
+        self.assertIn("...question.values.map((item, number) => option(item.value, item.label, number + 1))", body)
+        self.assertIn('report.profile.facts.some((fact) => fact.id === question.id && fact.provenance === "unknown")', body)
+        for other_control in ('"select"', '"option"', '"text"', "textarea"):
+            self.assertNotIn(other_control, body)
+        self.assertIn('id="questions-block" aria-labelledby="questions-title" hidden>', INDEX_HTML)
+        self.assertLess(INDEX_HTML.index('id="questions-list"'), INDEX_HTML.index('id="share-body"'))
 
     # --- text of a file or of the server is only ever text --------------------------
 
@@ -351,6 +457,12 @@ def response_text(built_profile):
 
 # What the page does from the answer of a run to the text of the downloaded file.
 SAVED = "profileText(withholdEntries(parseExact(input.response).profile, new Set(input.ids), input.reason, input.reference))"
+
+
+SAVED_ANSWERED = (
+    "profileText(withholdEntries(declareAnswers(parseExact(input.response).profile, input.questions,"
+    " new Map(Object.entries(input.answers))), new Set(input.ids), input.reason, input.reference))"
+)
 
 
 def mutated_files():
@@ -496,6 +608,87 @@ class PageCodeTest(unittest.TestCase):
                 expected[0], expected[7], expected[9] = "a (b: 1), c: 2.5, d: 3", "0", "1152921504606847000"
             self.assertEqual(shown, expected, f"JSON.rawJSON: {raw}")
 
+    def test_the_saved_file_with_answers_is_the_one_profile_py_writes(self):
+        # A choice, both yes/no values, a multi ticked out of order, and an answer to a fact that was measured.
+        answers = {"hosting.model": "private_cloud", "worker.autoscaling": "no", "n8n.image_modified": "yes", MULTI: ["splunk", "prometheus"], "orchestrator": "nomad"}
+        base = profile.build_profile(PLAIN, [FINDING], ("postgres",))  # no number an older browser spells differently
+        declared, dropped = profile.apply_answers(base, answers)
+        self.assertEqual(dropped, ["orchestrator"])
+        for raw in PATHS:
+            for ids in ([], ["worker.autoscaling", MULTI, "n8n.version", "check"]):
+                saved = run_page_code(SAVED_ANSWERED, raw=raw, response=response_text(base), ids=ids, reason="incident", reference=" x ", answers=answers, questions=CATALOGUE["operator"])
+                expected = profile.apply_withholding(declared, ids)
+                expected["run"] = {"reason": "incident", "reference": "x"}
+                with self.subTest(rawJSON=raw, withheld=ids):
+                    self.assertEqual(profile.validate(json.loads(saved)), expected)
+                    if raw:
+                        self.assertEqual(saved, profile.to_json(expected))
+                    self.assertIn('"value": "kubernetes"', saved)  # measured wins
+                    self.assertNotIn("nomad", saved)
+                    self.assertEqual('"splunk": true' in saved, not ids)
+        facts = {f["id"]: f for f in declared["facts"]}
+        self.assertIs(facts["worker.autoscaling"]["value"], False)
+        self.assertEqual(list(facts[MULTI]["value"].items()), [("prometheus", True), ("splunk", True)])  # catalogue order
+
+    def test_every_question_answered_is_the_file_profile_py_writes(self):
+        base = bare()
+        saved = run_page_code(SAVED_ANSWERED, raw=PATHS[0], response=response_text(base), ids=[], reason="baseline", reference="", answers=EVERY_ANSWER, questions=CATALOGUE["operator"])
+        expected, dropped = profile.apply_answers(base, EVERY_ANSWER)
+        self.assertEqual(dropped, [])
+        self.assertEqual(profile.validate(json.loads(saved)), expected)
+        self.assertEqual(sum(f["provenance"] == "declared" for f in expected["facts"]), 15)
+        if PATHS[0]:
+            self.assertEqual(saved, profile.to_json(expected))
+
+    def test_an_answer_is_stored_or_refused_as_check_answers_does(self):
+        cases = [
+            ("hosting.model", "hybrid"), ("hosting.model", "nope"), ("hosting.model", ""), ("hosting.model", ["hybrid"]),
+            ("hosting.model", "Hybrid"), ("hosting.model", True), ("hosting.model", None), ("hosting.model", {"hybrid": True}),
+            ("worker.autoscaling", "yes"), ("worker.autoscaling", "no"), ("worker.autoscaling", True), ("worker.autoscaling", "true"),
+            (MULTI, ["none"]), (MULTI, ["none", "grafana"]), (MULTI, ["grafana", "none"]), (MULTI, []), (MULTI, "grafana"),
+            (MULTI, ["grafana", "grafana"]), (MULTI, ["splunk", "prometheus"]), (MULTI, ["bogus"]), (MULTI, ["grafana", "bogus"]),
+            (MULTI, ["grafana", True]), (MULTI, None), (MULTI, {"grafana": True}),
+            (MULTI, [v for v, _ in questions.OPERATOR_BY_ID[MULTI]["values"] if v != "none"]),
+        ]  # fmt: skip
+        got = run_page_code(
+            "input.cases.map(([id, answer]) => { const value = answerValue(input.questions.find((q) => q.id === id), answer);"
+            " return value === undefined ? null : JSON.stringify(value); })",
+            cases=cases, questions=CATALOGUE["operator"],
+        )  # fmt: skip
+        accepted = 0
+        for (fact_id, answer), stored in zip(cases, got):
+            try:
+                expected = json.dumps(profile.check_answers({fact_id: answer})[fact_id], separators=(",", ":"))
+                accepted += 1
+            except profile.ProfileError:
+                expected = None
+            with self.subTest(question=fact_id, answer=answer):
+                self.assertEqual(stored, expected)
+        self.assertEqual(accepted, 6)
+
+    def test_the_sheet_is_the_one_render_questions_prints(self):
+        files = sheet_files()
+        for raw in PATHS:
+            got = run_page_code(
+                "input.files.map((text) => sheetMarkdown(parseExact(text), input.catalogue))",
+                raw=raw, files=[profile.to_json(data) for _, data in files], catalogue=CATALOGUE,
+            )  # fmt: skip
+            for (label, data), sheet in zip(files, got):
+                with self.subTest(rawJSON=raw, file=label):
+                    self.assertEqual(sheet, profile.render_questions(data))
+        # The comparison covers every shape of the sheet.
+        printed = {label: profile.render_questions(data) for label, data in files}
+        self.assertEqual(printed["nothing open"].count("Nothing is open here."), 2)
+        self.assertEqual(printed["everything answered"].count("Nothing is open here."), 1)
+        self.assertNotIn("Withheld by the sender", printed["nothing answered"])
+        self.assertIn("Withheld by the sender, not questions to press on: n8n.version, executions.mode, hosting.model, observability.tools.", printed["withheld facts"])
+        older = dict(files)["written by 0.2.0"]
+        self.assertEqual(len(older["facts"]), 32)
+        unknown = sum(fact["provenance"] == "unknown" for fact in older["facts"])  # orchestrator among them
+        self.assertEqual(printed["written by 0.2.0"].count("\n- **"), 3 + unknown + 14 + 10)  # the header, and the 14 it never held
+        self.assertIn("\\<script\\>", printed["Markdown and HTML in its text"])
+        self.assertIn("(`executions.mode`): tab line nul wide", printed["Markdown and HTML in its text"])
+
     def test_everything_withheld_is_still_a_valid_profile(self):
         base = built()
         everything = [f["id"] for f in base["facts"]] + [profile.setting_id(s) for s in base["settings"]] + ["check"]
@@ -608,12 +801,15 @@ def run_response(snapshot=PLAIN):
 
 def run_page(scenario, raw=True, **data):
     """Load app.js in tests/page_harness.js and run `scenario`, an async JavaScript function of (page, input)."""
+    data = dict(data)
     request = {
         "app": str(web.STATIC_DIR / "app.js"),
         "index": str(web.STATIC_DIR / "index.html"),
         "scenario": scenario,
         "input": data,
         "withoutRawJSON": not raw,
+        "meta": {} if data.pop("no_questions", False) else {"questions": CATALOGUE},
+        "noClipboard": data.pop("no_clipboard", False),
     }
     done = subprocess.run(
         [NODE, HARNESS], input=json.dumps(request), capture_output=True, text=True, encoding="utf-8", timeout=120, env=NODE_ENV
@@ -667,7 +863,160 @@ class PageBehaviourTest(unittest.TestCase):
                 self.assert_saved(got["second"], profile.apply_withholding({**sent, "run": run}, WITHHELD[1:]), raw)
                 self.assertNotIn("2.40.1", got["first"])
                 self.assertEqual(got["status"], f"Download started: n8n-profile-{sent['created_at'][:10]}.json")
-                self.assertIn("1 of 32 facts, 2 of ", got["summary"])
+                self.assertIn("1 of 46 facts, 2 of ", got["summary"])
+
+    def test_answers_are_saved_as_profile_py_writes_them(self):
+        answers = {"hosting.model": "private_cloud", "worker.autoscaling": "no", "n8n.image_modified": "yes", MULTI: ["grafana", "prometheus"]}
+        response = run_response()
+        sent = json.loads(response)["profile"]
+        declared, dropped = profile.apply_answers(sent, answers)
+        self.assertEqual(dropped, [])
+        for raw in PATHS:
+            got = run_page(
+                """async (page, input) => {
+                  await page.run(input.response);
+                  const groups = page.questions();
+                  const seen = { block: page.visible("questions-block"), empty: page.visible("questions-empty"), ids: Object.keys(groups),
+                                 atStart: Object.values(groups).flatMap((group) => Object.values(group)).filter((input) => input.checked).map((input) => input.value),
+                                 types: Object.fromEntries(Object.entries(groups).map(([id, group]) => [id, [...new Set(Object.values(group).map((input) => input.type))].join()])),
+                                 values: Object.fromEntries(Object.entries(groups).map(([id, group]) => [id, Object.keys(group)])),
+                                 legends: page.walk(page.$("questions-list")).filter((node) => node.tagName === "legend").map((node) => node.textContent) };
+                  page.choose(groups["hosting.model"]["private_cloud"]);
+                  page.choose(groups["worker.autoscaling"]["no"]);
+                  page.choose(groups["n8n.image_modified"]["yes"]);
+                  page.choose(groups["proxy.kind"]["nginx"]);
+                  page.choose(groups["proxy.kind"][""]);  // back to "No answer"
+                  const tools = groups["observability.tools"];
+                  page.toggle(tools["none"]);
+                  page.toggle(tools["grafana"]);  // "none" gives way
+                  page.toggle(tools["prometheus"]);  // ticked after grafana, saved before it
+                  seen.noneGaveWay = !tools["none"].checked;
+                  seen.first = await page.download();
+                  seen.table = page.$("share-body").textContent;
+                  seen.summary = page.$("share-summary").textContent;
+                  seen.boxes = Object.keys(page.boxes()).length;
+                  const notes = () => page.walk(page.$("questions-list")).filter((node) => node.className === "question__note" && !node.hidden).length;
+                  seen.notesBefore = notes();
+                  page.toggle(page.boxes()["worker.autoscaling"]);  // an answer, then withheld
+                  page.toggle(page.boxes()["n8n.version"]);
+                  seen.notesAfter = notes();
+                  seen.second = await page.download();
+                  seen.tableAfter = page.$("share-body").textContent;
+                  page.toggle(tools["none"]);  // and the other way round
+                  seen.othersGaveWay = !tools["grafana"].checked && !tools["prometheus"].checked;
+                  seen.third = await page.download();
+                  page.toggle(tools["none"]);  // nothing ticked: no answer
+                  seen.fourth = await page.download();
+                  return seen;
+                }""",
+                raw=raw, response=response,
+            )  # fmt: skip
+            with self.subTest(rawJSON=raw):
+                # Kubernetes was read, so the orchestrator is measured and not asked about.
+                self.assertEqual((got["block"], got["empty"]), (True, False))
+                self.assertEqual(got["ids"], [q["id"] for q in questions.OPERATOR if q["id"] != "orchestrator"])
+                self.assertEqual(got["atStart"], [""] * 13)  # "No answer" of each radio group, and no checkbox
+                for question in questions.OPERATOR[:2] + questions.OPERATOR[3:]:
+                    multi = question["kind"] == "multi"
+                    self.assertEqual(got["types"][question["id"]], "checkbox" if multi else "radio")
+                    self.assertEqual(got["values"][question["id"]], ([] if multi else [""]) + [v for v, _ in question["values"]])
+                    self.assertTrue(any(legend.startswith(question["question"]) for legend in got["legends"]))
+                self.assertEqual(len(got["legends"]), 14)
+                self.assertTrue(got["noneGaveWay"] and got["othersGaveWay"])
+                self.assert_saved(got["first"], declared, raw)
+                self.assertIn("hosting.modelprivate_clouddeclared", got["table"])
+                self.assertIn("worker.autoscalingnodeclared", got["table"])
+                self.assertIn("observability.toolsprometheus: yes, grafana: yesdeclared", got["table"])
+                self.assertIn("proxy.kindunknownnot answered", got["table"])
+                self.assertIn("orchestratorkubernetesmeasured", got["table"])
+                self.assertIn("Answered: 4 of 14 questions. Withheld: 0 of 46 facts", got["summary"])
+                self.assertEqual(got["boxes"], len(all_ids(sent)))
+                self.assertEqual((got["notesBefore"], got["notesAfter"]), (0, 1))
+                self.assert_saved(got["second"], profile.apply_withholding(declared, ["worker.autoscaling", "n8n.version"]), raw)
+                self.assertIn("worker.autoscalingwithheld", got["tableAfter"])
+                only_none = profile.apply_answers(sent, {**answers, MULTI: ["none"]})[0]
+                self.assert_saved(got["third"], profile.apply_withholding(only_none, ["worker.autoscaling", "n8n.version"]), raw)
+                unanswered = profile.apply_answers(sent, {k: v for k, v in answers.items() if k != MULTI})[0]
+                self.assert_saved(got["fourth"], profile.apply_withholding(unanswered, ["worker.autoscaling", "n8n.version"]), raw)
+
+    def test_every_question_can_be_answered_and_a_measured_fact_is_not_asked(self):
+        without_kubernetes = dataclasses.replace(PLAIN, kubernetes=None)
+        response = run_response(without_kubernetes)
+        sent = json.loads(response)["profile"]
+        scenario = """async (page, input) => {
+          await page.run(input.response);
+          const groups = page.questions();
+          for (const [id, answer] of Object.entries(input.answers)) {
+            if (!groups[id]) continue;
+            if (Array.isArray(answer)) for (const value of answer) page.toggle(groups[id][value]);
+            else page.choose(groups[id][answer]);
+          }
+          return { block: page.visible("questions-block"), empty: page.visible("questions-empty"), asked: Object.keys(groups).length,
+                   summary: page.$("share-summary").textContent, saved: await page.download() };
+        }"""
+        got = run_page(scenario, raw=PATHS[0], response=response, answers=EVERY_ANSWER)
+        self.assertEqual((got["block"], got["empty"], got["asked"]), (True, False, 15))
+        self.assertIn("Answered: 15 of 15 questions.", got["summary"])
+        self.assert_saved(got["saved"], profile.apply_answers(sent, EVERY_ANSWER)[0], PATHS[0])
+        # Every one of them measured (no probe can, today): nothing is asked, and a line says so.
+        measured = copy.deepcopy(sent)
+        for fact in measured["facts"]:
+            if fact["id"] in questions.OPERATOR_BY_ID:
+                fact.update(value="x", provenance="measured", source="env", detail="")
+        got = run_page(scenario, raw=PATHS[0], response=json.dumps({**json.loads(response), "profile": measured}), answers=EVERY_ANSWER)
+        self.assertEqual((got["block"], got["empty"], got["asked"]), (True, True, 0))
+        self.assertTrue(got["summary"].startswith("Withheld: "))
+        self.assert_saved(got["saved"], measured, PATHS[0])
+        # A server that sends no questions (an older one behind a newer page): the section is not shown, the rest works.
+        got = run_page(scenario, raw=PATHS[0], response=response, answers=EVERY_ANSWER, no_questions=True)
+        self.assertEqual((got["block"], got["asked"]), (False, 0))
+        self.assert_saved(got["saved"], sent, PATHS[0])
+
+    def test_the_copied_sheet_is_the_one_show_questions_prints(self):
+        files = sheet_files()
+        scenario = """async (page, input) => {
+          const seen = [];
+          for (const text of input.files) {
+            const opened = await page.open(text);
+            const status = page.walk(page.$("profile-body")).filter((node) => node.getAttribute("role") === "status")[0];
+            page.$("sheet-copy").click();
+            await page.settle();
+            const box = page.$("sheet-text");
+            seen.push({ view: opened.view, shown: opened.shown, copied: page.copied.length, text: page.copied[page.copied.length - 1],
+                        status: status.textContent, boxShown: !box.hidden, box: box.value });
+            page.$("profile-close").click();
+          }
+          return seen;
+        }"""
+        for raw in PATHS:
+            got = run_page(scenario, raw=raw, files=[profile.to_json(data) for _, data in files])
+            for number, ((label, data), seen) in enumerate(zip(files, got), 1):
+                with self.subTest(rawJSON=raw, file=label):
+                    self.assertEqual((seen["view"], seen["copied"]), ("profile", number))
+                    self.assertEqual(seen["text"], profile.render_questions(data))
+                    self.assertEqual(seen["status"], "Question sheet copied to the clipboard as Markdown.")
+                    self.assertFalse(seen["boxShown"])
+                    # On the page: the same questions, the file's text as it is.
+                    self.assertIn("Questions still open", seen["shown"])
+                    facts = {}
+                    for fact in data["facts"]:
+                        facts.setdefault(fact["id"], fact)
+                    for question in CATALOGUE["measured"] + CATALOGUE["operator"]:
+                        is_open = question["id"] not in facts or facts[question["id"]]["provenance"] == "unknown"
+                        self.assertEqual(f"{question['question']} {question['id']}" in seen["shown"], is_open, question["id"])
+                    for question in CATALOGUE["conversation"]:
+                        self.assertIn(question["question"] + question["why"], seen["shown"])
+        # The browser refuses the clipboard: the same text is offered in a box, and a line says so.
+        label, data = files[-2]
+        got = run_page(scenario, raw=PATHS[0], files=[profile.to_json(data)], no_clipboard=True)[0]
+        self.assertEqual((got["copied"], got["boxShown"]), (0, True))
+        self.assertEqual(got["box"], profile.render_questions(data))
+        self.assertIn("did not allow copying", got["status"])
+        # Without the questions of the server there is no sheet, and the profile is shown all the same.
+        got = run_page("async (page, input) => (await page.open(input.file))", raw=PATHS[0], file=profile.to_json(data), no_questions=True)
+        self.assertEqual(got["view"], "profile")
+        self.assertIn("The list of questions did not load", got["shown"])
+        self.assertNotIn("Ask in conversation", got["shown"])
 
     def test_withhold_all_and_none_reach_every_entry(self):
         response = run_response()
@@ -686,7 +1035,7 @@ class PageBehaviourTest(unittest.TestCase):
         )  # fmt: skip
         facts = [f["id"] for f in sent["facts"]]
         settings = [profile.setting_id(s) for s in sent["settings"]]
-        self.assertEqual(len(facts), 32)
+        self.assertEqual(len(facts), 46)
         self.assertGreater(len(settings), 3)
         for name, ids in (
             ("Withhold all facts", facts),
@@ -724,9 +1073,12 @@ class PageBehaviourTest(unittest.TestCase):
                   for (const id of input.ids) page.toggle(page.boxes()[id]);
                   page.$("f-reason").value = "incident";
                   page.type("f-reference", "ticket of the first run");
+                  page.choose(page.questions()["hosting.model"]["hybrid"]);
+                  page.toggle(page.questions()["observability.tools"]["grafana"]);
                   page.$("act-again").click();
                   await page.run(input.second);
-                  return { ticked: Object.values(page.boxes()).filter((box) => box.checked).length, reason: page.$("f-reason").value,
+                  const chosen = Object.values(page.questions()).flatMap((group) => Object.values(group)).filter((input) => input.checked && input.value);
+                  return { ticked: Object.values(page.boxes()).filter((box) => box.checked).length + chosen.length, reason: page.$("f-reason").value,
                            reference: page.$("f-reference").value, saved: await page.download() };
                 }""",
                 raw=raw, first=first, second=second, ids=WITHHELD,
@@ -842,6 +1194,8 @@ class PageBehaviourTest(unittest.TestCase):
         hostile["tool_version"] = hostile["created_at"] = mark
         hostile["sources"][mark] = "failed"
         hostile["facts"].append({"id": mark + ".x", "value": {mark: {mark: mark}}, "provenance": "declared", "source": mark, "detail": mark})
+        hostile["facts"].append({"id": mark + ".y", "value": None, "provenance": "withheld", "source": None, "detail": ""})  # named on the sheet
+        hostile["facts"][0] = {"id": "n8n.version", "value": None, "provenance": "unknown", "source": None, "detail": mark}  # its detail too
         hostile["settings"].append({"scope": mark, "name": mark, "state": "value", "value": mark})
         hostile["check"] = {
             "partial": True,
@@ -859,15 +1213,19 @@ class PageBehaviourTest(unittest.TestCase):
             raw=PATHS[0], file=json.dumps(hostile), mark=mark,
         )  # fmt: skip
         self.assertEqual(got["view"], "profile")
-        self.assertGreater(got["shown"].count(mark), 15)  # it is all there, as text
+        self.assertGreater(got["shown"].count(mark), 17)  # it is all there, as text
+        self.assertIn(f"Which n8n version runs? n8n.version{mark}", got["shown"])
+        self.assertIn(f"not questions to press on: {mark}.y.", got["shown"])
         self.assertIn(mark, got["meta"])
         # No element is named by the file, and no attribute holds text of the file.
         self.assertEqual(
             set(got["tags"]) - {"a", "option"},  # made by the page at start-up and on a download, not from a file
-            {"section", "h3", "dl", "dt", "dd", "table", "thead", "tbody", "tr", "th", "td", "p", "span", "ul", "li", "wbr", "svg", "path"},
+            {"section", "h3", "dl", "dt", "dd", "table", "thead", "tbody", "tr", "th", "td", "p", "span", "ul", "li", "wbr", "svg", "path"}
+            | {"h4", "strong", "code", "div", "button", "textarea"},  # the question sheet and its copy button
         )
         self.assertEqual([entry for entry in got["attributes"] if "<" in entry or "alert" in entry], [])
-        self.assertLessEqual({entry.split("=")[0] for entry in got["attributes"]}, {"scope", "colspan", "translate", "viewBox", "aria-hidden", "focusable", "d", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-dasharray"})
+        self.assertLessEqual({entry.split("=")[0] for entry in got["attributes"]}, {"scope", "colspan", "translate", "viewBox", "aria-hidden", "focusable", "d", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-dasharray"}
+            | {"type", "id", "role", "aria-live", "rows", "readonly", "hidden", "aria-label"})  # of the sheet's own controls, fixed text
 
 
 if __name__ == "__main__":
