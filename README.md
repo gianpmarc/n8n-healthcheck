@@ -84,7 +84,9 @@ Withholding applies to the profile only. The report is a separate document and q
 
 After a run, the page shows a step under the report, "Share the environment profile". It lists every fact and every setting exactly as it will be written, each with a box to withhold it, plus one box for the check outcome, the reason and the reference. "Download profile" saves `n8n-profile-YYYY-MM-DD.json` on your computer; the page sends it nowhere. The same rule as on the command line applies: each row is its own entry, so withhold the fact, the setting and the check outcome separately if you want a datum gone.
 
-To read a profile someone sent you, use "Open a profile" on the start page. The file is read in the browser, not uploaded, and shown with its run details, sources, facts, settings and check outcome: the same content as `--show-profile`. A file that is not a profile, was written by a newer version, or is incomplete is refused with a message; nothing of it is shown.
+Above the tables the step asks "A few questions": the [profile questions](#profile-questions) the tool could not answer itself, as radio buttons and checkboxes. Every one is optional and starts on "No answer". An answer shows in the facts table as `declared` and can be withheld there like any fact; a fact the tool measured is not asked about. The downloaded file is the one `--answer` and `--withhold` write for the same choices.
+
+To read a profile someone sent you, use "Open a profile" on the start page. The file is read in the browser, not uploaded, and shown with its run details, sources, facts, settings and check outcome: the same content as `--show-profile`. Under them, "Questions still open" lists what the profile leaves unknown, and "Copy as Markdown" copies that sheet: the same text as `--show-questions`. A file that is not a profile, was written by a newer version, or is incomplete is refused with a message; nothing of it is shown.
 
 `--save-profile` needs a live run: it cannot be combined with `--snapshot`. The exit code is the one of the health check, with or without a profile. The file format is described in [docs/profile-format.md](docs/profile-format.md).
 

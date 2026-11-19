@@ -30,7 +30,7 @@ from urllib.parse import unquote, urlsplit
 
 import n8n_healthcheck
 
-from .. import cli, engine, profile, report
+from .. import cli, engine, profile, questions, report
 from ..models import Target
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -82,6 +82,21 @@ def meta() -> dict:
             source("redis", "Redis", "Connection URL of the Redis that holds the n8n queue."),
             source("kubernetes", "Kubernetes", "Namespace running n8n; read with kubectl.", "kubectl"),
         ],
+        # The catalogue of questions.py as data: the page holds no copy of it. `operator` is
+        # asked in the share step; all three are needed to write the question sheet of an
+        # opened profile, with `measured` in the order of the sheet.
+        "questions": {
+            "operator": [
+                {**question, "values": [{"value": value, "label": label} for value, label in question["values"]]}
+                for question in questions.OPERATOR
+            ],
+            "conversation": [{"question": question, "why": why} for question, why in questions.CONVERSATION],
+            "measured": [
+                {"id": fact_id, "question": questions.MEASURED[fact_id]}
+                for fact_id in profile.FACT_IDS
+                if fact_id not in questions.OPERATOR_BY_ID
+            ],
+        },
     }
 
 

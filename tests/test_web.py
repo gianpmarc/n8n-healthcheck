@@ -12,7 +12,7 @@ from dataclasses import asdict
 from unittest import mock
 
 import n8n_healthcheck
-from n8n_healthcheck import cli, engine, profile
+from n8n_healthcheck import cli, engine, profile, questions
 from n8n_healthcheck.models import Finding, Snapshot
 from n8n_healthcheck.web import server as web
 
@@ -97,6 +97,23 @@ class WebTest(unittest.TestCase):
         for source in meta["sources"]:
             self.assertEqual(set(source), {"id", "label", "available", "hint"})
             self.assertTrue(source["label"] and source["hint"])
+
+    def test_meta_serves_the_catalogue_of_questions(self):
+        served = json.loads(self.request("GET", "/api/meta")[2])["questions"]
+        self.assertEqual(set(served), {"operator", "conversation", "measured"})
+        self.assertEqual(
+            [(q["id"], q["question"], q["kind"], tuple((v["value"], v["label"]) for v in q["values"])) for q in served["operator"]],
+            [(q["id"], q["question"], q["kind"], q["values"]) for q in questions.OPERATOR],
+        )
+        for question in served["operator"]:
+            self.assertEqual(set(question), {"id", "question", "kind", "values"})
+        self.assertEqual([(q["question"], q["why"]) for q in served["conversation"]], list(questions.CONVERSATION))
+        # Part 1 of the sheet, in its order: every fact of the catalogue that is not an operator question.
+        self.assertEqual(
+            [(q["id"], q["question"]) for q in served["measured"]],
+            [(i, questions.sentence(i)) for i in profile.FACT_IDS if i not in questions.OPERATOR_BY_ID],
+        )
+        self.assertEqual(len(served["measured"]) + len(served["operator"]), len(profile.FACT_IDS))
 
     def test_index_and_static_file(self):
         with open(os.path.join(web.STATIC_DIR, "index.html"), "rb") as fh:

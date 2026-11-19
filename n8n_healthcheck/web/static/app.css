@@ -849,6 +849,54 @@ p.pdetail { margin-top: var(--space-1); }
 .check input { flex: none; width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--text); cursor: pointer; }
 .check--row { justify-content: flex-start; gap: var(--space-3); margin-top: var(--space-2); font-size: 1rem; font-weight: 400; }
 
+/* "A few questions": one group of radio buttons or checkboxes for each question. */
+#questions-list { margin-top: var(--space-3); border-bottom: 1px solid var(--border); }
+.question { min-width: 0; padding-block: var(--space-3); border: 0; border-top: 1px solid var(--border); }
+.question legend {
+  float: left; /* keeps the legend under the line instead of on it */
+  width: 100%;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.question legend + * { clear: both; }
+.question__id, .question__kind { color: var(--muted); font: 400 0.75rem/1.4 var(--mono); }
+.question__id { margin-right: var(--space-2); }
+.question__kind { display: inline-block; }
+.question__note { margin-top: var(--space-1); font-size: 0.875rem; }
+.choices { display: flex; flex-wrap: wrap; gap: 0 var(--space-5); }
+.choice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 2.75rem;
+  font-size: 1rem;
+  font-weight: 400;
+  cursor: pointer;
+}
+.choice input { flex: none; width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--text); cursor: pointer; }
+.choice span { min-width: 0; overflow-wrap: anywhere; }
+.choice--none { color: var(--muted); }
+
+/* "Questions still open": the sheet of a saved profile. */
+.sheet__actions { margin-top: var(--space-4); }
+.sheet__text {
+  display: block;
+  width: 100%;
+  margin-top: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-small);
+  background: var(--surface);
+  color: var(--text);
+  font: 400 0.875rem/1.5 var(--mono);
+}
+.sheet { margin-top: var(--space-3); max-width: var(--measure); border-bottom: 1px solid var(--border); list-style: none; }
+.sheet li { padding-block: var(--space-3); border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.sheet strong { font-weight: 500; }
+.sheet code { color: var(--muted); }
+.sheet__left-out { overflow-wrap: anywhere; }
+
 .pfindings { margin-top: var(--space-3); border-bottom: 1px solid var(--border); }
 .pfindings li { padding-block: var(--space-3); border-top: 1px solid var(--border); }
 
@@ -888,7 +936,7 @@ p.pdetail { margin-top: var(--space-1); }
   .wrap { max-width: none; padding-inline: 0; }
   main { padding-block: 0; }
   .masthead { border-bottom: 1px solid var(--text); margin-bottom: 12pt; }
-  .skip-link, #view-form, #share-block, .actions, .action-status, .toolbar, .toolbar__count,
+  .skip-link, #view-form, #share-block, .actions, .action-status, .sheet__actions, .sheet__text, .toolbar, .toolbar__count,
   #findings-empty button, .empty--filtered, .chevron { display: none !important; }
   /* Collapsed and filtered-out findings are printed too: paper has no controls. */
   .finding__body[hidden], .finding[hidden], .sev-group[hidden] { display: block !important; }
@@ -896,6 +944,6 @@ p.pdetail { margin-top: var(--space-1); }
   .finding { padding-left: 0; background: none; border-left: 4px solid var(--sev, var(--border-strong)); border-radius: var(--radius-small); }
   .finding__toggle { display: block; padding-left: var(--space-4); }
   .finding__body { padding-left: var(--space-4); }
-  .finding, .score, .na li, .status { break-inside: avoid; }
+  .finding, .score, .na li, .sheet li, .status { break-inside: avoid; }
   h3, h4 { break-after: avoid; }
 }

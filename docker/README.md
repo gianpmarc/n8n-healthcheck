@@ -10,7 +10,7 @@ If you downloaded the repository as a ZIP, macOS may refuse to open the launcher
 
 ## After a run: the environment profile
 
-Under the report the page offers "Share the environment profile": review each fact and setting, withhold what you do not want to share, and download `n8n-profile-YYYY-MM-DD.json`. The file is made in your browser and saved by it, so it lands in your downloads folder on your machine, not in the container; nothing is written to the container and nothing is sent anywhere. "Open a profile" on the start page reads a saved profile the same way, in the browser, without uploading it. What the file holds and never holds: [Environment profile](../README.md#environment-profile).
+Under the report the page offers "Share the environment profile": review each fact and setting, withhold what you do not want to share, and download `n8n-profile-YYYY-MM-DD.json`. The file is made in your browser and saved by it, so it lands in your downloads folder on your machine, not in the container; nothing is written to the container and nothing is sent anywhere. The same step asks a few optional questions about what no probe can read (where n8n runs, what sits in front of it); an answer is written as "declared". "Open a profile" on the start page reads a saved profile the same way, in the browser, without uploading it, and lists the questions it leaves open, ready to copy as Markdown. What the file holds and never holds: [Environment profile](../README.md#environment-profile).
 
 ## What is in the image, and why
 
