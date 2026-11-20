@@ -933,7 +933,10 @@ class PageBehaviourTest(unittest.TestCase):
                   await page.finishRun(input.response);
                   const saved = await page.download();
                   const first = { view: page.view(), label: page.$("status-label").textContent, partial: page.visible("status-partial"),
-                           summary: page.$("summary").textContent, note: page.visible("status-note"), meta: page.$("report-meta").textContent,
+                           summary: page.$("summary").textContent, status: page.$("status").textContent, stats: page.$("stats").textContent,
+                           points: page.visible("summary-points") && page.$("summary-points").textContent,
+                           urgent: page.visible("urgent") && [page.$("urgent-title").textContent, page.$("urgent-text").textContent],
+                           note: page.visible("status-note"), meta: page.$("report-meta").textContent,
                            scores: page.$("scores").textContent, scoresNote: page.$("scores-note").textContent,
                            assessed: page.$("not-assessed").textContent, share: page.$("share-body").textContent, saved,
                            report: page.$("view-report").textContent };
@@ -948,10 +951,16 @@ class PageBehaviourTest(unittest.TestCase):
                 self.assertEqual(got["view"], "report")
                 self.assertNotIn("could not run", got["label"])
                 self.assertTrue(got["partial"])
-                # The whole Summary of the report, with its lines about the debug information.
-                self.assertEqual(got["summary"], sent["summary"])
-                self.assertIn("Debug information generated on 2026-11-19 was read.", got["summary"])
-                self.assertIn("rests on the debug information only", got["summary"])
+                # The Summary of the report in parts: the counts, the first fix, then every other
+                # sentence as the API wrote it, with its lines about the debug information.
+                notes, top = sent["summary_notes"], sent["findings"][0]
+                self.assertEqual(got["summary"], notes[0])
+                self.assertEqual(got["points"], "".join(notes[1:]))
+                self.assertIn("Debug information generated on 2026-11-19 was read.", got["points"])
+                self.assertIn("rests on the debug information only", got["points"])
+                counts = [sum(f["severity"] == s for f in sent["findings"]) for s in ("critical", "warning", "info")]
+                self.assertEqual(got["stats"], f"{counts[0]} critical{counts[1]} warning{'' if counts[1] == 1 else 's'}{counts[2]} info0/6 sources read")
+                self.assertEqual(got["urgent"], [top["title"], top["recommendation"]])
                 self.assertFalse(got["note"])
                 self.assertIn("n8n 3.3.0", got["meta"])
                 self.assertEqual(got["scores"].count("Partial"), len(sent["scores"]))

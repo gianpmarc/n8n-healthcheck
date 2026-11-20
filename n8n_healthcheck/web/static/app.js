@@ -29,6 +29,9 @@
     return node;
   }
 
+  // The opening sentence of a note, marked so that the eye finds where the note starts.
+  const lead = (text) => el("strong", { class: "lead-in" }, text);
+
   // ── Wording ──────────────────────────────────────────────────────────
 
   const SEVERITIES = ["critical", "warning", "info"];
@@ -466,7 +469,26 @@
     $("status-label").textContent = status.label;
     $("status-partial").hidden = !data.partial || status.kind === "error";
     const note = status.lead ? data.summary : status.note;
-    $("summary").textContent = status.lead || data.summary || "";
+    // The summary in parts: the counts and the first fix come from the findings, the other
+    // sentences from the API as it wrote them. Without them (the check could not run, or an
+    // older server) the summary is shown whole.
+    const notes = !status.lead && Array.isArray(data.summary_notes) && data.summary_notes.length ? data.summary_notes : null;
+    const counts = SEVERITIES.map((severity) => findings.filter((f) => f.severity === severity).length);
+    $("summary").textContent = notes ? String(notes[0]) : status.lead || data.summary || "";
+    const stat = (number, label, kind) => el("li", { class: `stat${kind ? ` stat--${kind}` : ""}` },
+      el("span", { class: "stat__n" }, String(number)), " ", el("span", { class: "stat__l" }, label));
+    $("stats").hidden = !notes;
+    $("stats").replaceChildren(...(notes ? [
+      stat(counts[0], "critical", counts[0] ? "critical" : ""),
+      stat(counts[1], counts[1] === 1 ? "warning" : "warnings", counts[1] ? "warning" : ""),
+      stat(counts[2], "info"),
+      data.sources ? stat(`${Number(data.sources.assessed)}/${Number(data.sources.total)}`, "sources read") : null,
+    ].filter(Boolean) : []));
+    $("urgent").hidden = !notes || findings.length === 0;
+    $("urgent-title").textContent = notes && findings.length ? String(findings[0].title) : "";
+    $("urgent-text").textContent = notes && findings.length ? String(findings[0].recommendation) : "";
+    $("summary-points").hidden = !notes || notes.length < 2;
+    $("summary-points").replaceChildren(...(notes ? notes.slice(1).map((line) => el("li", null, String(line))) : []));
     $("status-note").textContent = note || "";
     $("status-note").hidden = !note;
 
@@ -485,7 +507,6 @@
       renderShare();
     }
 
-    const counts = SEVERITIES.map((severity) => findings.filter((f) => f.severity === severity).length);
     announce(status.kind === "error"
       ? `${status.label}. Nothing was assessed.`
       : `Report ready. ${status.label}${data.partial ? " (partial report)" : ""}. ${plural(counts[0], "critical issue")}, ${plural(counts[1], "warning")}, ${plural(counts[2], "informational note")}.`);
@@ -518,9 +539,9 @@
     const noData = data.scores.every((row) => row.score == null);
     const note = $("scores-note");
     note.hidden = !(noData || data.partial);
-    note.textContent = noData
-      ? "No score is shown because no data was collected."
-      : "Each area starts at 100 and loses points for every finding. Scores marked “Partial” reflect only the checks that ran: they say nothing about what is listed under “Not assessed”.";
+    note.replaceChildren(...(noData
+      ? ["No score is shown because no data was collected."]
+      : [lead("Each area starts at 100 and loses points for every finding."), " Scores marked “Partial” reflect only the checks that ran: they say nothing about what is listed under “Not assessed”."]));
   }
 
   function severityTag(severity) {
@@ -625,9 +646,9 @@
 
   function renderNotAssessed(data) {
     const entries = Array.isArray(data.not_assessed) ? data.not_assessed : [];
-    $("na-intro").textContent = entries.length
-      ? "These parts were not read. Unless an entry says otherwise, the report says nothing about them: a missing part is unknown, not healthy."
-      : "Every data source was collected and every check ran.";
+    $("na-intro").replaceChildren(...(entries.length
+      ? [lead("These parts were not read."), " Unless an entry says otherwise, the report says nothing about them: a missing part is unknown, not healthy."]
+      : ["Every data source was collected and every check ran."]));
     $("not-assessed").hidden = entries.length === 0;
     $("not-assessed").replaceChildren(...entries.map((entry) => {
       const section = SECTIONS[entry.id];
@@ -1023,17 +1044,17 @@
 
     return [
       part(edit ? "Always in the file" : "Run details",
-        edit ? el("p", { class: "block__note" }, "When the profile was taken, by which version, and which sources were read. These cannot be withheld.") : null,
+        edit ? el("p", { class: "block__note" }, lead("When the profile was taken, by which version, and which sources were read."), " These cannot be withheld.") : null,
         details, sources),
       part(`Facts (${profile.facts.length})`,
-        measured === 0 ? el("p", { class: "block__note" }, factsWithheld === profile.facts.length && factsWithheld
-          ? "Every fact is withheld: the file says nothing about the environment itself."
-          : "No fact is measured: every one is unknown or withheld. Unknown means the tool could not tell for certain, not that something is wrong.") : null,
+        measured === 0 ? el("p", { class: "block__note" }, ...(factsWithheld === profile.facts.length && factsWithheld
+          ? ["Every fact is withheld: the file says nothing about the environment itself."]
+          : [lead("No fact is measured: every one is unknown or withheld."), " Unknown means the tool could not tell for certain, not that something is wrong."])) : null,
         bulk("facts", profile.facts),
         table("Fact", facts)),
       part(`Settings (${profile.settings.length})`,
         profile.settings.length
-          ? el("p", { class: "block__note" }, "The n8n variables that are set, by where they were read. “Set” means the variable has a value that is not written.")
+          ? el("p", { class: "block__note" }, lead("The n8n variables that are set, by where they were read."), " “Set” means the variable has a value that is not written.")
           : el("p", { class: "block__note" }, "No n8n setting is listed."),
         bulk("settings", profile.settings),
         profile.settings.length ? table("Setting", settings) : null,

@@ -162,7 +162,7 @@ class WebTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             set(result),
-            {"n8n_version", "exit_code", "summary", "partial", "scores", "not_assessed", "findings", "warnings", "markdown", "snapshot", "profile"},
+            {"n8n_version", "exit_code", "summary", "summary_notes", "sources", "partial", "scores", "not_assessed", "findings", "warnings", "markdown", "snapshot", "profile"},
         )
         self.assertEqual(result["n8n_version"], "1.70.0")
         self.assertEqual(result["exit_code"], 2)
