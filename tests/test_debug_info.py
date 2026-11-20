@@ -236,7 +236,7 @@ class ParserTest(unittest.TestCase):
 
     def test_unknown_keys_and_sections_are_ignored(self):
         with_more = text(
-            ("- consumerId:", f"- futureKey: {MARK}\n- executionMode: regular\n- consumerId:"),  # the first of a key wins
+            ("- consumerId:", f"- futureKey: {MARK}\n- consumerId:"),
             ("## storage", f"## future{MARK}\n\n- enabled: false\n- n8nVersion: 9.9.9\n- progress: true\n\n## storage"),
             ("- instanceCount: 3", f"- instanceCount: 3\n- leader: {MARK}"),
         )
@@ -998,7 +998,6 @@ class ReviewTest(CliRun):
             "an old one above a new one": older + "\n\n" + FULL,
             "the same text twice": FULL + "\n" + FULL,
             "quoted once, then again": "> " + FULL.replace("\n", "\n> ") + "\n\n" + FULL,
-            "a second title": FULL + "\n\n# Debug info\n",
             "a section that comes twice": FULL + "\n\n## storage\n\n- progress: true\n",
             "the first section again, without its #": FULL + "\ncore\n- n8nVersion: 9.9.9\n",
             "a second date": FULL + "\nGenerated at: 2026-11-18T00:00:00.000Z",
@@ -1139,6 +1138,82 @@ class ReviewTest(CliRun):
         # Kubernetes was already named.
         main = kube(("n8n-main", 1, container(env={"EXECUTIONS_MODE": "queue"})))
         self.assertIn("Environment read from Deployment n8n-main, container n8n. From the", rel.sqlite_in_queue_mode(snapshot(SQLITE, kubernetes=main)).evidence)
+
+
+# --- the second review, of 488e525 ---------------------------------------------------
+
+
+class SecondReviewTest(CliRun):
+    OLDER = text(("n8nVersion: 3.3.0", "n8nVersion: 1.99.0"), REGULAR, SQLITE, (STAMP, "Generated at: 2025-01-05T08:00:00.000Z"))
+
+    def refused(self, pasted):
+        with self.assertRaises(debug_info.DebugInfoError) as caught:
+            parse(pasted)
+        self.assertEqual(str(caught.exception), debug_info.SEVERAL)
+
+    def test_a_one_text_with_a_stray_title_or_section_name_is_read(self):
+        single = {
+            "n8n's bug-report form": "### Debug Info\n\n" + FULL,
+            "a ticket label above": "Debug info\n" + FULL,
+            "the title twice more": "# Debug info\n\nDebug info:\n\n" + FULL + "\n\n# Debug info\n",
+            "a signature line Security": FULL + "\n\nSecurity\n",
+            "a signature line Core": FULL + "\n\n--\nCore\n",
+            "cluster in the lines above": "cluster\n\n" + FULL,
+            "Storage: in the lines above": "Storage:\n" + FULL,
+            "every section named above": "\n".join(f"## {name}" for name in debug_info.SECTIONS) + "\n\n" + FULL,
+        }
+        for name, pasted in single.items():
+            with self.subTest(text=name):
+                self.assertEqual(parse(pasted), PARSED)
+        # A bare `cluster` line does not make a section of a text that has none.
+        self.assertEqual(parse("cluster\n\n" + NO_CLUSTER), parse(NO_CLUSTER))
+        self.assertIsNone(parse(NO_CLUSTER + "\n\nCluster\n")["cluster"])
+        expected = self.run_cli(["--debug-info", self.write("bare.txt", FULL)])
+        self.assertEqual(self.run_cli(["--debug-info", self.write("form.txt", "### Debug Info\n\n" + FULL)]), expected)
+        self.assertNotEqual(expected[0], 3)
+
+    def test_a_every_case_of_more_than_one_text_is_still_refused(self):
+        without_title = FULL.replace("# Debug info\n\n", "")
+        several = {
+            "old above new": self.OLDER + "\n\n" + FULL,
+            "new above old": FULL + "\n\n" + self.OLDER,
+            "the same text twice": FULL + "\n" + FULL,
+            "a second text without its title": FULL + "\n\n" + without_title,
+            "two texts, neither with a title": without_title + "\n\n" + without_title,
+            "two texts without a date": FULL.replace(STAMP, "") + "\n" + FULL.replace(STAMP, ""),
+            "only a second date": FULL + "\n" + STAMP,
+            "one section again, with an item": FULL + "\n\n## pruning\n\n- maxAge: 1 hours\n",
+            "quoted, then again": "> " + FULL.replace("\n", "\n> ") + "\n\n" + FULL,
+        }
+        for name, pasted in several.items():
+            with self.subTest(text=name):
+                self.refused(pasted)
+
+    def test_c_a_key_that_is_read_twice_in_one_section_is_a_second_text(self):
+        old_core = "## core\n\n- n8nVersion: 1.0.0\n- executionMode: regular\n- database: sqlite\n\n"
+        lost_heading = {
+            "the second text lost its core heading": old_core + FULL.replace("## core\n", ""),
+            "... and its title": old_core + FULL.replace("# Debug info\n\n## core\n", ""),
+            "a key twice under one heading": text(("- consumerId:", "- executionMode: regular\n- consumerId:")),
+            "a key twice, the first not readable": text(("- license:", f"- license: {MARK}\n- license:")),
+            "the versions line twice": text(("- instances:", "- versions: 3.3.0\n- instances:")),
+        }
+        for name, pasted in lost_heading.items():
+            with self.subTest(text=name):
+                self.refused(pasted)
+        # Not keys: several instance lines and several check lines are what a cluster holds.
+        many = text(("- checks:", "".join(f"  - instanceKey: {MARK}, hostId: {MARK}, instanceType: worker, instanceRole: unset, version: 3.3.0\n" for _ in range(20)) + "- checks:"))
+        self.assertEqual(parse(many)["cluster"]["instances"]["worker"], 22)
+        # The same key name in another section, where it is not one that is read.
+        elsewhere = text(("- maxAge: 336 hours", "- maxAge: 336 hours\n- success: all\n- progress: true"), ("- instanceCount: 3", "- instanceCount: 3\n- enabled: false"))
+        self.assertEqual(parse(elsewhere), PARSED)
+
+    def test_d_the_byte_order_mark_is_written_as_an_escape(self):
+        with open(debug_info.__file__, encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertNotIn("\ufeff", source)
+        self.assertIn('replace("\\ufeff", "")', source)
+        self.assertEqual(parse("\ufeffcore\n" + FULL.split("## core\n")[1]), PARSED)
 
 
 if __name__ == "__main__":

@@ -170,10 +170,15 @@ def parse(text: str, today: Optional[date] = None) -> dict:
     """The Snapshot section for a debug information (see models.Snapshot.debug_info).
 
     Raises DebugInfoError for a text that is too large, is not a debug information (one
-    with a `core` section holding a readable `n8nVersion`), or holds more than one: a
-    second title, a section that comes twice or a second `Generated at`. Two texts are
-    never merged, since old values would then stand under the newer date. `today` is the
-    day of the run, in UTC; a text dated after it has no date.
+    with a `core` section holding a readable `n8nVersion`), or holds more than one. Two
+    texts are never merged, since old values would then stand under the newer date.
+    `today` is the day of the run, in UTC; a text dated after it has no date.
+
+    A text holds more than one when a second `Generated at` is met, when a section that
+    already held an item is opened again and holds one again, or when a key that is read
+    comes twice in one section. A line that only names the title or a section proves
+    nothing: a bug-report form, a ticket label or a signature puts one above or below a
+    single text. Instance and check lines are list items, not keys: several are normal.
     """
     if not isinstance(text, str):
         raise DebugInfoError(NOT_DEBUG_INFO)
@@ -182,7 +187,10 @@ def parse(text: str, today: Optional[date] = None) -> dict:
     today = today or datetime.now(timezone.utc).date()
 
     section = None
-    seen: list = []  # the title, the sections and the date line met so far
+    holds = False  # an item was read under the section heading that is open now
+    held: set = set()  # the sections an earlier heading of which held an item
+    keys: dict = {name: set() for name in SECTIONS}  # the keys met in each section
+    dated = False
     found: dict = {name: {} for name in READERS}
     generated_on = None
     instances = dict.fromkeys(INSTANCE_TYPES, 0)
@@ -190,10 +198,14 @@ def parse(text: str, today: Optional[date] = None) -> dict:
     checks_failed = None  # None until the list of checks, or one check, was seen
     item = None  # an instance or check line of the cluster section, until its last part
 
-    def once(name: str) -> None:
-        if name in seen:
+    def reading(key: Optional[str] = None) -> None:
+        """An item of the open section is about to be read; `key` unless it is a list item."""
+        nonlocal holds
+        if section in held or key in keys[section]:
             raise DebugInfoError(SEVERAL)
-        seen.append(name)
+        holds = True
+        if key is not None:
+            keys[section].add(key)
 
     def close_item() -> None:
         nonlocal item, checks_failed
@@ -210,7 +222,7 @@ def parse(text: str, today: Optional[date] = None) -> dict:
             versions.add(_version(pairs.get("version", "")))
 
     # A byte order mark and the non-breaking spaces a chat puts in are not part of a value.
-    for line in text.replace("﻿", "").replace("\xa0", " ").splitlines():
+    for line in text.replace("\ufeff", "").replace("\xa0", " ").splitlines():
         line = line.strip().lstrip("> \t")  # quote marks, on every level
         body = line.lstrip("-*•").strip()  # the bullet; a heading's "#" stays
         if not body or line.startswith(_FENCE):
@@ -232,21 +244,28 @@ def parse(text: str, today: Optional[date] = None) -> dict:
             # A heading, with or without its "#". One that is not known ends the section:
             # its items must not be read as those of the section before it.
             name = _heading(body)
-            section = name if name in SECTIONS else None
-            if name in (*SECTIONS, TITLE):
-                once(name)
+            if name == TITLE:
+                continue  # says nothing: forms and tickets repeat it above the text
+            if holds:
+                held.add(section)
+            section, holds = name if name in SECTIONS else None, False
             continue
         if key.lower() == "generated at":
-            once("generated at")
-            generated_on = _generated_on(value, today)
+            if dated:
+                raise DebugInfoError(SEVERAL)
+            dated, generated_on = True, _generated_on(value, today)
         elif section == "cluster":
             if key in ("instanceKey", "check") or "instanceType" in _pairs(body):
+                reading()
                 item = body
-            elif key == "checks":
-                checks_failed = checks_failed or []
-            elif key == "versions":
-                versions.update(_version(part.strip()) for part in value.split(","))
-        elif key in READERS.get(section, {}) and key not in found[section]:
+            elif key in _CLUSTER_KEYS:
+                reading(key)
+                if key == "checks":
+                    checks_failed = checks_failed or []
+                elif key == "versions":
+                    versions.update(_version(part.strip()) for part in value.split(","))
+        elif key in READERS.get(section, {}):
+            reading(key)
             read = READERS[section][key](value)
             if read is not None:
                 found[section][key] = read
@@ -285,7 +304,7 @@ def parse(text: str, today: Optional[date] = None) -> dict:
             "file_access_blocked": security.get("blockFileAccessToN8nFiles") is False,
         },
         "cluster": {"instances": instances, "versions": _sort_versions(versions), "checks_failed": checks_failed}
-        if "cluster" in seen
+        if "cluster" in held or section == "cluster" and holds  # a bare heading is no section
         else None,
     }
 

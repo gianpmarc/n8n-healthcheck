@@ -151,15 +151,29 @@ A new module parses the text into a small dictionary and nothing else survives.
   every line, and wrapped in a code fence. Sections are recognised by their
   names. *(My call: it usually arrives through a ticket or a chat.)*
 - **What counts as a debug information.** A `core` section with a readable
-  `n8nVersion`. Anything else is refused with one sentence that does not echo
-  the text. Size limit 64 KB.
+  `n8nVersion`. Size limit 64 KB. There are three refusals, each one fixed
+  sentence that does not echo the text: larger than 64 KB, not a debug
+  information, and more than one debug information (see "One text only").
 - **Generated at.** Kept as a date. Missing, unreadable or in the future means
   "date unknown".
-- **One text only.** A text that holds more than one debug information (a
-  second title, a section that comes twice, or a second `Generated at`) is
-  refused with a third fixed sentence. Two texts are never merged: the values
+- **One text only.** A text that holds more than one debug information is
+  refused with the third fixed sentence. Two texts are never merged: the values
   of the older one would stand under the date of the newer, and instances
-  would be counted twice. *(Added after the review of the first build.)*
+  would be counted twice. A text holds more than one when:
+  - a second `Generated at` is met; or
+  - a section that already held an item that is read is opened again and holds
+    one again; or
+  - a key that is read comes twice in one section, which also catches a second
+    text that lost a heading.
+
+  A line that only names the title or a section proves nothing and is never
+  counted: n8n's own bug-report form puts "Debug Info" above the text, a
+  ticket has a label, a signature may be one word. The title does not end a
+  section, and a section heading with no item under it is not a section (a
+  bare `cluster` line does not make a text have a cluster section). Instance
+  and check lines are list items, not keys: several are normal. *(Added after
+  the first review, narrowed after the second, which found single texts
+  refused.)*
 - **Hard-wrapped list items.** An instance or check line that a mail client
   broke is joined again before it is read. A continuation is a line that
   follows such an item with no blank line between, has no bullet and no `#`,
@@ -187,7 +201,7 @@ A new module parses the text into a small dictionary and nothing else survives.
  "pruning": {"enabled": bool, "max_age_hours": int | None, "max_count": int | None} | None,
  "insecure": {"secure_cookie": bool, "file_access_blocked": bool},
  "cluster": None | {"instances": {"main": int, "worker": int, "webhook": int, "engine": int},
-                    "versions": [str], "checks_failed": [str]}}
+                    "versions": [str], "checks_failed": [str] | None}}
 ```
 
 `insecure` holds `True` for a key only when the text flagged it. `binary_mode`
@@ -195,6 +209,15 @@ uses the tool's existing values (`memory` in the text is the tool's `default`).
 A saved snapshot (`--save-snapshot`) therefore holds no identifier, and an older
 snapshot without the field still loads. *(My call: the exact shape; the builder
 may adjust it as long as no identifier and no free text is in it.)*
+
+`checks_failed` is `None` when the text lists no check: the fact
+`cluster.checks_failed` is then unknown, not `0`, and `REL-009` is silent.
+
+A snapshot can be loaded from a file or built in code, so the section is never
+read as it is. Rules, facts and the report read it back through strict readers
+(one function, `debug_info.of`), which keep a value only when the parser could
+have written it: a known value, a number that is not negative, `unlimited` or
+a version. Anything else counts as not stated. *(Added after the review.)*
 
 ## Precedence
 
@@ -272,7 +295,7 @@ loaded)". `worker.concurrency` is never filled from it.
 | `executions.save_manual` | boolean | `storage.manual` |
 | `pruning.max_count` | whole number | `pruning.maxCount` |
 | `cluster.versions_aligned` | boolean | one version among the instances; gives way like `MAINT-003`: unknown when Kubernetes names the versions |
-| `cluster.checks_failed` | whole number | checks whose status is `failed`; a succeeded check with warnings does not count |
+| `cluster.checks_failed` | whole number | checks whose status is `failed`; a succeeded check with warnings does not count; unknown when the text lists no check |
 | `security.secure_cookie` | `false` only | `security.secureCookie` |
 | `security.file_access_blocked` | `false` only | `security.blockFileAccessToN8nFiles` |
 
@@ -310,6 +333,11 @@ have. *(My call.)* Concretely:
   and none of the six data sources was given.
 - **Given next to a probe that failed.** The run counts as having collected
   something; it does not exit as "nothing collected".
+- **The title.** The report's title shows the n8n version of the text only when
+  the fact `n8n.version` rests on the text. When a probe names the version, the
+  title is what it is without a debug information (the version from the metrics
+  endpoint, or none), so the title and the fact never disagree. *(Added after
+  the review.)*
 
 The test that ties `Snapshot`'s fields to `report.SECTIONS` changes to allow
 this one field outside the six.
@@ -370,9 +398,11 @@ All three go in the Summary, after the line that says the text was read:
 
 It is a source flag like the others: it may be the only one, it combines with
 them, and `--save-snapshot` stores the section. A file that cannot be read, is
-larger than 64 KB or is not a debug information is a usage error (exit 3)
-before anything is collected, with no part of the text in the message. Existing
-flags and their abbreviations keep their meaning.
+larger than 64 KB, is not a debug information or holds more than one is a usage
+error (exit 3) before anything is collected, with no part of the text in the
+message. `--debug-info` with `--snapshot` is a usage error too: a saved
+snapshot already holds what was read. Existing flags and their abbreviations
+keep their meaning.
 
 ## Web interface
 
