@@ -52,8 +52,13 @@ def answered(answers, snapshot=None, **kwargs):
 
 
 def written_by_0_2_0(built):
-    """The same profile as tool version 0.2.0 wrote it: without the ids added since."""
-    return {**built, "tool_version": "0.2.0", "facts": [f for f in built["facts"] if f["id"] not in NEW_IDS]}
+    """The same profile as tool version 0.2.0 wrote it: without the ids and the source added since."""
+    return {
+        **built,
+        "tool_version": "0.2.0",
+        "sources": {name: state for name, state in built["sources"].items() if name in validate_0_2_0.SECTIONS},
+        "facts": [f for f in built["facts"] if f["id"] in profile.FORMAT_1_FACT_IDS],
+    }
 
 
 class CatalogueTest(unittest.TestCase):
@@ -85,15 +90,15 @@ class CatalogueTest(unittest.TestCase):
 
     def test_the_new_ids_join_the_catalogue_but_not_the_frozen_list(self):
         self.assertEqual(len(NEW_IDS), 14)
-        self.assertEqual(list(profile.FACT_IDS[32:]), NEW_IDS)
+        self.assertEqual(list(profile.FACT_IDS[32:46]), NEW_IDS)
         self.assertEqual(set(profile.FACT_IDS[:32]), profile.FORMAT_1_FACT_IDS)
         self.assertFalse(set(NEW_IDS) & profile.FORMAT_1_FACT_IDS)
         self.assertEqual(profile.FORMAT_1_FACT_IDS, validate_0_2_0.FORMAT_1_FACT_IDS)
 
     def test_version(self):
-        self.assertEqual(n8n_healthcheck.__version__, "0.3.0")
+        self.assertEqual(n8n_healthcheck.__version__, "0.4.0")
         self.assertEqual(profile.FORMAT_VERSION, 1)
-        self.assertEqual(base.build()["tool_version"], "0.3.0")
+        self.assertEqual(base.build()["tool_version"], "0.4.0")
 
     def test_every_operator_question_is_documented(self):
         with open(base.DOCS, encoding="utf-8") as handle:
@@ -400,7 +405,7 @@ class SheetTest(unittest.TestCase):
 
     def test_nothing_collected_lists_everything(self):
         _, _, measurable, operator, _ = self.sheet_of(base.build())
-        self.assertEqual(measurable.count("\n- **"), 31)
+        self.assertEqual(measurable.count("\n- **"), 31 + 13)  # and the 13 only a debug information fills
         self.assertEqual(operator.count("\n- **"), 15)
 
     def test_text_from_a_file_cannot_become_markup_or_reach_the_terminal(self):

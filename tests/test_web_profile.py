@@ -29,7 +29,8 @@ import sys
 import unittest
 from unittest import mock
 
-from n8n_healthcheck import cli, profile, questions, report
+import test_debug_info as pasted  # the synthetic debug information and its marker; imported as a module so its tests run once
+from n8n_healthcheck import cli, debug_info, profile, questions, report
 from n8n_healthcheck.models import Finding, Snapshot
 from n8n_healthcheck.web import server as web
 
@@ -194,8 +195,27 @@ class PageSourceTest(unittest.TestCase):
         self.assertEqual(tuple(js_constant("PROFILE_SOURCES")), tuple(report.SECTIONS))
 
     def test_page_names_every_source_of_a_profile(self):
+        # The six a file must hold, and `debug_info`, which a profile lists from 0.4.0 on.
+        self.assertEqual(list(built()["sources"]), [*report.SECTIONS, "debug_info"])
         for section in built()["sources"]:
             self.assertRegex(APP_JS, rf"\n    {section}: \{{ label: ")
+
+    def test_the_debug_information_is_the_first_source_of_the_form(self):
+        self.assertEqual(
+            re.findall(r'<fieldset class="source" data-source="(\w+)">', INDEX_HTML),
+            ["debug_info", "url", "env", "postgres", "redis", "kubernetes"],
+        )
+        self.assertEqual(web.meta()["sources"][0]["id"], "debug_info")
+        hint = web.meta()["sources"][0]["hint"]
+        for said in ("Help > About n8n > Debug information > Copy", "instance ids, host ids and the browser's user agent", "discarded"):
+            self.assertIn(said, hint)
+        field = re.search(r'<textarea id="f-debug"[^>]*>', INDEX_HTML).group(0)
+        # Labelled, tied to its error, and never sent to a spelling service or kept by the browser.
+        for attribute in ('name="debug_info_text"', 'spellcheck="false"', 'autocomplete="off"', 'aria-describedby="e-debug"'):
+            self.assertIn(attribute, field)
+        self.assertIn('<label for="f-debug">', INDEX_HTML)
+        self.assertIn('<p class="field__error" id="e-debug" hidden></p>', INDEX_HTML)
+        self.assertIn(f"const MAX_DEBUG_INFO_BYTES = {debug_info.MAX_BYTES // 1024} * 1024;", APP_JS)
 
     # --- blanking: few enough lines to be checked as text ---------------------------
 
@@ -685,7 +705,7 @@ class PageCodeTest(unittest.TestCase):
         older = dict(files)["written by 0.2.0"]
         self.assertEqual(len(older["facts"]), 32)
         unknown = sum(fact["provenance"] == "unknown" for fact in older["facts"])  # orchestrator among them
-        self.assertEqual(printed["written by 0.2.0"].count("\n- **"), 3 + unknown + 14 + 10)  # the header, and the 14 it never held
+        self.assertEqual(printed["written by 0.2.0"].count("\n- **"), 3 + unknown + 14 + 13 + 10)  # the header, and the 14 + 13 it never held
         self.assertIn("\\<script\\>", printed["Markdown and HTML in its text"])
         self.assertIn("(`executions.mode`): tab line nul wide", printed["Markdown and HTML in its text"])
 
@@ -835,6 +855,120 @@ class PageBehaviourTest(unittest.TestCase):
         if raw:
             self.assertEqual(text, profile.to_json(expected))
 
+    # --- the debug information ------------------------------------------------------
+
+    def test_the_pasted_debug_information_is_sent_as_it_is_and_alone(self):
+        got = run_page(
+            """async (page, input) => {
+              await page.submit();
+              const empty = { sent: page.sent.length, error: page.visible("form-error") && page.$("form-error-text").textContent };
+              page.type("f-debug", input.text);
+              await page.submit();
+              return { empty, sent: page.sent.map((body) => JSON.parse(body)), busy: page.$("run-button").getAttribute("aria-disabled") };
+            }""",
+            text=pasted.FULL,
+        )
+        self.assertEqual(got["empty"], {"sent": 0, "error": "Fill in at least one source above, then run the health check."})
+        self.assertEqual(got["sent"], [{"debug_info_text": pasted.FULL}])
+        self.assertEqual(got["busy"], "true")
+
+    def test_a_refused_debug_information_is_shown_next_to_its_field(self):
+        for sentence in (debug_info.NOT_DEBUG_INFO, debug_info.SEVERAL, debug_info.TOO_LARGE):
+            got = run_page(
+                """async (page, input) => {
+                  page.type("f-debug", input.text);
+                  await page.submit();
+                  await page.finishRun(JSON.stringify({ error: input.sentence, field: "debug_info_text" }), 400);
+                  const refused = { view: page.view(), error: page.visible("e-debug") && page.$("e-debug").textContent,
+                                    invalid: page.$("f-debug").getAttribute("aria-invalid"), focus: document.activeElement.id,
+                                    banner: page.visible("form-error"), kept: page.$("f-debug").value === input.text,
+                                    busy: page.$("run-button").getAttribute("aria-disabled") };
+                  return { refused };
+                }""",
+                text=f"hello {pasted.MARK}", sentence=sentence,
+            )  # fmt: skip
+            with self.subTest(sentence=sentence):
+                said = sentence[0].upper() + sentence[1:] + "."
+                self.assertEqual(got["refused"], {"view": "form", "error": said, "invalid": "true", "focus": "f-debug", "banner": False, "kept": True, "busy": None})
+
+    def test_a_400_about_something_else_is_still_the_banner(self):
+        got = run_page(
+            """async (page, input) => {
+              page.type("f-debug", input.text);
+              await page.submit();
+              await page.finishRun(JSON.stringify({ error: "url must be an http:// or https:// URL with a host" }), 400);
+              return { field: page.visible("e-debug"), banner: page.visible("form-error") && page.$("form-error-title").textContent };
+            }""",
+            text=pasted.FULL,
+        )
+        self.assertEqual(got, {"field": False, "banner": "The server did not accept the request."})
+
+    def test_a_paste_over_64_kb_is_stopped_in_the_page_next_to_its_field(self):
+        got = run_page(
+            """async (page, input) => {
+              page.$("f-env").value = "EXECUTIONS_MODE=queue";
+              page.type("f-debug", input.text + "\\n".repeat(input.room + 1));
+              await page.submit();
+              const over = { sent: page.sent.length, error: page.visible("e-debug") && page.$("e-debug").textContent,
+                             other: page.visible("e-env"), focus: document.activeElement.id };
+              page.type("f-debug", input.text + "\\n".repeat(input.room));
+              await page.submit();
+              return { over, sent: page.sent.length, bytes: new TextEncoder().encode(JSON.parse(page.sent[0]).debug_info_text).length };
+            }""",
+            text=pasted.FULL, room=debug_info.MAX_BYTES - len(pasted.FULL.encode()),
+        )  # fmt: skip
+        self.assertEqual((got["over"]["sent"], got["over"]["other"], got["over"]["focus"]), (0, False, "f-debug"))
+        self.assertIn("the limit is 64 KB", got["over"]["error"])
+        self.assertNotIn(pasted.MARK, got["over"]["error"])
+        self.assertEqual((got["sent"], got["bytes"]), (1, debug_info.MAX_BYTES))
+
+    def test_a_run_on_the_debug_information_alone_is_a_partial_report_not_a_failed_one(self):
+        sent = web.run_check(web.parse_run_request(json.dumps({"debug_info_text": pasted.FULL}).encode()))
+        response = json.dumps(cli.json_safe(sent), allow_nan=False)
+        for raw in PATHS:
+            got = run_page(
+                """async (page, input) => {
+                  page.type("f-debug", input.text);
+                  await page.submit();
+                  await page.finishRun(input.response);
+                  const saved = await page.download();
+                  const first = { view: page.view(), label: page.$("status-label").textContent, partial: page.visible("status-partial"),
+                           summary: page.$("summary").textContent, note: page.visible("status-note"), meta: page.$("report-meta").textContent,
+                           scores: page.$("scores").textContent, scoresNote: page.$("scores-note").textContent,
+                           assessed: page.$("not-assessed").textContent, share: page.$("share-body").textContent, saved,
+                           report: page.$("view-report").textContent };
+                  page.$("act-again").click();
+                  const again = { view: page.view(), kept: page.$("f-debug").value === input.text };
+                  const opened = await page.open(saved);
+                  return { ...first, again, opened };
+                }""",
+                raw=raw, response=response, text=pasted.FULL,
+            )  # fmt: skip
+            with self.subTest(rawJSON=raw):
+                self.assertEqual(got["view"], "report")
+                self.assertNotIn("could not run", got["label"])
+                self.assertTrue(got["partial"])
+                # The whole Summary of the report, with its lines about the debug information.
+                self.assertEqual(got["summary"], sent["summary"])
+                self.assertIn("Debug information generated on 2026-11-19 was read.", got["summary"])
+                self.assertIn("rests on the debug information only", got["summary"])
+                self.assertFalse(got["note"])
+                self.assertIn("n8n 3.3.0", got["meta"])
+                self.assertEqual(got["scores"].count("Partial"), len(sent["scores"]))
+                self.assertNotIn("Not scored", got["scores"])
+                self.assertIn("reflect only the checks that ran", got["scoresNote"])
+                self.assertEqual(got["assessed"].count("Not provided"), len(report.SECTIONS))
+                # The share step and the viewer name the source and show the facts filled from the text.
+                for shown in (got["share"], got["opened"]["shown"]):
+                    self.assertIn("n8n debug information (debug_info)collected", shown)
+                    self.assertIn("main.concurrency_limitunlimitedmeasuredfrom debug_infodebug information generated on 2026-11-19", shown)
+                self.assertEqual((got["opened"]["view"], got["opened"]["error"]), ("profile", ""))
+                self.assert_saved(got["saved"], sent["profile"], raw)
+                # "Run again" goes back to the form with the text still in its field, like the other sources.
+                self.assertEqual(got["again"], {"view": "form", "kept": True})
+                for text in (got["report"], got["saved"], got["opened"]["shown"], response):
+                    self.assertNotIn(pasted.MARK, text)
+
     def test_download_saves_exactly_what_is_ticked(self):
         response = run_response()
         sent = json.loads(response)["profile"]
@@ -863,7 +997,7 @@ class PageBehaviourTest(unittest.TestCase):
                 self.assert_saved(got["second"], profile.apply_withholding({**sent, "run": run}, WITHHELD[1:]), raw)
                 self.assertNotIn("2.40.1", got["first"])
                 self.assertEqual(got["status"], f"Download started: n8n-profile-{sent['created_at'][:10]}.json")
-                self.assertIn("1 of 46 facts, 2 of ", got["summary"])
+                self.assertIn("1 of 59 facts, 2 of ", got["summary"])
 
     def test_answers_are_saved_as_profile_py_writes_them(self):
         answers = {"hosting.model": "private_cloud", "worker.autoscaling": "no", "n8n.image_modified": "yes", MULTI: ["grafana", "prometheus"]}
@@ -929,7 +1063,7 @@ class PageBehaviourTest(unittest.TestCase):
                 self.assertIn("observability.toolsprometheus: yes, grafana: yesdeclared", got["table"])
                 self.assertIn("proxy.kindunknownnot answered", got["table"])
                 self.assertIn("orchestratorkubernetesmeasured", got["table"])
-                self.assertIn("Answered: 4 of 14 questions. Withheld: 0 of 46 facts", got["summary"])
+                self.assertIn("Answered: 4 of 14 questions. Withheld: 0 of 59 facts", got["summary"])
                 self.assertEqual(got["boxes"], len(all_ids(sent)))
                 self.assertEqual((got["notesBefore"], got["notesAfter"]), (0, 1))
                 self.assert_saved(got["second"], profile.apply_withholding(declared, ["worker.autoscaling", "n8n.version"]), raw)
@@ -1035,7 +1169,7 @@ class PageBehaviourTest(unittest.TestCase):
         )  # fmt: skip
         facts = [f["id"] for f in sent["facts"]]
         settings = [profile.setting_id(s) for s in sent["settings"]]
-        self.assertEqual(len(facts), 46)
+        self.assertEqual(len(facts), 59)
         self.assertGreater(len(settings), 3)
         for name, ids in (
             ("Withhold all facts", facts),

@@ -12,7 +12,8 @@ from dataclasses import asdict
 from unittest import mock
 
 import n8n_healthcheck
-from n8n_healthcheck import cli, engine, profile, questions
+import test_debug_info as pasted  # the synthetic debug information and its marker; imported as a module so its tests run once
+from n8n_healthcheck import cli, debug_info, engine, profile, questions
 from n8n_healthcheck.models import Finding, Snapshot
 from n8n_healthcheck.web import server as web
 
@@ -88,7 +89,7 @@ class WebTest(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         self.assertEqual(meta["version"], n8n_healthcheck.__version__)
         self.assertRegex(meta["version"], r"^\d+\.\d+\.\d+$")
-        self.assertEqual([s["id"] for s in meta["sources"]], ["url", "env", "postgres", "redis", "kubernetes"])
+        self.assertEqual([s["id"] for s in meta["sources"]], ["debug_info", "url", "env", "postgres", "redis", "kubernetes"])
         sources = {s["id"]: s for s in meta["sources"]}
         self.assertFalse(sources["postgres"]["available"])
         self.assertIn("psql was not found", sources["postgres"]["hint"])
@@ -533,6 +534,8 @@ class WebTest(unittest.TestCase):
             ({}, "nothing to inspect"),
             ({"url": "", "env_text": " "}, "nothing to inspect"),
             ({"kube_context": "prod"}, "nothing to inspect"),
+            ({"debug_info_text": " \n"}, "at least one of debug_info_text, url"),
+            ({"debug_info_text": [pasted.FULL]}, "debug_info_text must be a string"),
             ({"url": "http://n8n.internal", "env_file": "/etc/passwd"}, "unknown field: env_file"),
             ({"url": 5678}, "url must be a string"),
             ({"env_text": ["A=b"]}, "env_text must be a string"),
@@ -549,6 +552,108 @@ class WebTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertNotIn(PASSWORD, raw)
         self.assertNotIn(PASSWORD, self.log.getvalue())
+
+    # --- the debug information ---------------------------------------------------
+
+    def run_real(self, body):
+        """POST /api/run with the real collectors and rules; return (status, JSON, raw text)."""
+        status, _, raw = self.request("POST", "/api/run", body)
+        return status, json.loads(raw), raw.decode()
+
+    def test_debug_information_can_be_the_only_field(self):
+        status, result, raw = self.run_real({"debug_info_text": pasted.FULL})
+        self.assertEqual(status, 200)
+        # Assessed, not "could not run": numbers marked partial, and the Summary says what it rests on.
+        self.assertIn(result["exit_code"], (0, 1, 2))
+        self.assertTrue(result["partial"])
+        for row in result["scores"]:
+            self.assertIsInstance(row["score"], int)
+            self.assertTrue(row["partial"])
+        self.assertIn("Debug information generated on 2026-11-19 was read.", result["summary"])
+        self.assertIn("The check rests on the debug information only: none of the six data sources was given.", result["summary"])
+        self.assertIn(result["summary"], result["markdown"])
+        self.assertEqual(result["n8n_version"], "3.3.0")
+        self.assertEqual({n["id"]: n["reason"] for n in result["not_assessed"]}, dict.fromkeys(profile.report.SECTIONS, "not_provided"))
+        self.assertEqual(result["snapshot"]["debug_info"], debug_info.parse(pasted.FULL))
+        self.assertEqual(result["profile"]["sources"]["debug_info"], "collected")
+        facts = {fact["id"]: fact for fact in result["profile"]["facts"]}
+        self.assertEqual((facts["main.concurrency_limit"]["value"], facts["main.concurrency_limit"]["source"]), ("unlimited", "debug_info"))
+        self.assertEqual(facts["worker.replicas"]["value"], 2)
+        self.assertNotIn(pasted.MARK, raw)
+        self.assertNotIn(pasted.MARK, self.log.getvalue())
+
+    def test_debug_information_summary_lines(self):
+        for changes, base, sentence in [
+            ((), pasted.NO_CLUSTER, "cannot be told from it: " + debug_info.NO_CLUSTER),
+            ((("2026-11-19T", "2025-01-02T"),), pasted.FULL, "days ago, the instance may have changed."),
+            (((pasted.STAMP, ""),), pasted.FULL, "Debug information was read, date unknown."),
+        ]:
+            status, result, raw = self.run_real({"debug_info_text": pasted.text(*changes, base=base)})
+            self.assertEqual(status, 200)
+            self.assertIn(sentence, result["summary"])
+            self.assertNotIn(pasted.MARK, raw)
+
+    def test_debug_information_next_to_other_fields(self):
+        # The env file states the mode, so the probe's value stands; the text fills the rest.
+        text = "EXECUTIONS_MODE=regular\nN8N_ENCRYPTION_KEY=" + PASSWORD + "\n"
+        status, result, raw = self.run_real({"debug_info_text": pasted.FULL, "env_text": text})
+        self.assertEqual(status, 200)
+        self.assertIn("Debug information generated on 2026-11-19 was read.", result["summary"])
+        self.assertNotIn("rests on the debug information only", result["summary"])
+        self.assertEqual(result["profile"]["sources"], {**dict.fromkeys(profile.report.SECTIONS, "not_provided"), "env": "collected", "debug_info": "collected"})
+        facts = {fact["id"]: fact for fact in result["profile"]["facts"]}
+        self.assertEqual((facts["executions.mode"]["value"], facts["executions.mode"]["source"]), ("regular", "env"))
+        self.assertEqual((facts["n8n.version"]["value"], facts["n8n.version"]["source"]), ("3.3.0", "debug_info"))
+        for secret in (pasted.MARK, PASSWORD):
+            self.assertNotIn(secret, raw)
+            self.assertNotIn(secret, self.log.getvalue())
+
+    def test_debug_information_next_to_a_source_that_failed_is_still_a_run(self):
+        status, result, raw = self.run_api({"debug_info_text": pasted.FULL, "redis_url": REDIS_URL}, Snapshot(debug_info=debug_info.parse(pasted.FULL)), [])
+        self.assertEqual(status, 200)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertIn("none of the six data sources was collected", result["summary"])
+        self.assertIn(("redis", "failed"), [(n["id"], n["reason"]) for n in result["not_assessed"]])
+        # What goes on to the collectors is what the parser kept, never the text.
+        self.assertEqual(self.collect.call_args.args[0].debug_info, debug_info.parse(pasted.FULL))
+        self.assertNotIn(pasted.MARK, raw)
+
+    def test_a_refused_debug_information_is_a_400_with_the_fixed_sentence(self):
+        padding = "\n" + f"{pasted.MARK} " * (debug_info.MAX_BYTES // 7)
+        cases = {
+            debug_info.TOO_LARGE: pasted.FULL + padding,
+            debug_info.NOT_DEBUG_INFO: f"hello {pasted.MARK}, the instance is slow\nN8N_HOST={pasted.MARK}.example\n",
+            debug_info.SEVERAL: pasted.FULL + "\n\n" + pasted.FULL,
+        }
+        self.assertGreater(len(cases[debug_info.TOO_LARGE].encode()), debug_info.MAX_BYTES)
+        for sentence, text in cases.items():
+            # Next to a field that would be accepted: the refusal still stops the run before anything is collected.
+            for body in ({"debug_info_text": text}, {"debug_info_text": text, "url": "http://n8n.internal:5678"}):
+                status, result, raw = self.run_api(body)
+                self.assertEqual(status, 400, sentence)
+                self.assertEqual(result, {"error": sentence, "field": "debug_info_text"})
+                self.collect.assert_not_called()
+                self.assertNotIn(pasted.MARK, raw)
+        self.assertNotIn(pasted.MARK, self.log.getvalue())
+        self.assertEqual(self.log.getvalue().count('"POST /api/run" 400'), 6)
+
+    def test_the_debug_information_limit_is_64_kb(self):
+        room = debug_info.MAX_BYTES - len(pasted.FULL.encode())
+        status, _, raw = self.run_api({"debug_info_text": pasted.FULL + "\n" * room})
+        self.assertEqual(status, 200)
+        self.assertNotIn(pasted.MARK, raw)
+        status, result, _ = self.run_api({"debug_info_text": pasted.FULL + "\n" * (room + 1)})
+        self.assertEqual((status, result["error"]), (400, debug_info.TOO_LARGE))
+
+    def test_no_other_bad_request_names_a_field(self):
+        status, result, _ = self.run_api({"url": "ftp://n8n.internal"})
+        self.assertEqual((status, set(result)), (400, {"error"}))
+
+    def test_a_debug_information_is_never_written_to_disk(self):
+        with mock.patch("tempfile.TemporaryDirectory", side_effect=AssertionError("a file was asked for")):
+            with mock.patch("os.open", side_effect=AssertionError("a file was opened")):
+                status, _, _ = self.run_api({"debug_info_text": pasted.FULL})
+        self.assertEqual(status, 200)
 
     def test_content_type_must_be_json(self):
         body = json.dumps({"url": "http://n8n.internal:5678"}).encode()

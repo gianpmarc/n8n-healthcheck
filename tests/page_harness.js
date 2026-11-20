@@ -92,10 +92,11 @@ const document = {
 // What index.html hides at the start is hidden here too.
 for (const [, id] of fs.readFileSync(request.index, "utf8").matchAll(/<[^>]*\bid="([^"]+)"[^>]*\shidden[\s>]/g)) document.getElementById(id).hidden = true;
 // The form fields are read through their fieldset (a source the server lacks is disabled).
-for (const id of ["f-url", "f-env", "f-postgres", "f-redis", "f-kube-ns", "f-kube-ctx"]) new Element("fieldset").append(document.getElementById(id));
+for (const id of ["f-debug", "f-url", "f-env", "f-postgres", "f-redis", "f-kube-ns", "f-kube-ctx"]) new Element("fieldset").append(document.getElementById(id));
 
 const saved = []; // Blobs handed to URL.createObjectURL: the downloads
 const copied = []; // texts handed to the clipboard
+const sent = []; // the bodies of the page's POST /api/run requests, as text
 let answerRun = null; // resolves or rejects the page's pending POST /api/run
 const response = (status, text) => ({ ok: status === 200, status, text: async () => text, json: async () => JSON.parse(text) });
 const context = vm.createContext({
@@ -105,9 +106,10 @@ const context = vm.createContext({
   // Without a clipboard the page falls back to document.execCommand, which this document does not have either.
   navigator: request.noClipboard ? {} : { clipboard: { async writeText(text) { copied.push(text); } } },
   URL: { createObjectURL(blob) { saved.push(blob); return "blob:saved"; }, revokeObjectURL() {} },
-  fetch(url) {
+  fetch(url, options) {
     if (url === "/api/meta") return Promise.resolve(response(200, JSON.stringify({ version: "test", sources: [], ...request.meta })));
     if (url !== "/api/run") throw new Error(`the page asked for ${url}`);
+    sent.push(options.body);
     return new Promise((resolve, reject) => { answerRun = { resolve, reject }; });
   },
   // Short waits happen; the long ones (a download's clean-up, the run's deadline) would only keep Node alive.
@@ -142,9 +144,14 @@ const page = {
   /** Press "Run health check"; the answer is given later with finishRun() or failRun(). */
   async startRun() {
     document.getElementById("f-env").value = "EXECUTIONS_MODE=queue";
+    await this.submit();
+  },
+  /** Press "Run health check" with the form as it is. */
+  async submit() {
     dispatch(document.getElementById("run-form"), "submit");
     await settle();
   },
+  sent,
   async finishRun(text, status = 200) { answerRun.resolve(response(status, text)); await settle(); },
   async failRun() { answerRun.reject(new TypeError("network")); await settle(); },
   async run(text) { await this.startRun(); await this.finishRun(text); },

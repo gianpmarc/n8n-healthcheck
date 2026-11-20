@@ -5,7 +5,9 @@ and databases, so every request is checked against the Host header (DNS
 rebinding) and a run also against Content-Type and Origin (cross-site
 requests). Nothing from a request is logged, and nothing is written to disk
 except the pasted env file, in a private temporary directory, for the duration
-of the run.
+of the run. A pasted debug information is read in memory by debug_info.parse()
+and only what the parser kept goes on: the text is never written, logged or
+returned.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from urllib.parse import unquote, urlsplit
 
 import n8n_healthcheck
 
-from .. import cli, engine, profile, questions, report
+from .. import cli, debug_info, engine, profile, questions, report
 from ..models import Target
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -44,7 +46,10 @@ CONTENT_SECURITY_POLICY = (
 )
 
 # Request field -> Target field. env_text is the content of an env file, never a path.
+# debug_info_text is n8n's "Debug information" text; parse_run_request() replaces it with
+# what debug_info.parse() kept of it.
 RUN_FIELDS = {
+    "debug_info_text": "debug_info",
     "url": "url",
     "env_text": "env_file",
     "postgres_dsn": "postgres_dsn",
@@ -63,7 +68,14 @@ CONTENT_TYPES = {
 
 
 class BadRequest(Exception):
-    """The request body is not a valid run request; the message is safe to return."""
+    """The request body is not a valid run request; the message is safe to return.
+
+    `field` names the request field the page should show the message next to, if any.
+    """
+
+    def __init__(self, message: str, field: str | None = None):
+        super().__init__(message)
+        self.field = field
 
 
 def meta() -> dict:
@@ -76,6 +88,12 @@ def meta() -> dict:
     return {
         "version": getattr(n8n_healthcheck, "__version__", "dev"),
         "sources": [
+            source(
+                "debug_info",
+                "Debug information",
+                "The text n8n gives under Help > About n8n > Debug information > Copy. "
+                "The instance ids, host ids and the browser's user agent in it are read and discarded.",
+            ),
             source("url", "n8n URL", "Base URL of the n8n instance; reads its health endpoints and /metrics."),
             source("env", "Environment file", "Content of the n8n env file (KEY=VALUE lines); secret values are redacted."),
             source("postgres", "Postgres", "Connection string of the n8n database; read with the psql client.", "psql"),
@@ -101,7 +119,12 @@ def meta() -> dict:
 
 
 def parse_run_request(body: bytes) -> dict:
-    """Validate the JSON body of POST /api/run; return only the fields that are set."""
+    """Validate the JSON body of POST /api/run; return only the fields that are set.
+
+    `debug_info_text` comes back as the dictionary debug_info.parse() made of it: the text
+    itself does not leave this function. A text the parser refuses is a BadRequest with
+    the parser's fixed sentence, which holds nothing of the text.
+    """
     try:
         data = json.loads(body)
     except (ValueError, RecursionError):  # ValueError includes UnicodeDecodeError; RecursionError: deep nesting
@@ -119,12 +142,19 @@ def parse_run_request(body: bytes) -> dict:
         if not isinstance(value, str):
             raise BadRequest(f"{name} must be a string")
         if value.strip():
-            fields[name] = value if name == "env_text" else value.strip()
+            fields[name] = value if name in ("env_text", "debug_info_text") else value.strip()
     # urllib would also open file:, ftp: and data: URLs, i.e. read local files.
     if "url" in fields and not cli.valid_url(fields["url"]):
         raise BadRequest("url must be an http:// or https:// URL with a host")
     if not set(fields) - {"kube_context"}:
-        raise BadRequest("nothing to inspect: give at least one of url, env_text, postgres_dsn, redis_url, kube_namespace")
+        raise BadRequest(
+            "nothing to inspect: give at least one of debug_info_text, url, env_text, postgres_dsn, redis_url, kube_namespace"
+        )
+    if "debug_info_text" in fields:
+        try:
+            fields["debug_info_text"] = debug_info.parse(fields["debug_info_text"])
+        except debug_info.DebugInfoError as exc:
+            raise BadRequest(str(exc), "debug_info_text") from None
     return fields
 
 
@@ -262,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             fields = parse_run_request(self.rfile.read(length))
         except BadRequest as exc:
-            return self._send_json(400, {"error": str(exc)})
+            return self._send_json(400, {"error": str(exc), **({"field": exc.field} if exc.field else {})})
         if not self.server.run_lock.acquire(blocking=False):
             return self._send_json(409, {"error": "a health check is already running; wait for it to finish"})
         try:

@@ -31,6 +31,7 @@ def collect(target: Target) -> Snapshot:
             continue
         for name, value in fields.items():
             setattr(snapshot, name, value)
+    snapshot.debug_info = target.debug_info  # read before the run, nothing to probe
     return snapshot
 
 

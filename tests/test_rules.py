@@ -140,6 +140,12 @@ CASES = [
         Snapshot(kubernetes=healthy_kube()),
     ),
     (
+        rel.cluster_check_failed,
+        "REL-009",
+        Snapshot(debug_info={"cluster": {"checks_failed": ["split-brain", "other"]}}),
+        Snapshot(debug_info={"cluster": {"checks_failed": []}}),
+    ),
+    (
         perf.pruning_disabled,
         "PERF-001",
         Snapshot(env={"EXECUTIONS_DATA_PRUNE": "false"}),
@@ -181,6 +187,12 @@ CASES = [
         Snapshot(kubernetes=healthy_kube()),
     ),
     (
+        maint.sandbox_license,
+        "MAINT-004",
+        Snapshot(debug_info={"license": "enterprise_sandbox"}),
+        Snapshot(debug_info={"license": "enterprise_production"}),
+    ),
+    (
         sec.insecure_cookie,
         "SEC-001",
         Snapshot(env={"N8N_SECURE_COOKIE": "false"}),
@@ -191,6 +203,12 @@ CASES = [
         "SEC-002",
         Snapshot(env={"N8N_RUNNERS_ENABLED": "true"}),
         Snapshot(env={"N8N_RUNNERS_MODE": "external"}),
+    ),
+    (
+        sec.file_access_not_blocked,
+        "SEC-003",
+        Snapshot(debug_info={"insecure": {"file_access_blocked": True}}),
+        Snapshot(debug_info={"insecure": {"file_access_blocked": False}}),
     ),
 ]
 

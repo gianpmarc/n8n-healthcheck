@@ -14,6 +14,7 @@ from ._helpers import (
     shown_each,
     size,
     unknown,
+    with_debug_info,
     worker_envs,
 )
 
@@ -33,7 +34,7 @@ def _oldest(postgres: dict) -> str:
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/manage-execution-data#enable-executions-pruning
 def pruning_disabled(snapshot: Snapshot) -> Optional[Finding]:
-    env = effective_env(snapshot)
+    env = with_debug_info(snapshot, "EXECUTIONS_DATA_PRUNE")
     if env is None or env_flag(env, "EXECUTIONS_DATA_PRUNE") is not False:
         return None
     evidence = f"{shown(env, 'EXECUTIONS_DATA_PRUNE')} (default: true).{env.note}"
@@ -64,10 +65,14 @@ def pruning_disabled(snapshot: Snapshot) -> Optional[Finding]:
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/manage-execution-data#reduce-saved-data
 def saving_execution_progress(snapshot: Snapshot) -> Optional[Finding]:
-    env = effective_env(snapshot)
+    name = "EXECUTIONS_DATA_SAVE_ON_PROGRESS"
+    env = with_debug_info(snapshot, "EXECUTIONS_MODE")
     if env is None:
         return None
-    name = "EXECUTIONS_DATA_SAVE_ON_PROGRESS"
+    # The debug information holds the settings of the main process, and in queue mode it
+    # is the workers that are judged: the text is read for this one in regular mode only.
+    if not is_queue_mode(env) and not unknown(env, "EXECUTIONS_MODE"):
+        env = with_debug_info(snapshot, "EXECUTIONS_MODE", name)
     judged = [env]
     # In queue mode production executions run on the workers, each with its own
     # environment in Kubernetes; main alone says nothing unless it is known to be regular.

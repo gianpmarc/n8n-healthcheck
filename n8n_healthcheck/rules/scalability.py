@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .. import debug_info
 from ..models import Finding, Snapshot
 from ._helpers import (
     concurrency_flag,
@@ -17,6 +18,7 @@ from ._helpers import (
     num,
     shown,
     unknown,
+    with_debug_info,
 )
 
 # n8n's own recommendation: "setting concurrency to 5 or higher for your worker
@@ -35,7 +37,7 @@ MIN_WORKER_REPLICAS = 2
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/control-concurrency
 def regular_mode_unbounded_concurrency(snapshot: Snapshot) -> Optional[Finding]:
-    env = effective_env(snapshot)
+    env = with_debug_info(snapshot, "EXECUTIONS_MODE", "DB_TYPE", "N8N_CONCURRENCY_PRODUCTION_LIMIT")
     if env is None:
         return None
     limit = env_int(env, "N8N_CONCURRENCY_PRODUCTION_LIMIT")
@@ -95,24 +97,35 @@ def regular_mode_unbounded_concurrency(snapshot: Snapshot) -> Optional[Finding]:
 
 # https://github.com/n8n-io/n8n-hosting/blob/main/charts/n8n/README.md#architecture
 def single_worker(snapshot: Snapshot) -> Optional[Finding]:
-    if snapshot.kubernetes is None:
-        return None
     workers = {}
-    for deployment, _container, role in n8n_containers(snapshot.kubernetes):
+    for deployment, _container, role in n8n_containers(snapshot.kubernetes or {}):
         if role == "worker":
             workers[deployment["name"]] = deployment.get("replicas") or 0
     total = sum(workers.values())
-    # Zero is not flagged here: workers may be scaled to zero by an autoscaler or run
-    # outside this namespace. A queue that nobody consumes is caught by REL-004.
-    if not workers or total == 0 or total >= MIN_WORKER_REPLICAS:
-        return None
-    names = ", ".join(f"{name} (replicas: {count})" for name, count in workers.items())
+    if workers:
+        # Zero is not flagged here: workers may be scaled to zero by an autoscaler or run
+        # outside this namespace. A queue that nobody consumes is caught by REL-004.
+        if total == 0 or total >= MIN_WORKER_REPLICAS:
+            return None
+        names = ", ".join(f"{name} (replicas: {count})" for name, count in workers.items())
+        evidence = f"Worker Deployments: {names}; {total} worker replica in total."
+    else:
+        # Kubernetes shows no worker (or was not given): the instances n8n itself listed
+        # in the debug information, which says nothing unless the mode is known to be queue.
+        cluster = (debug_info.of(snapshot) or {}).get("cluster") or {}
+        env = with_debug_info(snapshot, "EXECUTIONS_MODE", rests_on_text=True)
+        if (cluster.get("instances") or {}).get("worker") != 1 or env is None or not is_queue_mode(env):
+            return None
+        evidence = (
+            f"The {debug_info.phrase(debug_info.of(snapshot))} lists 1 worker instance; "
+            f"{shown(env, 'EXECUTIONS_MODE')}.{env.note}"
+        )
     return Finding(
         rule_id="SCAL-002",
         area="scalability",
         severity="warning",
         title="Only one queue-mode worker",
-        evidence=f"Worker Deployments: {names}; {total} worker replica in total.",
+        evidence=evidence,
         impact=(
             "A single worker runs every production execution, so its restart, eviction or "
             "an out-of-memory kill pauses all workflows, and throughput is capped at one "

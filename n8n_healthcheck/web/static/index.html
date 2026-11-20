@@ -58,6 +58,16 @@
     <!-- method=post: if the script ever fails to load, values still never reach the URL. -->
     <form id="run-form" method="post" action="/api/run" novalidate autocomplete="off" hidden>
 
+      <fieldset class="source" data-source="debug_info">
+        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+        <p class="source__hint"></p>
+        <div class="field">
+          <label for="f-debug">Paste the debug information <span class="field__note">(up to 64 KB; text around it, such as a ticket's or a chat's, is ignored)</span></label>
+          <textarea id="f-debug" name="debug_info_text" rows="6" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="# Debug info&#10;&#10;## core&#10;&#10;- n8nVersion: …" aria-describedby="e-debug"></textarea>
+          <p class="field__error" id="e-debug" hidden></p>
+        </div>
+      </fieldset>
+
       <fieldset class="source" data-source="url">
         <legend><span class="source__name"></span> <span class="source__state"></span></legend>
         <p class="source__hint"></p>

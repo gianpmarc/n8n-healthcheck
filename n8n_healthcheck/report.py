@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+
+from . import debug_info
 from .engine import SKIPPED_RULE_ID, score
 from .models import AREAS, SEVERITIES, Finding, Snapshot
 from .rules._helpers import effective_env
@@ -17,6 +20,9 @@ SECTIONS = {
 }
 
 SEVERITY_HEADINGS = {"critical": "Critical", "warning": "Warnings", "info": "Info"}
+
+# A debug information older than this is still read, with a warning.
+DEBUG_INFO_STALE_DAYS = 30
 
 
 def _plural(count: int, noun: str) -> str:
@@ -64,6 +70,29 @@ def _summary(findings: list[Finding], missing: int, skipped: int, sources: int) 
     return " ".join(sentences)
 
 
+def _debug_info_summary(section: dict, alone: bool, failed: tuple[str, ...], today: date) -> str:
+    """The Summary sentences about the debug information. It is not one of SECTIONS."""
+    day = section.get("generated_on")
+    sentences = [f"Debug information generated on {day} was read." if day else "Debug information was read, date unknown."]
+    if day:
+        age = (today - date.fromisoformat(day)).days
+        if age > DEBUG_INFO_STALE_DAYS:
+            sentences.append(f"It was generated {age} days ago, the instance may have changed.")
+    else:
+        sentences.append("It may be old, and the instance may have changed.")
+    if section.get("cluster") is None:
+        sentences.append(
+            "The number of replicas and whether every process runs the same version cannot "
+            f"be told from it: {debug_info.NO_CLUSTER}."
+        )
+    if alone:
+        sentences.append(
+            "The check rests on the debug information only: none of the six data sources was "
+            f"{'collected' if failed else 'given'}."
+        )
+    return " ".join(sentences)
+
+
 def _not_run_summary(failed: tuple[str, ...], reasons: tuple[str, ...]) -> str:
     names = ", ".join(label.split(" (")[0] for name, label in SECTIONS.items() if name in failed)
     sentences = [f"This health check could not run: none of the requested data sources could be collected ({names})."]
@@ -81,6 +110,7 @@ def build_report(
     findings: list[Finding],
     failed: tuple[str, ...] = (),
     could_not_run: tuple[str, ...] | None = None,
+    today: date | None = None,
 ) -> dict:
     """Everything the report says, as data. render_markdown() and the web API both read it.
 
@@ -89,6 +119,10 @@ def build_report(
     (the collectors' failure lines, possibly none) when no requested source was
     collected: the summary then says so instead of counting zero findings. The
     CLI stops before the report in that case; the web API still returns one.
+
+    A debug information (snapshot.debug_info) is not one of the six data sources: it adds
+    its own sentences to the summary, and a run that has nothing else is still assessed,
+    with partial scores. `today` is the day of the run in UTC, for the age of that text.
 
     Returns {"n8n_version", "summary", "partial", "scores": [{"area", "score"
     (None when nothing was collected), "partial", "findings"}], "not_assessed":
@@ -112,7 +146,8 @@ def build_report(
     area_scores = score(findings)
     # Rules are not tied to one data source, so any gap makes every score
     # partial; with no data at all there is no score to show.
-    no_data = len(missing) == len(SECTIONS)
+    alone = len(missing) == len(SECTIONS) and debug_info.of(snapshot) is not None
+    no_data = len(missing) == len(SECTIONS) and not alone
     scores = [
         {
             "area": area,
@@ -147,11 +182,25 @@ def build_report(
         for f in skipped
     ]
 
+    if could_not_run is not None:
+        summary = _not_run_summary(failed, could_not_run)
+    else:
+        summary = _summary(findings, len(missing), len(skipped), len(SECTIONS) - metrics_disabled)
+        if debug_info.of(snapshot) is not None:
+            today = today or datetime.now(timezone.utc).date()
+            summary += " " + _debug_info_summary(debug_info.of(snapshot), alone, failed, today)
+
+    version = snapshot.n8n_version
+    if version is None and debug_info.of(snapshot) is not None:
+        # The version in the text, under the precedence of the fact `n8n.version`: not
+        # when Kubernetes names one. Imported here: profile imports this module.
+        from . import profile
+
+        version = profile.text_version(snapshot)
+
     return {
-        "n8n_version": snapshot.n8n_version,
-        "summary": _summary(findings, len(missing), len(skipped), len(SECTIONS) - metrics_disabled)
-        if could_not_run is None
-        else _not_run_summary(failed, could_not_run),
+        "n8n_version": version,
+        "summary": summary,
         "partial": partial,
         "scores": scores,
         "not_assessed": not_assessed,
@@ -164,9 +213,10 @@ def render_markdown(
     findings: list[Finding],
     failed: tuple[str, ...] = (),
     could_not_run: tuple[str, ...] | None = None,
+    today: date | None = None,
 ) -> str:
     """Render the report built by build_report() (same arguments) as Markdown."""
-    data = build_report(snapshot, findings, failed, could_not_run)
+    data = build_report(snapshot, findings, failed, could_not_run, today)
     findings = data["findings"]
 
     title = "# n8n health check report"

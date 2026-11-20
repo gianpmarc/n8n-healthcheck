@@ -4,8 +4,18 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .. import debug_info
 from ..models import Finding, Snapshot
-from ._helpers import effective_env, env_flag, is_queue_mode, n8n_containers, num, shown, size, unknown
+from ._helpers import (
+    env_flag,
+    is_queue_mode,
+    n8n_containers,
+    num,
+    shown,
+    size,
+    unknown,
+    with_debug_info,
+)
 
 # Redis starts evicting (or, with noeviction, rejecting writes) at maxmemory. 80% leaves
 # headroom for a burst: each large webhook response in flight can hold about
@@ -24,7 +34,7 @@ BACKLOG_MIN_WAITING = 100
 
 # https://docs.n8n.io/deploy/host-n8n/install-options/production-requirements#database
 def sqlite_in_queue_mode(snapshot: Snapshot) -> Optional[Finding]:
-    env = effective_env(snapshot)
+    env = with_debug_info(snapshot, "EXECUTIONS_MODE", "DB_TYPE")
     if env is None or not is_queue_mode(env):
         return None
     # DB_TYPE_FILE reads the value from a file we cannot see.
@@ -200,10 +210,10 @@ def readiness_failing(snapshot: Snapshot) -> Optional[Finding]:
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/scaling/enable-queue-mode#multi-main-setup
 def single_main(snapshot: Snapshot) -> Optional[Finding]:
-    env = effective_env(snapshot)
+    multi_main = "N8N_MULTI_MAIN_SETUP_ENABLED"
+    env = with_debug_info(snapshot, "EXECUTIONS_MODE", multi_main)
     if env is None or not is_queue_mode(env):
         return None
-    multi_main = "N8N_MULTI_MAIN_SETUP_ENABLED"
     if env_flag(env, multi_main) is True or unknown(env, multi_main):
         return None
     return Finding(
@@ -304,6 +314,42 @@ def missing_resources(snapshot: Snapshot) -> Optional[Finding]:
     )
 
 
+# n8n's instance registry runs these checks itself; the debug information reports each
+# one's status. Only the text states them, so there is no probe to give way to.
+def cluster_check_failed(snapshot: Snapshot) -> Optional[Finding]:
+    failed = ((debug_info.of(snapshot) or {}).get("cluster") or {}).get("checks_failed")
+    if not failed:
+        return None
+    known = [name for name in failed if name != debug_info.OTHER_CHECK]
+    others = len(failed) - len(known)
+    if others:
+        # A check this tool has no name for is counted, its name never written.
+        known.append(f"{others} other check{'s' if others != 1 else ''}")
+    return Finding(
+        rule_id="REL-009",
+        area="reliability",
+        severity="warning",
+        title="A cluster check failed",
+        evidence=(
+            f"The {debug_info.phrase(debug_info.of(snapshot))} lists "
+            f"{len(failed)} failed cluster check{'s' if len(failed) != 1 else ''}: {', '.join(known)}."
+        ),
+        impact=(
+            "n8n runs these checks on the processes that registered with the instance. A "
+            "failed one means they do not form one consistent cluster: for example two "
+            "processes sharing a host id (hostid-clash), more than one leader "
+            "(split-brain) or processes on different versions (version-mismatch). "
+            "Scheduled work can then run twice or not at all."
+        ),
+        recommendation=(
+            "Open Help > About n8n > Debug information on the instance again to see whether "
+            "the check still fails, then read the logs of every main, worker and webhook "
+            "process around that time. Give every process its own host id and the same n8n "
+            "version, and make sure only one main is the leader."
+        ),
+    )
+
+
 RULES = [
     sqlite_in_queue_mode,
     redis_eviction_policy,
@@ -313,4 +359,5 @@ RULES = [
     single_main,
     missing_probes,
     missing_resources,
+    cluster_check_failed,
 ]

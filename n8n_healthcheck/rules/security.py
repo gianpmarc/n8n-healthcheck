@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .. import debug_info
 from ..models import Finding, Snapshot
 from ._helpers import (
     effective_env,
@@ -13,13 +14,14 @@ from ._helpers import (
     shown,
     shown_each,
     unknown,
+    with_debug_info,
     worker_envs,
 )
 
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/basic-configuration/use-environment-variables/security
 def insecure_cookie(snapshot: Snapshot) -> Optional[Finding]:
-    env = effective_env(snapshot)
+    env = with_debug_info(snapshot, "N8N_SECURE_COOKIE")
     if env is None or env_flag(env, "N8N_SECURE_COOKIE") is not False:
         return None
     return Finding(
@@ -94,4 +96,36 @@ def task_runners_not_external(snapshot: Snapshot) -> Optional[Finding]:
     )
 
 
-RULES = [insecure_cookie, task_runners_not_external]
+# https://docs.n8n.io/deploy/host-n8n/configure-n8n/basic-configuration/use-environment-variables/security
+def file_access_not_blocked(snapshot: Snapshot) -> Optional[Finding]:
+    name = "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES"
+    # Fires only on what the debug information flags. A probe that states the variable
+    # still wins: set to true there, the rule is silent.
+    if not ((debug_info.of(snapshot) or {}).get("insecure") or {}).get("file_access_blocked"):
+        return None
+    env = with_debug_info(snapshot, name, rests_on_text=True)
+    if env is None or env_flag(env, name) is not False:
+        return None
+    return Finding(
+        rule_id="SEC-003",
+        area="security",
+        severity="warning",
+        title="Access to n8n's own files is not blocked",
+        evidence=(
+            f"The {debug_info.phrase(debug_info.of(snapshot))} flags blockFileAccessToN8nFiles as false; "
+            f"{shown(env, name)} (default: true).{env.note}"
+        ),
+        impact=(
+            "Nodes that read files from disk can open n8n's own directory and configuration "
+            "files, which hold the instance's encryption key, so anyone who can build a "
+            "workflow can read the key that protects every stored credential."
+        ),
+        recommendation=(
+            f"Remove {name}=false so the default of true applies. If workflows need files "
+            "on disk, keep them outside n8n's directory and limit the nodes to that place "
+            "with N8N_RESTRICT_FILE_ACCESS_TO."
+        ),
+    )
+
+
+RULES = [insecure_cookie, task_runners_not_external, file_access_not_blocked]

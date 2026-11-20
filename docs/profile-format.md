@@ -99,6 +99,13 @@ One state for each thing the tool can read: `health`, `metrics`, `env`,
 Kubernetes instead, `env` stays `not_provided` and each fact says where it came
 from in its own `source`.
 
+From tool version 0.4.0 a file also lists a seventh source, `debug_info`: the
+"Debug information" text n8n offers under Help > About n8n (see "Facts from the
+debug information"). Its state is `collected` or `not_provided`, never
+`failed`: a text that cannot be read stops the run before anything is written.
+A file written by version 0.2.0 or 0.3.0 does not have it, and a reader must
+not require it.
+
 ## Facts
 
 Every fact has the same five fields:
@@ -109,11 +116,13 @@ Every fact has the same five fields:
 | `provenance` | `measured`, `unknown`, `withheld`, or `declared` (see below). |
 | `value` | The value when `provenance` is `measured` or `declared`; otherwise `null`. |
 | `source` | Which source a measured value came from (a key of `sources`); `null` for every other provenance. |
-| `detail` | One short fixed sentence when it helps, for example why a fact is unknown. May be empty. Never quotes what was observed. |
+| `detail` | One short fixed sentence when it helps, for example why a fact is unknown. May be empty. Never quotes what was observed. For a fact read from a debug information it carries the date that text was generated: a date, never text that was observed. |
 
 Provenance:
 
-- `measured`: the tool read it from the environment.
+- `measured`: the tool read it from the environment. This includes a value
+  read from a debug information, which n8n generates itself: its `source` is
+  `debug_info` and its `detail` says how old the text is.
 - `unknown`: the tool could not tell for certain. `detail` says why. Unknown
   never means "no" or "zero".
 - `withheld`: the person who ran the tool chose to leave it out. It was not
@@ -164,7 +173,7 @@ this version applies": look the default up for the n8n version in `n8n.version`.
 | `multi_main.enabled` | boolean | `N8N_MULTI_MAIN_SETUP_ENABLED`. |
 | `task_runners.enabled` | boolean | `N8N_RUNNERS_ENABLED`. |
 | `task_runners.mode` | `internal`, `external` | `N8N_RUNNERS_MODE`. |
-| `binary_data.mode` | `default`, `filesystem`, `s3`, `azure`, `database` | `N8N_DEFAULT_BINARY_DATA_MODE`. |
+| `binary_data.mode` | `default`, `filesystem`, `s3`, `azure`, `database` | `N8N_DEFAULT_BINARY_DATA_MODE`: the value of the variable. When the fact is read from a debug information instead, it is the effective mode, whatever set it (n8n's `memory` is written as `default`). |
 | `metrics.enabled` | boolean | `true` when the metrics endpoint answered, `false` when it answered "not found". |
 | `pruning.enabled` | boolean | `EXECUTIONS_DATA_PRUNE`. |
 | `pruning.max_age_hours` | integer | `EXECUTIONS_DATA_MAX_AGE`. |
@@ -193,6 +202,8 @@ Value shapes:
   number is not a version and gives `unknown`.
 - **integer**, **number**: never negative. Read only from plain ASCII digits; a
   value written any other way (`1_000`, digits of another script) is unknown.
+  One fact, `main.concurrency_limit`, may be the word `unlimited` instead of a
+  number (see "Facts from the debug information").
 - **resources object**:
   `{"requests": {"cpu": "200m", "memory": "512Mi"}, "limits": {"cpu": null, "memory": "1Gi"}}`.
   Each quantity is a Kubernetes quantity as a string, or `null` when not set.
@@ -233,6 +244,77 @@ as a main container called `n8n` is treated like an exporter and left out, so
 
 `n8n.image_official` is `false` for a copy of the official image kept in
 another registry: it says where the image is pulled from, not what is in it.
+
+## Facts from the debug information
+
+Every n8n instance can produce a short text under Help > About n8n > Debug
+information. From tool version 0.4.0 that text is a source (`--debug-info`), and
+it can be the only one. The tool reads known values, numbers and versions from
+it and nothing else: the instance id, the host ids, the browser's user agent
+and the warning codes in it are never stored, in a profile or anywhere else.
+
+A fact read from it has `provenance: "measured"`, `source: "debug_info"` and a
+`detail` that says when the text was generated: "debug information generated on
+2026-11-19", or "debug information, date unknown" when the text carries no
+readable date or one in the future. The text may be old: read the date.
+
+**A probe wins, value by value.** The debug information fills a fact only where
+no other source of the same run states that value. A variable that is set in
+the env file or in a main container, readable or not, is stated, and the debug
+information is not used for it. A variable that is simply not set is not
+stated: the debug information reports the effective value, which is better
+evidence than a default, so it is used, also for the three facts under
+"Defaults". No comparison is made and no disagreement is reported.
+
+It can fill these facts of the catalogue above: `n8n.version`,
+`executions.mode` (`queue` for every "scaling" value n8n writes),
+`multi_main.enabled` (not from a text of n8n 1.x, which says "scaling" without
+the number of mains), `database.engine`, `pruning.enabled`,
+`pruning.max_age_hours`, `binary_data.mode` (the effective mode), and
+`main.replicas`, `worker.replicas` and `webhook.replicas`. `worker.concurrency`
+is never read from it.
+
+The three replica facts are counted from the instances n8n lists in the text's
+`cluster` section, when Kubernetes was not read or shows no container of that
+role; the detail then adds "counted from the instances n8n listed". A type with
+no instance listed is `unknown`, never `0`. A text without a `cluster` section
+leaves them `unknown` with the detail "this debug information has no cluster
+section (older n8n, or the instance registry was not loaded)".
+
+### Added in tool version 0.4.0
+
+| Id | Value | From |
+|---|---|---|
+| `n8n.node_version` | version | The Node.js version n8n runs on. |
+| `n8n.platform` | `docker_self_hosted`, `docker_cloud`, `npm` | How n8n says it is installed. |
+| `license.type` | `community`, `enterprise_production`, `enterprise_sandbox` | The kind of license that is active. |
+| `main.concurrency_limit` | integer of at least 1, or the word `unlimited` | The limit on concurrent production executions of the main process (`N8N_CONCURRENCY_PRODUCTION_LIMIT`); `unlimited` when n8n reports `-1`. It is not the worker concurrency. |
+| `executions.save_success` | `all`, `none` | Whether the data of successful executions is saved. |
+| `executions.save_error` | `all`, `none` | Whether the data of failed executions is saved. |
+| `executions.save_progress` | boolean | Whether execution progress is saved after every node. |
+| `executions.save_manual` | boolean | Whether manual executions are saved. |
+| `pruning.max_count` | integer | How many executions are kept before the oldest are pruned. |
+| `cluster.versions_aligned` | boolean | `true` when the instances n8n lists all run one version. Unknown, with a detail that says another source states the versions, when Kubernetes was read and its image tags name a version: the check outcome then judges the versions from Kubernetes. |
+| `cluster.checks_failed` | integer | How many of n8n's own cluster checks have the status "failed". A check that succeeded with warnings does not count. |
+| `security.secure_cookie` | `false` only | `false` when n8n flags the session cookie as not restricted to HTTPS. |
+| `security.file_access_blocked` | `false` only | `false` when n8n flags that access to its own files is not blocked. |
+
+These ids are in every file written by tool version 0.4.0 or later, after the
+ids of "Declared facts", in this order. A file written by version 0.2.0 or
+0.3.0 has none of them.
+
+- **No debug information.** Each is `unknown` with the detail "The debug
+  information was not provided". In this version no other source fills them.
+- **Stated by a probe.** The eight that correspond to an n8n variable
+  (`main.concurrency_limit`, the four `executions.save_*`, `pruning.max_count`
+  and the two `security.*`) are `unknown`, with a detail that says another
+  source states the setting, when that variable is set in the env file or in a
+  main container: the variable is then in "Settings".
+- **The two `security` facts** are written only as `false`. n8n reports these
+  settings only when they are insecure, and older n8n versions do not report
+  them at all, so silence is `unknown` with the detail "n8n reports this only
+  when it is insecure", never `true`.
+- **The two `cluster` facts** are `unknown` without a `cluster` section.
 
 ## Declared facts
 
@@ -407,7 +489,9 @@ document that quotes raw values as evidence; share it or not as before.
   absent. That list is frozen: ids a later tool version adds are written by
   that version but are not required of a file, so a newer tool still opens a
   file written by an older one. Version 0.3.0 added the ids under "Declared
-  facts" this way.
+  facts" this way, and version 0.4.0 the ids under "Facts from the debug
+  information" and the source `debug_info`, which is not required of a file
+  either.
 - When a file is opened, `run.reference` must obey the rules it is typed
   under: one line, at most 200 characters, no control characters, no
   surrounding spaces. A file that is not valid is refused with a message that

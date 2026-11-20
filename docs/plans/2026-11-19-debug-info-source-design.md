@@ -42,8 +42,14 @@ more `#` on every heading.
 | `cluster` | `instanceCount`, `versions` (comma separated), `instances` (one line each: `instanceKey`, `hostId`, `instanceType` in `main`, `worker`, `webhook`, `engine`, `instanceRole` in `leader`, `follower`, `unset`, `version`), `checks` (one line each: `check`, `status` in `succeeded`, `failed`, `warnings`) | only on n8n versions from May 2026 on, and only when the instance registry is loaded |
 
 `concurrency` is the limit on concurrent production executions of the main
-process. It is not the worker concurrency. On older n8n versions `database` can
-also be `mysqldb` or `mariadb`.
+process. It is not the worker concurrency.
+
+n8n 1.x writes two values differently (`useDebugInfo.ts` at the tags 1.50.0,
+1.70.0 and 1.90.0): `executionMode` is `regular` or a bare `scaling`, which
+does not say how many mains there are, and `database` is `sqlite`, `postgres`,
+`mysql` or `mariadb`. Both are read: `scaling` is queue mode with the number of
+mains unknown, `mysql` is `mysqldb`. No other value of a key that is read
+differs in 1.x.
 
 The shape of the two list items, with made-up ids (the parser must be built on
 this shape, taken from n8n's source and from a real 3.3.0 instance):
@@ -145,10 +151,37 @@ A new module parses the text into a small dictionary and nothing else survives.
   every line, and wrapped in a code fence. Sections are recognised by their
   names. *(My call: it usually arrives through a ticket or a chat.)*
 - **What counts as a debug information.** A `core` section with a readable
-  `n8nVersion`. Anything else is refused with one sentence that does not echo
-  the text. Size limit 64 KB.
+  `n8nVersion`. Size limit 64 KB. There are three refusals, each one fixed
+  sentence that does not echo the text: larger than 64 KB, not a debug
+  information, and more than one debug information (see "One text only").
 - **Generated at.** Kept as a date. Missing, unreadable or in the future means
   "date unknown".
+- **One text only.** A text that holds more than one debug information is
+  refused with the third fixed sentence. Two texts are never merged: the values
+  of the older one would stand under the date of the newer, and instances
+  would be counted twice. A text holds more than one when:
+  - a second `Generated at` is met; or
+  - a section that already held an item that is read is opened again and holds
+    one again; or
+  - a key that is read comes twice in one section, which also catches a second
+    text that lost a heading.
+
+  A line that only names the title or a section proves nothing and is never
+  counted: n8n's own bug-report form puts "Debug Info" above the text, a
+  ticket has a label, a signature may be one word. The title does not end a
+  section, and a section heading with no item under it is not a section (a
+  bare `cluster` line does not make a text have a cluster section). Instance
+  and check lines are list items, not keys: several are normal. *(Added after
+  the first review, narrowed after the second, which found single texts
+  refused.)*
+- **Hard-wrapped list items.** An instance or check line that a mail client
+  broke is joined again before it is read. A continuation is a line that
+  follows such an item with no blank line between, has no bullet and no `#`,
+  and does not start a section, an item or the date line. Anywhere else a line
+  without a colon is a heading, and one that is not known ends the section.
+  *(Added after the review.)*
+- **UTF-16.** A file in UTF-16 with a byte order mark, which Windows PowerShell
+  writes, is read. *(Added after the review.)*
 
 ### What is kept (the snapshot section)
 
@@ -168,7 +201,7 @@ A new module parses the text into a small dictionary and nothing else survives.
  "pruning": {"enabled": bool, "max_age_hours": int | None, "max_count": int | None} | None,
  "insecure": {"secure_cookie": bool, "file_access_blocked": bool},
  "cluster": None | {"instances": {"main": int, "worker": int, "webhook": int, "engine": int},
-                    "versions": [str], "checks_failed": [str]}}
+                    "versions": [str], "checks_failed": [str] | None}}
 ```
 
 `insecure` holds `True` for a key only when the text flagged it. `binary_mode`
@@ -176,6 +209,15 @@ uses the tool's existing values (`memory` in the text is the tool's `default`).
 A saved snapshot (`--save-snapshot`) therefore holds no identifier, and an older
 snapshot without the field still loads. *(My call: the exact shape; the builder
 may adjust it as long as no identifier and no free text is in it.)*
+
+`checks_failed` is `None` when the text lists no check: the fact
+`cluster.checks_failed` is then unknown, not `0`, and `REL-009` is silent.
+
+A snapshot can be loaded from a file or built in code, so the section is never
+read as it is. Rules, facts and the report read it back through strict readers
+(one function, `debug_info.of`), which keep a value only when the parser could
+have written it: a known value, a number that is not negative, `unlimited` or
+a version. Anything else counts as not stated. *(Added after the review.)*
 
 ## Precedence
 
@@ -222,7 +264,7 @@ does not grow. Tool version becomes `0.4.0`.
 |---|---|
 | `n8n.version` | `n8nVersion` |
 | `executions.mode` | `executionMode`: `regular`, or `queue` for both scaling values |
-| `multi_main.enabled` | `executionMode` |
+| `multi_main.enabled` | `executionMode`; stays unknown for the bare `scaling` of n8n 1.x, and `REL-006` then stays silent from the text |
 | `database.engine` | `database` |
 | `pruning.enabled`, `pruning.max_age_hours` | `pruning` |
 | `binary_data.mode` | `binaryMode` |
@@ -231,7 +273,9 @@ does not grow. Tool version becomes `0.4.0`.
 `binary_data.mode` from the text is the effective mode, while from an env file
 it is the variable's value; `docs/profile-format.md` is amended to say so.
 
-A replica count from the text adds to its detail "counted from the instances
+A replica count comes from the text only when Kubernetes was not read or shows
+no container of that role. *(Added by the builder, under Precedence.)* A
+replica count from the text adds to its detail "counted from the instances
 n8n listed". `engine` instances are not part of any of the three counts. A type
 with no instance listed stays `unknown`, never `0`, as the format promises.
 Without
@@ -252,8 +296,8 @@ loaded)". `worker.concurrency` is never filled from it.
 | `executions.save_progress` | boolean | `storage.progress` |
 | `executions.save_manual` | boolean | `storage.manual` |
 | `pruning.max_count` | whole number | `pruning.maxCount` |
-| `cluster.versions_aligned` | boolean | one version among the instances |
-| `cluster.checks_failed` | whole number | checks whose status is `failed`; a succeeded check with warnings does not count |
+| `cluster.versions_aligned` | boolean | one version among the instances; gives way like `MAINT-003`: unknown when Kubernetes names the versions |
+| `cluster.checks_failed` | whole number | checks whose status is `failed`; a succeeded check with warnings does not count; unknown when the text lists no check |
 | `security.secure_cookie` | `false` only | `security.secureCookie` |
 | `security.file_access_blocked` | `false` only | `security.blockFileAccessToN8nFiles` |
 
@@ -263,6 +307,12 @@ only as `false`, when the text flags them; otherwise they are `unknown` with the
 detail "n8n reports this only when it is insecure". *(My call: an n8n version
 older than that section would look secure by silence.)* The two `cluster` facts
 are unknown without a `cluster` section, with the detail given above.
+
+The eight new facts that correspond to an n8n variable (`main.concurrency_limit`,
+the four `executions.save_*`, `pruning.max_count` and the two `security.*`) are
+`unknown`, with a detail that says another source states the setting, when a
+probe of the same run states that variable. *(Added by the builder, under
+Precedence.)*
 
 Each new fact gets a sentence for part 1 of the question sheet, as piece 2
 requires for every fact.
@@ -291,6 +341,11 @@ have. *(My call.)* Concretely:
   and none of the six data sources was given.
 - **Given next to a probe that failed.** The run counts as having collected
   something; it does not exit as "nothing collected".
+- **The title.** The report's title shows the n8n version of the text only when
+  the fact `n8n.version` rests on the text. When a probe names the version, the
+  title is what it is without a debug information (the version from the metrics
+  endpoint, or none), so the title and the fact never disagree. *(Added after
+  the review.)*
 
 The test that ties `Snapshot`'s fields to `report.SECTIONS` changes to allow
 this one field outside the six.
@@ -351,9 +406,11 @@ All three go in the Summary, after the line that says the text was read:
 
 It is a source flag like the others: it may be the only one, it combines with
 them, and `--save-snapshot` stores the section. A file that cannot be read, is
-larger than 64 KB or is not a debug information is a usage error (exit 3)
-before anything is collected, with no part of the text in the message. Existing
-flags and their abbreviations keep their meaning.
+larger than 64 KB, is not a debug information or holds more than one is a usage
+error (exit 3) before anything is collected, with no part of the text in the
+message. `--debug-info` with `--snapshot` is a usage error too: a saved
+snapshot already holds what was read. Existing flags and their abbreviations
+keep their meaning.
 
 ## Web interface
 
