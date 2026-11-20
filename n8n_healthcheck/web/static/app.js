@@ -8,6 +8,7 @@
 
 (() => {
   const MAX_BODY_BYTES = 1024 * 1024; // same limit as the server
+  const MAX_DEBUG_INFO_BYTES = 64 * 1024; // same limit as the server's parser
   // The server gives up on each source after a few seconds, so a run ends well within this.
   const RUN_TIMEOUT_MS = 3 * 60 * 1000;
   const SVG_NS = "http://www.w3.org/2000/svg";
@@ -75,6 +76,8 @@
     postgres: { label: "Postgres database", source: "postgres", missing: "No Postgres connection string was given." },
     redis: { label: "Redis queue", source: "redis", missing: "No Redis connection URL was given." },
     kubernetes: { label: "Kubernetes workloads", source: "kubernetes", missing: "No Kubernetes namespace was given." },
+    // Not one of the six data sources: it is named among a profile's sources, never under "Not assessed".
+    debug_info: { label: "n8n debug information" },
   };
 
   const REASONS = {
@@ -230,7 +233,7 @@
   }
 
   function clearErrors() {
-    for (const id of ["e-url", "e-env", "e-postgres", "e-redis", "e-kube"]) setFieldError(id, null);
+    for (const id of ["e-debug", "e-url", "e-env", "e-postgres", "e-redis", "e-kube"]) setFieldError(id, null);
     $("form-error").hidden = true;
   }
 
@@ -251,6 +254,14 @@
   function buildRequest() {
     const body = {};
     const errors = []; // { errorId, message, focus, inputs }
+
+    // Sent as it was pasted: the server reads what it knows and discards the rest.
+    const debugInfo = value("f-debug");
+    if (debugInfo.trim()) {
+      const bytes = new TextEncoder().encode(debugInfo).length;
+      if (bytes <= MAX_DEBUG_INFO_BYTES) body.debug_info_text = debugInfo;
+      else errors.push({ errorId: "e-debug", focus: "f-debug", inputs: [$("f-debug")], message: `This text is ${formatBytes(bytes)}; the limit is 64 KB. A debug information is a few KB: paste only the text copied from Help > About n8n > Debug information, without the rest of the ticket or chat.` });
+    }
 
     const url = value("f-url").trim();
     if (url) {
@@ -355,6 +366,7 @@
     setRunning(true);
     announce("Health check running. This can take up to a minute. A profile can be opened when it has finished.");
     let failure = null;
+    let refused = null; // the server's sentence for a debug information it did not accept
     let data = null;
     const abort = new AbortController();
     const deadline = setTimeout(() => abort.abort(), RUN_TIMEOUT_MS);
@@ -373,7 +385,9 @@
       if (response.ok && data && data.profile) data.profile = parseExact(text).profile;
       // The deadline can also pass while the body is still arriving; that is a timeout, not a bad report.
       if (abort.signal.aborted) throw new Error("timeout");
-      if (!response.ok) {
+      if (response.status === 400 && data && data.field === "debug_info_text" && typeof data.error === "string") {
+        refused = `${capitalize(data.error)}.`;
+      } else if (!response.ok) {
         failure = describeFailure(response.status, data && typeof data.error === "string" ? data.error : "");
       } else if (!data || !Array.isArray(data.findings) || !Array.isArray(data.scores)) {
         failure = ["The server sent a report this page could not read.", "Try again; if it keeps happening, the page and the server may be different versions — restart “n8n-healthcheck serve” and reload."];
@@ -386,6 +400,14 @@
     clearTimeout(deadline);
     setRunning(false);
 
+    if (refused) {
+      // Nothing was collected. The sentence is the server's own and quotes nothing of the text.
+      if ($("view-form").hidden) showView("form");
+      setFieldError("e-debug", refused, [$("f-debug")]);
+      $("f-debug").focus();
+      announce(`The debug information was not accepted. ${refused}`);
+      return;
+    }
     if (failure) {
       if ($("view-form").hidden) showView("form"); // an error is never written to a hidden view
       showFormError(failure[0], failure[1], true);

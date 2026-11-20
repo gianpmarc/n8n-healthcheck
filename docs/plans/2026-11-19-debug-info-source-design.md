@@ -273,7 +273,9 @@ does not grow. Tool version becomes `0.4.0`.
 `binary_data.mode` from the text is the effective mode, while from an env file
 it is the variable's value; `docs/profile-format.md` is amended to say so.
 
-A replica count from the text adds to its detail "counted from the instances
+A replica count comes from the text only when Kubernetes was not read or shows
+no container of that role. *(Added by the builder, under Precedence.)* A
+replica count from the text adds to its detail "counted from the instances
 n8n listed". `engine` instances are not part of any of the three counts. A type
 with no instance listed stays `unknown`, never `0`, as the format promises.
 Without
@@ -305,6 +307,12 @@ only as `false`, when the text flags them; otherwise they are `unknown` with the
 detail "n8n reports this only when it is insecure". *(My call: an n8n version
 older than that section would look secure by silence.)* The two `cluster` facts
 are unknown without a `cluster` section, with the detail given above.
+
+The eight new facts that correspond to an n8n variable (`main.concurrency_limit`,
+the four `executions.save_*`, `pruning.max_count` and the two `security.*`) are
+`unknown`, with a detail that says another source states the setting, when a
+probe of the same run states that variable. *(Added by the builder, under
+Precedence.)*
 
 Each new fact gets a sentence for part 1 of the question sheet, as piece 2
 requires for every fact.
