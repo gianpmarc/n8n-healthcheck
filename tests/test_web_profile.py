@@ -933,7 +933,10 @@ class PageBehaviourTest(unittest.TestCase):
                   await page.finishRun(input.response);
                   const saved = await page.download();
                   const first = { view: page.view(), label: page.$("status-label").textContent, partial: page.visible("status-partial"),
-                           summary: page.$("summary").textContent, note: page.visible("status-note"), meta: page.$("report-meta").textContent,
+                           summary: page.$("summary").textContent, stats: page.$("stats").textContent,
+                           points: page.visible("summary-points") && page.$("summary-points").textContent,
+                           urgent: page.visible("urgent") && [page.$("urgent-title").textContent, page.$("urgent-text").textContent],
+                           note: page.visible("status-note"), meta: page.$("report-meta").textContent,
                            scores: page.$("scores").textContent, scoresNote: page.$("scores-note").textContent,
                            assessed: page.$("not-assessed").textContent, share: page.$("share-body").textContent, saved,
                            report: page.$("view-report").textContent };
@@ -948,10 +951,17 @@ class PageBehaviourTest(unittest.TestCase):
                 self.assertEqual(got["view"], "report")
                 self.assertNotIn("could not run", got["label"])
                 self.assertTrue(got["partial"])
-                # The whole Summary of the report, with its lines about the debug information.
-                self.assertEqual(got["summary"], sent["summary"])
-                self.assertIn("Debug information generated on 2026-11-19 was read.", got["summary"])
-                self.assertIn("rests on the debug information only", got["summary"])
+                # The Summary of the report in parts: the counts, the first fix, then every other
+                # sentence as the API wrote it, with its lines about the debug information.
+                notes, top = sent["summary_notes"], sent["findings"][0]
+                self.assertEqual(got["summary"], notes[0])
+                self.assertEqual(got["points"], "".join(notes[1:]))
+                self.assertIn("Debug information generated on 2026-11-19 was read.", got["points"])
+                self.assertIn("rests on the debug information only", got["points"])
+                counts = [sum(f["severity"] == s for f in sent["findings"]) for s in ("critical", "warning", "info")]
+                self.assertEqual(got["stats"], f"{counts[0]} critical{counts[1]} warning{'' if counts[1] == 1 else 's'}{counts[2]} info0/6 data sources readdebug information read")
+                self.assertEqual(sent["sources"], {"assessed": 0, "total": 6, "debug_info": True})
+                self.assertEqual(got["urgent"], [top["title"], top["recommendation"]])
                 self.assertFalse(got["note"])
                 self.assertIn("n8n 3.3.0", got["meta"])
                 self.assertEqual(got["scores"].count("Partial"), len(sent["scores"]))
@@ -968,6 +978,23 @@ class PageBehaviourTest(unittest.TestCase):
                 self.assertEqual(got["again"], {"view": "form", "kept": True})
                 for text in (got["report"], got["saved"], got["opened"]["shown"], response):
                     self.assertNotIn(pasted.MARK, text)
+
+    def test_a_check_that_could_not_run_shows_its_summary_whole_without_the_parts(self):
+        response = run_response(Snapshot())
+        sent = json.loads(response)
+        self.assertEqual((sent["exit_code"], sent["summary_notes"]), (3, None))
+        got = run_page(
+            """async (page, input) => {
+              await page.run(input.response);
+              return { label: page.$("status-label").textContent, summary: page.$("summary").textContent,
+                       parts: ["stats", "urgent", "summary-points"].map((id) => [page.visible(id), page.$(id).textContent]) };
+            }""",
+            response=response,
+        )
+        self.assertEqual(got["label"], "The check could not run")
+        self.assertEqual(got["summary"], sent["summary"])
+        # "urgent" is the title and the text the page fills; its static label is not in the harness.
+        self.assertEqual(got["parts"], [[False, ""]] * 3)
 
     def test_download_saves_exactly_what_is_ticked(self):
         response = run_response()

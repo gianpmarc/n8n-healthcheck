@@ -205,6 +205,13 @@
       <div class="status__body">
         <p class="status__label"><span id="status-label"></span> <span id="status-partial" class="tag tag--partial" hidden>Partial report</span></p>
         <p class="status__summary" id="summary"></p>
+        <ul class="stats" id="stats" hidden></ul>
+        <div class="urgent" id="urgent" hidden>
+          <p class="urgent__label">Fix this first</p>
+          <p class="urgent__title"><strong id="urgent-title"></strong></p>
+          <p id="urgent-text"></p>
+        </div>
+        <ul class="status__points" id="summary-points" hidden></ul>
         <p class="status__note" id="status-note" hidden></p>
       </div>
     </div>
@@ -244,13 +251,13 @@
 
     <section aria-labelledby="warn-title" class="block" id="warnings-block" hidden>
       <h3 id="warn-title">Messages from the collectors</h3>
-      <p class="block__note">What the tool reported while reading your sources. Useful when a source could not be read.</p>
+      <p class="block__note"><strong class="lead-in">What the tool reported while reading your sources.</strong> Useful when a source could not be read.</p>
       <ul class="messages" id="warnings"></ul>
     </section>
 
     <section aria-labelledby="share-title" class="block" id="share-block" hidden>
       <h3 id="share-title">Share the environment profile</h3>
-      <p class="block__note">The profile is one JSON file of facts about this environment, for whoever helps you with it. Review it here, withhold what you do not want to share, then download it and send it yourself.</p>
+      <p class="block__note"><strong class="lead-in">The profile is one JSON file of facts about this environment, for whoever helps you with it.</strong> Review it here, withhold what you do not want to share, then download it and send it yourself.</p>
       <ul class="assurances">
         <li><strong>What it never contains.</strong> No secret, host name, URL, IP address, file path, e-mail address, or Deployment, namespace or registry name. A setting's value is written only when it is a boolean, a number or a fixed word; otherwise the file only says it is set.</li>
         <li><strong>Nothing is sent anywhere.</strong> The file is made in this browser and saved on this computer.</li>
@@ -273,7 +280,7 @@
 
         <section class="ppart" id="questions-block" aria-labelledby="questions-title" hidden>
           <h4 id="questions-title">A few questions</h4>
-          <p class="block__note">Some things no probe can read. Every question is optional: leave any of them on “No answer”. An answer is written to the file as “declared”, so the reader can tell it from what the tool measured. What the tool measured is listed below, with your answers.</p>
+          <p class="block__note"><strong class="lead-in">Some things no probe can read.</strong> Every question is optional: leave any of them on “No answer”. An answer is written to the file as “declared”, so the reader can tell it from what the tool measured. What the tool measured is listed below, with your answers.</p>
           <p class="block__note" id="questions-empty" hidden>Nothing to ask: the tool measured every one of these itself.</p>
           <div id="questions-list"></div>
         </section>

@@ -3,7 +3,7 @@ import unittest
 
 from n8n_healthcheck import engine
 from n8n_healthcheck.models import Finding, Snapshot
-from n8n_healthcheck.report import SECTIONS, render_markdown
+from n8n_healthcheck.report import SECTIONS, build_report, render_markdown
 
 FULL = Snapshot(health={}, metrics={}, env={}, postgres={}, redis={}, kubernetes={}, n8n_version="1.70.0")
 
@@ -47,6 +47,25 @@ class RenderTest(unittest.TestCase):
         self.assertIn("1 critical issue, 1 warning and 0 informational notes", summary)
         self.assertIn("The most urgent fix: Execution data is never pruned", summary)
         self.assertIn("Set EXECUTIONS_DATA_PRUNE=true.", summary)
+
+    def test_summary_notes_are_the_summary_without_the_counts_and_the_fix(self):
+        data = build_report(Snapshot(env={}, postgres={}), [WARNING, CRITICAL])
+        counts, fix = "This health check found 1 critical issue, 1 warning and 0 informational notes.", "The most urgent fix: "
+        self.assertEqual(len(data["summary_notes"]), 2)
+        self.assertIn("This report is partial: only 2 of 6 data sources were assessed", data["summary_notes"][1])
+        # Nothing of the summary is lost between the three parts, and nothing is said twice.
+        rest = data["summary"]
+        for part in (counts, *data["summary_notes"]):
+            self.assertEqual(rest.count(part), 1)
+            rest = rest.replace(part, "")
+        self.assertEqual(rest.strip(), f"{fix}{CRITICAL.title} — {CRITICAL.recommendation}")
+        self.assertEqual(data["sources"], {"assessed": 2, "total": 6, "debug_info": False})
+        self.assertEqual(build_report(FULL, [])["summary_notes"], ["Nothing needs attention right now."])
+
+    def test_summary_notes_are_absent_when_the_check_could_not_run(self):
+        data = build_report(Snapshot(), [], failed=("redis",), could_not_run=("redis_url: not collected",))
+        self.assertIsNone(data["summary_notes"])
+        self.assertIn("could not run", data["summary"])
 
     def test_score_table_reflects_findings(self):
         scores = section(render_markdown(FULL, [CRITICAL, WARNING]), "Scores")

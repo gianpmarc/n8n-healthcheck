@@ -34,7 +34,12 @@ def _one_line(text: str) -> str:
     return " ".join(str(text).split())
 
 
-def _summary(findings: list[Finding], missing: int, skipped: int, sources: int) -> str:
+def _summary(findings: list[Finding], missing: int, skipped: int, sources: int) -> tuple[str, list[str]]:
+    """The summary, and its sentences other than the counts and the most urgent fix.
+
+    The page shows those two as numbers and as a callout, from the findings; the rest it
+    shows as it is written here, so that it never has to cut the text itself.
+    """
     partial = bool(missing or skipped)
     counts = {s: sum(f.severity == s for f in findings) for s in SEVERITIES}
     sentences = [
@@ -44,19 +49,20 @@ def _summary(findings: list[Finding], missing: int, skipped: int, sources: int) 
         f"{_plural(counts['info'], 'informational note')}."
     ]
     if counts["critical"]:
-        sentences.append(
+        notes = [
             "Critical issues can cause outages or data loss and should be fixed "
             "before the instance takes more load."
-        )
+        ]
     elif counts["warning"]:
-        sentences.append(
+        notes = [
             "Nothing needs emergency action, but the warnings will become "
             "problems as usage grows."
-        )
+        ]
     elif partial:
-        sentences.append("That covers only the part that could be checked, so it is not a clean bill of health.")
+        notes = ["That covers only the part that could be checked, so it is not a clean bill of health."]
     else:
-        sentences.append("Nothing needs attention right now.")
+        notes = ["Nothing needs attention right now."]
+    sentences += notes
     if findings:
         top = findings[0]
         sentences.append(f"The most urgent fix: {_one_line(top.title)} — {_one_line(top.recommendation)}")
@@ -66,11 +72,12 @@ def _summary(findings: list[Finding], missing: int, skipped: int, sources: int) 
             gaps.append(f"only {sources - missing} of {sources} data sources were assessed")
         if skipped:
             gaps.append(f"{_plural(skipped, 'check')} failed to run")
-        sentences.append(f"This report is partial: {' and '.join(gaps)}; see \"Not assessed\".")
-    return " ".join(sentences)
+        notes.append(f"This report is partial: {' and '.join(gaps)}; see \"Not assessed\".")
+        sentences.append(notes[-1])
+    return " ".join(sentences), notes
 
 
-def _debug_info_summary(section: dict, alone: bool, failed: tuple[str, ...], today: date) -> str:
+def _debug_info_summary(section: dict, alone: bool, failed: tuple[str, ...], today: date) -> list[str]:
     """The Summary sentences about the debug information. It is not one of SECTIONS."""
     day = section.get("generated_on")
     sentences = [f"Debug information generated on {day} was read." if day else "Debug information was read, date unknown."]
@@ -90,7 +97,7 @@ def _debug_info_summary(section: dict, alone: bool, failed: tuple[str, ...], tod
             "The check rests on the debug information only: none of the six data sources was "
             f"{'collected' if failed else 'given'}."
         )
-    return " ".join(sentences)
+    return sentences
 
 
 def _not_run_summary(failed: tuple[str, ...], reasons: tuple[str, ...]) -> str:
@@ -124,7 +131,9 @@ def build_report(
     its own sentences to the summary, and a run that has nothing else is still assessed,
     with partial scores. `today` is the day of the run in UTC, for the age of that text.
 
-    Returns {"n8n_version", "summary", "partial", "scores": [{"area", "score"
+    Returns {"n8n_version", "summary", "summary_notes" (the sentences of the summary other
+    than the counts and the most urgent fix; None when the check could not run), "sources":
+    {"assessed", "total", "debug_info" (whether a debug information was read)}, "partial", "scores": [{"area", "score"
     (None when nothing was collected), "partial", "findings"}], "not_assessed":
     [{"id", "label", "reason", "detail"}], "findings": [Finding] most severe first}.
     """
@@ -182,13 +191,16 @@ def build_report(
         for f in skipped
     ]
 
+    total = len(SECTIONS) - metrics_disabled
     if could_not_run is not None:
-        summary = _not_run_summary(failed, could_not_run)
+        summary, notes = _not_run_summary(failed, could_not_run), None
     else:
-        summary = _summary(findings, len(missing), len(skipped), len(SECTIONS) - metrics_disabled)
+        summary, notes = _summary(findings, len(missing), len(skipped), total)
         if debug_info.of(snapshot) is not None:
             today = today or datetime.now(timezone.utc).date()
-            summary += " " + _debug_info_summary(debug_info.of(snapshot), alone, failed, today)
+            about_text = _debug_info_summary(debug_info.of(snapshot), alone, failed, today)
+            summary += " " + " ".join(about_text)
+            notes += about_text
 
     version = snapshot.n8n_version
     if version is None and debug_info.of(snapshot) is not None:
@@ -201,6 +213,12 @@ def build_report(
     return {
         "n8n_version": version,
         "summary": summary,
+        "summary_notes": notes,
+        "sources": {
+            "assessed": total - len(missing),
+            "total": total,
+            "debug_info": debug_info.of(snapshot) is not None,
+        },
         "partial": partial,
         "scores": scores,
         "not_assessed": not_assessed,
