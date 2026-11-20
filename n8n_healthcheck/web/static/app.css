@@ -518,7 +518,7 @@ input[data-masked="true"] { -webkit-text-security: disc; }
   overflow-wrap: anywhere;
 }
 /* The summary in parts: the counts, the one thing to do first, then the small print. */
-.stats { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); margin-top: var(--space-4); list-style: none; }
+.stats { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-5); margin-top: var(--space-4); list-style: none; }
 .stat { display: flex; align-items: baseline; gap: var(--space-2); }
 .stat__n { font-size: 2rem; font-weight: 600; line-height: 1; letter-spacing: var(--tracking-tight); font-variant-numeric: tabular-nums; }
 .stat__l { color: var(--muted); font: 400 0.8125rem/1.4 var(--mono); letter-spacing: var(--tracking-label); text-transform: uppercase; }
@@ -588,11 +588,12 @@ input[data-masked="true"] { -webkit-text-security: disc; }
 }
 .block::before { left: -5px; }
 .block::after { right: -5px; }
+/* No wrapping between the number and the title: a long title breaks inside its own text
+   and the number stays on its first line. */
 .block > h3 {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2) var(--space-3);
+  align-items: baseline;
+  gap: var(--space-3);
   font-size: clamp(1.625rem, 1.35rem + 1.2vw, 2rem);
   font-weight: 600;
 }

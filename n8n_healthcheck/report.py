@@ -133,7 +133,7 @@ def build_report(
 
     Returns {"n8n_version", "summary", "summary_notes" (the sentences of the summary other
     than the counts and the most urgent fix; None when the check could not run), "sources":
-    {"assessed", "total"}, "partial", "scores": [{"area", "score"
+    {"assessed", "total", "debug_info" (whether a debug information was read)}, "partial", "scores": [{"area", "score"
     (None when nothing was collected), "partial", "findings"}], "not_assessed":
     [{"id", "label", "reason", "detail"}], "findings": [Finding] most severe first}.
     """
@@ -214,7 +214,11 @@ def build_report(
         "n8n_version": version,
         "summary": summary,
         "summary_notes": notes,
-        "sources": {"assessed": total - len(missing), "total": total},
+        "sources": {
+            "assessed": total - len(missing),
+            "total": total,
+            "debug_info": debug_info.of(snapshot) is not None,
+        },
         "partial": partial,
         "scores": scores,
         "not_assessed": not_assessed,

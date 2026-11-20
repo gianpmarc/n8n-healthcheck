@@ -59,7 +59,7 @@ class RenderTest(unittest.TestCase):
             self.assertEqual(rest.count(part), 1)
             rest = rest.replace(part, "")
         self.assertEqual(rest.strip(), f"{fix}{CRITICAL.title} — {CRITICAL.recommendation}")
-        self.assertEqual(data["sources"], {"assessed": 2, "total": 6})
+        self.assertEqual(data["sources"], {"assessed": 2, "total": 6, "debug_info": False})
         self.assertEqual(build_report(FULL, [])["summary_notes"], ["Nothing needs attention right now."])
 
     def test_summary_notes_are_absent_when_the_check_could_not_run(self):

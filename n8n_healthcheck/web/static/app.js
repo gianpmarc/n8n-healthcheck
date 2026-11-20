@@ -482,7 +482,9 @@
       stat(counts[0], "critical", counts[0] ? "critical" : ""),
       stat(counts[1], counts[1] === 1 ? "warning" : "warnings", counts[1] ? "warning" : ""),
       stat(counts[2], "info"),
-      data.sources ? stat(`${Number(data.sources.assessed)}/${Number(data.sources.total)}`, "sources read") : null,
+      data.sources ? stat(`${Number(data.sources.assessed)}/${Number(data.sources.total)}`, "data sources read") : null,
+      // A debug information is not one of the data sources counted above, so it is named.
+      data.sources && data.sources.debug_info === true ? el("li", { class: "stat" }, el("span", { class: "stat__l" }, "debug information read")) : null,
     ].filter(Boolean) : []));
     $("urgent").hidden = !notes || findings.length === 0;
     $("urgent-title").textContent = notes && findings.length ? String(findings[0].title) : "";
