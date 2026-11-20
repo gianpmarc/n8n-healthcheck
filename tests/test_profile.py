@@ -321,10 +321,18 @@ DECLARED_FACTS = [
     "database.backups", "queue.redis_topology", "secrets.source", "worker.autoscaling", "observability.tools",
 ]  # fmt: skip
 
+# Added in 0.4.0: only a debug information fills these (tests/test_debug_info.py).
+DEBUG_INFO_FACTS = [
+    "n8n.node_version", "n8n.platform", "license.type", "main.concurrency_limit", "executions.save_success",
+    "executions.save_error", "executions.save_progress", "executions.save_manual", "pruning.max_count",
+    "cluster.versions_aligned", "cluster.checks_failed", "security.secure_cookie", "security.file_access_blocked",
+]  # fmt: skip
+
 
 class CatalogueTest(unittest.TestCase):
     def test_every_table_in_this_file_covers_the_catalogue(self):
         covered = {row[0] for row in ENV_FACTS + SECTION_FACTS} | set(KUBE_FACTS) | set(DECLARED_FACTS)
+        covered |= set(DEBUG_INFO_FACTS)
         self.assertEqual(covered | {"n8n.version", "metrics.enabled"}, set(profile.FACT_IDS))
 
     def test_full_catalogue_in_order_whatever_was_collected(self):
@@ -350,6 +358,7 @@ class CatalogueTest(unittest.TestCase):
             text = handle.read()
         catalogue = text.split("### Catalogue, version 1")[1].split("\nValue shapes:")[0]
         added = text.split("### Added in tool version 0.3.0")[1].split("\nThese ids")[0]
+        added += text.split("### Added in tool version 0.4.0")[1].split("\nThese ids")[0]
         documented = set(re.findall(r"^\| `([a-z0-9_.]+)` \|", catalogue + added, re.MULTILINE))
         self.assertEqual(documented, set(profile.FACT_IDS))
 
@@ -851,6 +860,7 @@ class SourcesTest(unittest.TestCase):
                 "postgres": "collected",
                 "redis": "failed",
                 "kubernetes": "collected",
+                "debug_info": "not_provided",
             },
         )
         self.assertEqual(build(Snapshot(health={}), failed=("metrics",))["sources"]["metrics"], "failed")

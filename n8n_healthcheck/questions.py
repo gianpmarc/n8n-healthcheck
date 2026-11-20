@@ -198,7 +198,8 @@ CONVERSATION = (
     ),
 )
 
-# One sentence for each fact a probe can fill, for part 1 of the question sheet.
+# One sentence for each fact a probe or the debug information can fill, for part 1 of
+# the question sheet.
 # `orchestrator` is not here: its sentence is the operator question.
 MEASURED = {
     "n8n.version": "Which n8n version runs?",
@@ -232,6 +233,20 @@ MEASURED = {
     "resources.worker": "Which CPU and memory requests and limits do the worker containers have?",
     "probes.main": "Do the main containers have a liveness and a readiness probe?",
     "probes.worker": "Do the worker containers have a liveness and a readiness probe?",
+    # Added in 0.4.0: only the debug information states these.
+    "n8n.node_version": "Which Node.js version does n8n run on?",
+    "n8n.platform": "Does n8n run from the Docker image or from npm?",
+    "license.type": "Which kind of n8n license is active?",
+    "main.concurrency_limit": "How many production executions may the main process run at a time?",
+    "executions.save_success": "Is the data of successful executions saved?",
+    "executions.save_error": "Is the data of failed executions saved?",
+    "executions.save_progress": "Is execution progress saved after every node?",
+    "executions.save_manual": "Are manual executions saved?",
+    "pruning.max_count": "How many executions are kept before the oldest are pruned?",
+    "cluster.versions_aligned": "Do all n8n instances run the same version?",
+    "cluster.checks_failed": "How many of n8n's own cluster checks fail?",
+    "security.secure_cookie": "Is the session cookie restricted to HTTPS?",
+    "security.file_access_blocked": "Is access to n8n's own files blocked?",
 }
 
 

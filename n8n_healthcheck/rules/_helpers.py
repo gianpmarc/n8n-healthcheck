@@ -6,6 +6,7 @@ import math
 import re
 from typing import Iterator, Optional
 
+from .. import debug_info
 from ..models import REDACTED, Snapshot
 
 # Leading x.y.z of an image tag: "2.40.1", "v2.40.1" and "2.40.1-build7" are one release.
@@ -21,20 +22,26 @@ class Env(dict):
 
     `complete` is False when part of the environment could not be read, so a variable
     missing here may still be set. `source` names the Kubernetes container the values
-    came from; it is empty for an env file.
+    came from; it is empty for an env file. `from_debug_info` lists the variables whose
+    value was taken from the debug information instead (see with_debug_info()), and
+    `debug_info_label` names that text by its date.
     """
 
     complete = True
     source = ""
+    from_debug_info: tuple = ()
+    debug_info_label = ""
 
     @property
     def note(self) -> str:
         """Sentence appended to evidence so the reader can find the values."""
-        if not self.source:
-            return ""
-        note = f" Environment read from {self.source}."
-        if not self.complete:
-            note += " Part of it could not be read (a Secret or an unavailable ConfigMap)."
+        note = ""
+        if self.source:
+            note = f" Environment read from {self.source}."
+            if not self.complete:
+                note += " Part of it could not be read (a Secret or an unavailable ConfigMap)."
+        if self.from_debug_info:
+            note += f" From the {self.debug_info_label}: {', '.join(self.from_debug_info)}."
         return note
 
 
@@ -73,6 +80,68 @@ def effective_env(snapshot: Snapshot) -> Optional[Env]:
     if not mains or any((env, env.complete) != (mains[0], mains[0].complete) for env in mains):
         return None
     return mains[0]
+
+
+def debug_info_env(section: dict) -> dict:
+    """What a debug information states, as the n8n variables the rules read.
+
+    The text reports effective values, so each is written as n8n would read the variable.
+    A value the text does not state has no entry. The two security variables are there
+    only as `false`: n8n reports them only when they are insecure.
+    """
+    pruning, insecure = section.get("pruning") or {}, section.get("insecure") or {}
+    limit = section.get("concurrency_limit")
+    values = {
+        "EXECUTIONS_MODE": section.get("execution_mode"),
+        "N8N_MULTI_MAIN_SETUP_ENABLED": section.get("multi_main"),
+        "DB_TYPE": section.get("database"),
+        "N8N_CONCURRENCY_PRODUCTION_LIMIT": -1 if limit == "unlimited" else limit,
+        "EXECUTIONS_DATA_PRUNE": pruning.get("enabled"),
+        "EXECUTIONS_DATA_SAVE_ON_PROGRESS": section.get("save_progress"),
+        "N8N_SECURE_COOKIE": False if insecure.get("secure_cookie") else None,
+        "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES": False if insecure.get("file_access_blocked") else None,
+    }
+    return {name: str(value).lower() for name, value in values.items() if value is not None}
+
+
+def stated(snapshot: Snapshot, name: str) -> bool:
+    """True when a probe of this run states `name` for the main process.
+
+    Stated means set: readable or not (a Secret), or through `<NAME>_FILE`, in the env
+    file or, without one, in any main container of Kubernetes. The debug information is
+    used for a value only when this is False: a probe wins, value by value. A variable
+    that is simply not set is not stated, because the default the tool would assume is
+    weaker evidence than the effective value n8n reports.
+    """
+    if snapshot.env is not None:
+        envs = [snapshot.env]
+    else:
+        envs = [c.get("env") or {} for _, c, role in n8n_containers(snapshot.kubernetes or {}) if role == "main"]
+    return any(name in env or name + "_FILE" in env for env in envs)
+
+
+def with_debug_info(snapshot: Snapshot, *names: str) -> Optional[Env]:
+    """effective_env(), with each of `names` no probe states taken from the debug information.
+
+    A rule asks only for the variables it reads, so its evidence names exactly the values
+    that came from the text. With no probe at all the result holds those values alone and
+    is not `complete`: a variable the text does not state is unknown, never a default.
+    None when neither a probe nor the text says anything.
+    """
+    env = effective_env(snapshot)
+    if snapshot.debug_info is None:
+        return env
+    values = debug_info_env(snapshot.debug_info)
+    taken = tuple(name for name in names if name in values and not stated(snapshot, name))
+    if not taken:
+        return env
+    merged = Env(env or {})
+    merged.complete = env.complete if env is not None else False
+    merged.source = env.source if env is not None else ""
+    merged.update({name: values[name] for name in taken})
+    merged.from_debug_info = taken
+    merged.debug_info_label = debug_info.phrase(snapshot.debug_info)
+    return merged
 
 
 def unknown(env: dict, name: str) -> bool:

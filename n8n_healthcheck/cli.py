@@ -10,7 +10,7 @@ from dataclasses import asdict
 from typing import Optional
 from urllib.parse import urlsplit
 
-from . import engine, profile, questions, report
+from . import debug_info, engine, profile, questions, report
 from .models import Snapshot, Target
 
 # Exit code when the check itself could not run (bad usage, I/O error, nothing
@@ -91,7 +91,8 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         "(see `n8n-healthcheck serve --help`).",
         epilog="Exit codes: 0 no critical findings or warnings, 1 at least one warning, "
         "2 at least one critical finding, 3 the check could not run "
-        "(usage error, unreadable or unwritable file, no requested source reachable, "
+        "(usage error, unreadable or unwritable file, a text that is not a debug information, "
+        "no requested source reachable, "
         "every rule failed to run). --show-profile and --show-questions exit 0, or 3 when the file "
         "is not a usable profile.",
     )
@@ -101,6 +102,11 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     parser.add_argument("--redis-url", help="Redis connection URL")
     parser.add_argument("--kube-namespace", help="Kubernetes namespace running n8n")
     parser.add_argument("--kube-context", help="kubectl context (default: current)")
+    parser.add_argument(
+        "--debug-info",
+        metavar="FILE",
+        help='the text copied from Help > About n8n > Debug information; "-" reads it from standard input',
+    )
     parser.add_argument("--snapshot", metavar="FILE", help="load a saved snapshot instead of collecting")
     parser.add_argument("--save-snapshot", metavar="FILE", help="write the collected snapshot as JSON")
     parser.add_argument("-o", "--output", metavar="FILE", help="write the report here (default: stdout)")
@@ -181,16 +187,32 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     except profile.ProfileError as exc:
         parser.error(f"--answer: {exc} (see --list-questions)")
     args.answer = answers
-    for source in SOURCE_SECTION:
+    for source in (*SOURCE_SECTION, "debug_info"):
         value = getattr(args, source)
         # The collectors test `is None`, so "" would be collected, not ignored.
         if value is not None and not value.strip():
             parser.error(f"--{source.replace('_', '-')} must not be empty")
     if args.url and not valid_url(args.url):
         parser.error("--url must be an http:// or https:// URL with a host")
-    if not args.snapshot and not any(getattr(args, source) for source in SOURCE_SECTION):
+    if args.snapshot and args.debug_info:
+        parser.error("--debug-info cannot be combined with --snapshot: a saved snapshot already holds what was read")
+    if not args.snapshot and not any(getattr(args, source) for source in (*SOURCE_SECTION, "debug_info")):
         parser.error("nothing to inspect: give at least one source flag or --snapshot")
     return args
+
+
+def read_debug_info(path: str) -> dict:
+    """The Snapshot section for the debug information in a file, or on standard input for "-".
+
+    Raises OSError, or debug_info.DebugInfoError for a text that is refused. Reads one
+    byte more than the limit at most; bytes that are not UTF-8 are replaced, not refused.
+    """
+    if path == "-":
+        raw = sys.stdin.buffer.read(debug_info.MAX_BYTES + 1)
+    else:
+        with open(path, "rb") as handle:
+            raw = handle.read(debug_info.MAX_BYTES + 1)
+    return debug_info.parse(raw.decode("utf-8", "replace"))
 
 
 def failed_sections(target: Target, snapshot: Snapshot) -> tuple[list[str], bool]:
@@ -199,7 +221,8 @@ def failed_sections(target: Target, snapshot: Snapshot) -> tuple[list[str], bool
     # section None. Tell that apart from a source nobody asked for.
     requested = [section for source, section in SOURCE_SECTION.items() if getattr(target, source)]
     failed = [section for section in requested if getattr(snapshot, section) is None]
-    nothing_collected = failed == requested
+    # A debug information was read before the run: with it, something was collected.
+    nothing_collected = failed == requested and target.debug_info is None
     # --url also asks for metrics; only a disabled endpoint (404) excuses it.
     if target.url and snapshot.metrics is None and not (snapshot.health or {}).get("metrics_disabled"):
         failed.append("metrics")
@@ -289,6 +312,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     failed: list[str] = []  # sections requested on the command line but not collected
 
+    # Before anything is collected, and never with a part of the text in the message.
+    read = None
+    if args.debug_info is not None:
+        try:
+            read = read_debug_info(args.debug_info)
+        except OSError as exc:
+            return _error(f"cannot read the debug information: {exc.strerror}")
+        except debug_info.DebugInfoError as exc:
+            return _error(f"--debug-info: {exc}")
+
     if args.snapshot:
         try:
             with open(args.snapshot, encoding="utf-8") as fh:
@@ -306,6 +339,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             redis_url=args.redis_url,
             kube_namespace=args.kube_namespace,
             kube_context=args.kube_context,
+            debug_info=read,
         )
         try:
             snapshot = collect(target)
@@ -344,8 +378,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         if args.save_snapshot:
             with open(args.save_snapshot, "w", encoding="utf-8") as fh:
+                saved = asdict(snapshot)
+                if saved["debug_info"] is None:
+                    # Left out when not given, so that an older tool version loads the file.
+                    del saved["debug_info"]
                 # A metric can be NaN or +Inf, which json would write as invalid JSON.
-                json.dump(json_safe(asdict(snapshot)), fh, indent=2, allow_nan=False)
+                json.dump(json_safe(saved), fh, indent=2, allow_nan=False)
         if args.save_profile is not None:
             with open(args.save_profile, "w", encoding="utf-8") as fh:
                 fh.write(profile.to_json(saved_profile))

@@ -49,11 +49,25 @@ Every source is optional. A source you do not provide is reported as "not assess
 | `--postgres-dsn` | execution table size, pruning, connections |
 | `--redis-url` | queue depth, memory policy |
 | `--kube-namespace` | replicas, resources, probes, container environment |
+| `--debug-info` | the "Debug information" text of n8n: version, mode, database, pruning, instances |
 | `--snapshot` | a previously saved snapshot (offline run) |
 
 ### Kubernetes
 
 `--kube-namespace` uses your current `kubectl` context (or `--kube-context`) and needs permission to `get` Deployments and ConfigMaps in that namespace. Without `--env-file`, the n8n settings are read from the main n8n Deployment, including values that come from ConfigMaps. Secrets are never read: a setting that comes from a Secret is reported as "set, value unknown" and no conclusion is drawn from it.
+
+### Debug information
+
+Every n8n instance can produce a short text under Help > About n8n > Debug information > Copy. It is the one thing anyone can hand over in seconds, without installing or running anything, so the tool takes it as a source. Save it in a file, or pipe it in:
+
+```bash
+python3 -m n8n_healthcheck --debug-info debug-info.txt
+pbpaste | python3 -m n8n_healthcheck --debug-info -
+```
+
+It can be the only source: the rules that can read it run, and the scores are marked partial. It also combines with the others. A probe wins, value by value: the text is used only for what the other sources of the run do not state, and the evidence of a finding says which values came from it and when it was generated. The report's summary says that it was read, warns when it is more than 30 days old or carries no date, and says so when the text has no `cluster` section (older n8n versions), because replicas and version alignment cannot be told without it.
+
+The tool reads known values, numbers and versions from the text and discards the rest. The instance id, the host ids and the browser's user agent in it are never stored or shown, in the report, a saved snapshot or the profile. A text that went through a ticket or a chat (quote marks, changed bullets, a code fence, lost `#`) still reads. A file that is larger than 64 KB or is not a debug information stops the run with exit code 3.
 
 ## Environment profile
 

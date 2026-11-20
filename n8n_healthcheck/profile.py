@@ -16,7 +16,7 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from . import __version__, n8n_settings, questions, report
+from . import __version__, debug_info, n8n_settings, questions, report
 from .models import REDACTED, Finding, Snapshot
 from .rules._helpers import (
     VALUE_FROM,
@@ -31,6 +31,7 @@ from .rules._helpers import (
     is_queue_mode,
     n8n_containers,
     num,
+    stated,
     unknown,
 )
 
@@ -78,6 +79,11 @@ _UNSET = object()
 
 NOT_SET_DETAIL = "not set, the n8n default for this version applies"
 NOT_ANSWERED_DETAIL = "not answered"
+# The facts only a debug information fills (added in 0.4.0).
+NO_DEBUG_INFO_DETAIL = "The debug information was not provided"
+NOT_IN_DEBUG_INFO_DETAIL = "the debug information does not state it"
+ONLY_WHEN_INSECURE_DETAIL = "n8n reports this only when it is insecure"
+STATED_ELSEWHERE_DETAIL = "another source of this run states this setting, so the debug information was not used for it"
 
 
 class ProfileError(ValueError):
@@ -448,6 +454,109 @@ def _metrics_enabled(snapshot: Snapshot, failed: tuple) -> dict:
     return _missing("metrics", failed)
 
 
+# --- facts from the debug information ----------------------------------------------
+# A probe wins, value by value: the text fills a fact only where no other source of the
+# run states that value (rules/_helpers.py, stated() and with_debug_info(), which the
+# rules use, so that a rule and the fact about the same thing agree).
+
+
+def _from_debug_info(snapshot: Snapshot, value, note: str = "") -> dict:
+    """Measured by n8n itself; the detail says how old the text is. Never text from it."""
+    detail = debug_info.label(snapshot.debug_info)
+    return _measured(value, "debug_info", f"{detail}; {note}" if note else detail)
+
+
+def _or_debug_info(build: Callable, read: Callable, variable: Optional[str] = None) -> Callable:
+    """An existing fact, taken from the debug information where no probe states it.
+
+    `read(section)` is the value in the text, None when it does not state one.
+    `variable` is the n8n variable the probes read for this fact; without one, the text
+    is used when the probes leave the fact unknown.
+    """
+
+    def fact(snapshot: Snapshot, failed: tuple) -> dict:
+        value = read(snapshot.debug_info) if snapshot.debug_info is not None else None
+        if value is None or (variable is not None and stated(snapshot, variable)):
+            return build(snapshot, failed)
+        if variable is None:
+            found = build(snapshot, failed)
+            if found["provenance"] == "measured":
+                return found
+        return _from_debug_info(snapshot, value)
+
+    return fact
+
+
+def _replicas_fact(role: str) -> Callable:
+    """The replicas of one role: from Kubernetes, else the instances n8n listed.
+
+    Kubernetes states the count as soon as it shows a container of the role, the same
+    line rule SCAL-002 draws. A type with no instance listed is unknown, never 0.
+    """
+    from_kubernetes = _kube_fact(role, _replicas)
+
+    def fact(snapshot: Snapshot, failed: tuple) -> dict:
+        if snapshot.debug_info is None or _role_containers(snapshot, role):
+            return from_kubernetes(snapshot, failed)
+        cluster = snapshot.debug_info.get("cluster")
+        if cluster is None:
+            return _unknown(debug_info.NO_CLUSTER)
+        count = _whole((cluster.get("instances") or {}).get(role))
+        if not count:
+            return _unknown(f"the debug information lists no {role} instance")
+        return _from_debug_info(snapshot, count, "counted from the instances n8n listed")
+
+    return fact
+
+
+def _debug_info_fact(read: Callable, variable: Optional[str] = None, absent: str = NOT_IN_DEBUG_INFO_DETAIL) -> Callable:
+    """A fact only the debug information fills. `absent` says why `read` gave None."""
+
+    def fact(snapshot: Snapshot, failed: tuple) -> dict:
+        if snapshot.debug_info is None:
+            return _unknown(NO_DEBUG_INFO_DETAIL)
+        if variable is not None and stated(snapshot, variable):
+            return _unknown(STATED_ELSEWHERE_DETAIL)
+        value = read(snapshot.debug_info)
+        return _unknown(absent) if value is None else _from_debug_info(snapshot, value)
+
+    return fact
+
+
+def _cluster_fact(read: Callable, absent: str) -> Callable:
+    """A fact read from the cluster section, which older n8n versions do not write."""
+
+    def fact(snapshot: Snapshot, failed: tuple) -> dict:
+        if snapshot.debug_info is not None and snapshot.debug_info.get("cluster") is None:
+            return _unknown(debug_info.NO_CLUSTER)
+        return _debug_info_fact(lambda section: read(section["cluster"]), absent=absent)(snapshot, failed)
+
+    return fact
+
+
+def _key(name: str) -> Callable:
+    return lambda section: section.get(name)
+
+
+def _pruning(name: str) -> Callable:
+    return lambda section: (section.get("pruning") or {}).get(name)
+
+
+def _flagged(name: str) -> Callable:
+    """`false` when the text flags the setting as insecure; never `true`."""
+    return lambda section: False if (section.get("insecure") or {}).get(name) else None
+
+
+def _versions_aligned(cluster: dict) -> Optional[bool]:
+    versions = cluster.get("versions") or []
+    return len(versions) == 1 if versions else None
+
+
+def _checks_failed(cluster: dict) -> Optional[int]:
+    failed = cluster.get("checks_failed")
+    return None if failed is None else len(failed)
+
+
 def _not_answered(snapshot: Snapshot, failed: tuple) -> dict:
     """A fact no probe can fill: only an answer to its operator question gives it a value."""
     return _unknown(NOT_ANSWERED_DETAIL)
@@ -455,25 +564,56 @@ def _not_answered(snapshot: Snapshot, failed: tuple) -> dict:
 
 # (fact id, function(snapshot, failed) -> fact without its id), in the order of the file.
 CATALOGUE = (
-    ("n8n.version", _n8n_version),
+    ("n8n.version", _or_debug_info(_n8n_version, _key("n8n_version"))),
     ("n8n.image_official", _image_official),
     ("orchestrator", _orchestrator),
-    ("executions.mode", _env_fact("EXECUTIONS_MODE", _enum(*n8n_settings.ENUMS["EXECUTIONS_MODE"]), default="regular")),
-    ("main.replicas", _kube_fact("main", _replicas)),
-    ("worker.replicas", _kube_fact("worker", _replicas)),
-    ("webhook.replicas", _kube_fact("webhook", _replicas)),
+    (
+        "executions.mode",
+        _or_debug_info(
+            _env_fact("EXECUTIONS_MODE", _enum(*n8n_settings.ENUMS["EXECUTIONS_MODE"]), default="regular"),
+            _key("execution_mode"),
+            "EXECUTIONS_MODE",
+        ),
+    ),
+    ("main.replicas", _replicas_fact("main")),
+    ("worker.replicas", _replicas_fact("worker")),
+    ("webhook.replicas", _replicas_fact("webhook")),
     ("worker.concurrency", _worker_concurrency),
-    ("multi_main.enabled", _env_fact("N8N_MULTI_MAIN_SETUP_ENABLED", _bool, default=False)),
+    (
+        "multi_main.enabled",
+        _or_debug_info(
+            _env_fact("N8N_MULTI_MAIN_SETUP_ENABLED", _bool, default=False),
+            _key("multi_main"),
+            "N8N_MULTI_MAIN_SETUP_ENABLED",
+        ),
+    ),
     ("task_runners.enabled", _env_fact("N8N_RUNNERS_ENABLED", _bool)),
     ("task_runners.mode", _env_fact("N8N_RUNNERS_MODE", _enum(*n8n_settings.ENUMS["N8N_RUNNERS_MODE"]))),
     (
         "binary_data.mode",
-        _env_fact("N8N_DEFAULT_BINARY_DATA_MODE", _enum(*n8n_settings.ENUMS["N8N_DEFAULT_BINARY_DATA_MODE"])),
+        _or_debug_info(
+            _env_fact("N8N_DEFAULT_BINARY_DATA_MODE", _enum(*n8n_settings.ENUMS["N8N_DEFAULT_BINARY_DATA_MODE"])),
+            _key("binary_mode"),
+            "N8N_DEFAULT_BINARY_DATA_MODE",
+        ),
     ),
     ("metrics.enabled", _metrics_enabled),
-    ("pruning.enabled", _env_fact("EXECUTIONS_DATA_PRUNE", _bool)),
-    ("pruning.max_age_hours", _env_fact("EXECUTIONS_DATA_MAX_AGE", _count)),
-    ("database.engine", _env_fact("DB_TYPE", _enum(*n8n_settings.ENUMS["DB_TYPE"]), default="sqlite")),
+    (
+        "pruning.enabled",
+        _or_debug_info(_env_fact("EXECUTIONS_DATA_PRUNE", _bool), _pruning("enabled"), "EXECUTIONS_DATA_PRUNE"),
+    ),
+    (
+        "pruning.max_age_hours",
+        _or_debug_info(
+            _env_fact("EXECUTIONS_DATA_MAX_AGE", _count), _pruning("max_age_hours"), "EXECUTIONS_DATA_MAX_AGE"
+        ),
+    ),
+    (
+        "database.engine",
+        _or_debug_info(
+            _env_fact("DB_TYPE", _enum(*n8n_settings.ENUMS["DB_TYPE"]), default="sqlite"), _key("database"), "DB_TYPE"
+        ),
+    ),
     ("database.version", _section_fact("postgres", "version", _version)),
     ("database.pool_size", _env_fact("DB_POSTGRESDB_POOL_SIZE", _count)),
     ("database.max_connections", _section_fact("postgres", "max_connections", _whole)),
@@ -494,6 +634,33 @@ CATALOGUE = (
 # Added in tool version 0.3.0: the operator questions no probe can answer, after the rest.
 CATALOGUE += tuple(
     (question["id"], _not_answered) for question in questions.OPERATOR if question["id"] not in dict(CATALOGUE)
+)
+# Added in tool version 0.4.0: what only a debug information states, after the rest.
+CATALOGUE += (
+    ("n8n.node_version", _debug_info_fact(_key("node_version"))),
+    ("n8n.platform", _debug_info_fact(_key("platform"))),
+    ("license.type", _debug_info_fact(_key("license"))),
+    ("main.concurrency_limit", _debug_info_fact(_key("concurrency_limit"), CONCURRENCY_LIMIT)),
+    ("executions.save_success", _debug_info_fact(_key("save_success"), "EXECUTIONS_DATA_SAVE_ON_SUCCESS")),
+    ("executions.save_error", _debug_info_fact(_key("save_error"), "EXECUTIONS_DATA_SAVE_ON_ERROR")),
+    ("executions.save_progress", _debug_info_fact(_key("save_progress"), "EXECUTIONS_DATA_SAVE_ON_PROGRESS")),
+    ("executions.save_manual", _debug_info_fact(_key("save_manual"), "EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS")),
+    ("pruning.max_count", _debug_info_fact(_pruning("max_count"), "EXECUTIONS_DATA_PRUNE_MAX_COUNT")),
+    (
+        "cluster.versions_aligned",
+        _cluster_fact(_versions_aligned, "the debug information lists no version of an instance"),
+    ),
+    ("cluster.checks_failed", _cluster_fact(_checks_failed, "the debug information lists no cluster check")),
+    (
+        "security.secure_cookie",
+        _debug_info_fact(_flagged("secure_cookie"), "N8N_SECURE_COOKIE", ONLY_WHEN_INSECURE_DETAIL),
+    ),
+    (
+        "security.file_access_blocked",
+        _debug_info_fact(
+            _flagged("file_access_blocked"), "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES", ONLY_WHEN_INSECURE_DETAIL
+        ),
+    ),
 )
 FACT_IDS = tuple(fact_id for fact_id, _ in CATALOGUE)
 
@@ -593,6 +760,9 @@ def _sources(snapshot: Snapshot, failed: tuple) -> dict:
         else:
             state = "not_provided"
         sources[section] = state
+    # Not one of the six a file must hold (report.SECTIONS). Never "failed": a text that
+    # cannot be read stops the run before anything is collected.
+    sources["debug_info"] = "collected" if snapshot.debug_info is not None else "not_provided"
     return sources
 
 

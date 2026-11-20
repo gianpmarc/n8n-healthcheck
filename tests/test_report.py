@@ -140,7 +140,8 @@ class RenderTest(unittest.TestCase):
                 self.assertNotIn("endpoint disabled", not_assessed)
 
     def test_sections_cover_every_snapshot_field(self):
-        fields = {f.name for f in dataclasses.fields(Snapshot)} - {"n8n_version"}
+        # The debug information is a source, but not one of the six the report counts.
+        fields = {f.name for f in dataclasses.fields(Snapshot)} - {"n8n_version", "debug_info"}
         self.assertEqual(set(SECTIONS), fields)
 
     def test_findings_are_grouped_by_severity_with_all_fields(self):

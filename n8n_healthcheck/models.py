@@ -29,6 +29,9 @@ class Target:
     redis_url: Optional[str] = None
     kube_namespace: Optional[str] = None
     kube_context: Optional[str] = None
+    # The "Debug information" text of n8n, already read by debug_info.parse(): the
+    # text itself is never kept. It is a source like the others and may be the only one.
+    debug_info: Optional[dict] = None
 
 
 @dataclass
@@ -59,6 +62,25 @@ class Snapshot:
     # a Secret), so an absent variable there does not prove the n8n default applies.
     kubernetes: Optional[dict] = None
     n8n_version: Optional[str] = None
+    # What debug_info.parse() kept of n8n's "Debug information" text: known values, numbers
+    # and versions only, never an identifier or free text.
+    # {"generated_on": "YYYY-MM-DD" | None, "n8n_version": str, "node_version": str | None,
+    #  "platform": "docker_self_hosted" | "docker_cloud" | "npm" | None,
+    #  "database": "sqlite" | "postgresdb" | "mysqldb" | "mariadb" | None,
+    #  "execution_mode": "regular" | "queue" | None, "multi_main": bool | None,
+    #  "concurrency_limit": int | "unlimited" | None,
+    #  "license": "community" | "enterprise_production" | "enterprise_sandbox" | None,
+    #  "save_success": "all" | "none" | None, "save_error": "all" | "none" | None,
+    #  "save_progress": bool | None, "save_manual": bool | None,
+    #  "binary_mode": "default" | "filesystem" | "s3" | "azure" | "database" | None,
+    #  "pruning": {"enabled": bool, "max_age_hours": int | None, "max_count": int | None} | None,
+    #  "insecure": {"secure_cookie": bool, "file_access_blocked": bool},
+    #  "cluster": None | {"instances": {"main": int, "worker": int, "webhook": int, "engine": int},
+    #                     "versions": [str], "checks_failed": [str] | None}}
+    # `insecure` holds True for a setting only when the text flagged it. `checks_failed`
+    # names each failed check ("other" for a name the tool does not know) and is None when
+    # the text listed no check. It is not one of the data sources the report counts.
+    debug_info: Optional[dict] = None
 
 
 @dataclass
