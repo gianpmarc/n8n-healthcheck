@@ -67,7 +67,7 @@ pbpaste | python3 -m n8n_healthcheck --debug-info -
 
 It can be the only source: the rules that can read it run, and the scores are marked partial. It also combines with the others. A probe wins, value by value: the text is used only for what the other sources of the run do not state, and the evidence of a finding says which values came from it and when it was generated. The report's summary says that it was read, warns when it is more than 30 days old or carries no date, and says so when the text has no `cluster` section (older n8n versions), because replicas and version alignment cannot be told without it.
 
-The tool reads known values, numbers and versions from the text and discards the rest. The instance id, the host ids and the browser's user agent in it are never stored or shown, in the report, a saved snapshot or the profile. A text that went through a ticket or a chat (quote marks, changed bullets, a code fence, lost `#`) still reads. A file that is larger than 64 KB or is not a debug information stops the run with exit code 3.
+The tool reads known values, numbers and versions from the text and discards the rest. The instance id, the host ids and the browser's user agent in it are never stored or shown, in the report, a saved snapshot or the profile. A text that went through a ticket or a chat (quote marks, changed bullets, a code fence, lost `#`) still reads. A line that a mail client broke in two is joined again, and a UTF-16 file (what Windows PowerShell writes with `>`) is read. A file that is larger than 64 KB, is not a debug information, or holds more than one of them stops the run with exit code 3: give a single text, the most recent. Texts of n8n 1.x are read too.
 
 ## Environment profile
 

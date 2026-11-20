@@ -112,12 +112,12 @@ def single_worker(snapshot: Snapshot) -> Optional[Finding]:
     else:
         # Kubernetes shows no worker (or was not given): the instances n8n itself listed
         # in the debug information, which says nothing unless the mode is known to be queue.
-        cluster = (snapshot.debug_info or {}).get("cluster") or {}
-        env = with_debug_info(snapshot, "EXECUTIONS_MODE")
+        cluster = (debug_info.of(snapshot) or {}).get("cluster") or {}
+        env = with_debug_info(snapshot, "EXECUTIONS_MODE", rests_on_text=True)
         if (cluster.get("instances") or {}).get("worker") != 1 or env is None or not is_queue_mode(env):
             return None
         evidence = (
-            f"The {debug_info.phrase(snapshot.debug_info)} lists 1 worker instance; "
+            f"The {debug_info.phrase(debug_info.of(snapshot))} lists 1 worker instance; "
             f"{shown(env, 'EXECUTIONS_MODE')}.{env.note}"
         )
     return Finding(

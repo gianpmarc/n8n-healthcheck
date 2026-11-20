@@ -10,7 +10,7 @@ from ._helpers import (
     effective_env,
     env_flag,
     image_tag,
-    image_version,
+    image_versions,
     is_queue_mode,
     n8n_containers,
     shown,
@@ -88,23 +88,15 @@ def mutable_image_tag(snapshot: Snapshot) -> Optional[Finding]:
 
 # https://docs.n8n.io/deploy/host-n8n/keep-n8n-running/update-n8n#run-the-same-n8n-version-on-every-process
 def version_skew(snapshot: Snapshot) -> Optional[Finding]:
-    by_tag: dict = {}
-    for deployment, container, role in n8n_containers(snapshot.kubernetes or {}):
-        # Compared on the leading x.y.z, so 2.40.1 and 2.40.1-build7 are one release.
-        # Digests, mutable tags and custom tags name no version and are skipped: a
-        # digest may well be the same release as a tag next to it.
-        version = image_version(container.get("image"))
-        if version is None:
-            continue
-        by_tag.setdefault(version, []).append(f"{deployment['name']} ({role})")
+    by_tag = image_versions(snapshot.kubernetes)
     evidence = "; ".join(f"{tag}: {', '.join(names)}" for tag, names in sorted(by_tag.items())) + "."
-    if not by_tag and snapshot.debug_info is not None:
+    if not by_tag and debug_info.of(snapshot) is not None:
         # Kubernetes names no version (or was not given): the versions of the instances
         # n8n itself listed in the debug information.
-        versions = (snapshot.debug_info.get("cluster") or {}).get("versions") or []
+        versions = (debug_info.of(snapshot).get("cluster") or {}).get("versions") or []
         by_tag = dict.fromkeys(versions)
         evidence = (
-            f"The {debug_info.phrase(snapshot.debug_info)} lists instances on "
+            f"The {debug_info.phrase(debug_info.of(snapshot))} lists instances on "
             f"{len(versions)} versions: {', '.join(versions)}."
         )
     if len(by_tag) < 2:
@@ -129,14 +121,14 @@ def version_skew(snapshot: Snapshot) -> Optional[Finding]:
 
 # Only the debug information states the licence, so there is no probe to give way to.
 def sandbox_license(snapshot: Snapshot) -> Optional[Finding]:
-    if (snapshot.debug_info or {}).get("license") != "enterprise_sandbox":
+    if (debug_info.of(snapshot) or {}).get("license") != "enterprise_sandbox":
         return None
     return Finding(
         rule_id="MAINT-004",
         area="maintainability",
         severity="info",
         title="Enterprise sandbox license",
-        evidence=f"The {debug_info.phrase(snapshot.debug_info)} reports the license as enterprise (sandbox).",
+        evidence=f"The {debug_info.phrase(debug_info.of(snapshot))} reports the license as enterprise (sandbox).",
         impact=(
             "This matters only if this instance serves production: a sandbox license is "
             "meant for development and testing, not for production use."

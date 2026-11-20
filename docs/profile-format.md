@@ -267,8 +267,9 @@ evidence than a default, so it is used, also for the three facts under
 "Defaults". No comparison is made and no disagreement is reported.
 
 It can fill these facts of the catalogue above: `n8n.version`,
-`executions.mode` (`queue` for both of n8n's "scaling" modes),
-`multi_main.enabled`, `database.engine`, `pruning.enabled`,
+`executions.mode` (`queue` for every "scaling" value n8n writes),
+`multi_main.enabled` (not from a text of n8n 1.x, which says "scaling" without
+the number of mains), `database.engine`, `pruning.enabled`,
 `pruning.max_age_hours`, `binary_data.mode` (the effective mode), and
 `main.replicas`, `worker.replicas` and `webhook.replicas`. `worker.concurrency`
 is never read from it.
@@ -293,7 +294,7 @@ section (older n8n, or the instance registry was not loaded)".
 | `executions.save_progress` | boolean | Whether execution progress is saved after every node. |
 | `executions.save_manual` | boolean | Whether manual executions are saved. |
 | `pruning.max_count` | integer | How many executions are kept before the oldest are pruned. |
-| `cluster.versions_aligned` | boolean | `true` when the instances n8n lists all run one version. |
+| `cluster.versions_aligned` | boolean | `true` when the instances n8n lists all run one version. Unknown, with a detail that says another source states the versions, when Kubernetes was read and its image tags name a version: the check outcome then judges the versions from Kubernetes. |
 | `cluster.checks_failed` | integer | How many of n8n's own cluster checks have the status "failed". A check that succeeded with warnings does not count. |
 | `security.secure_cookie` | `false` only | `false` when n8n flags the session cookie as not restricted to HTTPS. |
 | `security.file_access_blocked` | `false` only | `false` when n8n flags that access to its own files is not blocked. |

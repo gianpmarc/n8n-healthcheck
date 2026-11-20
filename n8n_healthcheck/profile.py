@@ -28,6 +28,7 @@ from .rules._helpers import (
     env_int,
     image_tag,
     image_version,
+    image_versions,
     is_queue_mode,
     n8n_containers,
     num,
@@ -84,6 +85,7 @@ NO_DEBUG_INFO_DETAIL = "The debug information was not provided"
 NOT_IN_DEBUG_INFO_DETAIL = "the debug information does not state it"
 ONLY_WHEN_INSECURE_DETAIL = "n8n reports this only when it is insecure"
 STATED_ELSEWHERE_DETAIL = "another source of this run states this setting, so the debug information was not used for it"
+VERSIONS_ELSEWHERE_DETAIL = "another source of this run states the versions, so the debug information was not used for it"
 
 
 class ProfileError(ValueError):
@@ -462,7 +464,7 @@ def _metrics_enabled(snapshot: Snapshot, failed: tuple) -> dict:
 
 def _from_debug_info(snapshot: Snapshot, value, note: str = "") -> dict:
     """Measured by n8n itself; the detail says how old the text is. Never text from it."""
-    detail = debug_info.label(snapshot.debug_info)
+    detail = debug_info.label(debug_info.of(snapshot))
     return _measured(value, "debug_info", f"{detail}; {note}" if note else detail)
 
 
@@ -475,7 +477,7 @@ def _or_debug_info(build: Callable, read: Callable, variable: Optional[str] = No
     """
 
     def fact(snapshot: Snapshot, failed: tuple) -> dict:
-        value = read(snapshot.debug_info) if snapshot.debug_info is not None else None
+        value = read(debug_info.of(snapshot)) if debug_info.of(snapshot) is not None else None
         if value is None or (variable is not None and stated(snapshot, variable)):
             return build(snapshot, failed)
         if variable is None:
@@ -496,9 +498,9 @@ def _replicas_fact(role: str) -> Callable:
     from_kubernetes = _kube_fact(role, _replicas)
 
     def fact(snapshot: Snapshot, failed: tuple) -> dict:
-        if snapshot.debug_info is None or _role_containers(snapshot, role):
+        if debug_info.of(snapshot) is None or _role_containers(snapshot, role):
             return from_kubernetes(snapshot, failed)
-        cluster = snapshot.debug_info.get("cluster")
+        cluster = debug_info.of(snapshot).get("cluster")
         if cluster is None:
             return _unknown(debug_info.NO_CLUSTER)
         count = _whole((cluster.get("instances") or {}).get(role))
@@ -513,11 +515,11 @@ def _debug_info_fact(read: Callable, variable: Optional[str] = None, absent: str
     """A fact only the debug information fills. `absent` says why `read` gave None."""
 
     def fact(snapshot: Snapshot, failed: tuple) -> dict:
-        if snapshot.debug_info is None:
+        if debug_info.of(snapshot) is None:
             return _unknown(NO_DEBUG_INFO_DETAIL)
         if variable is not None and stated(snapshot, variable):
             return _unknown(STATED_ELSEWHERE_DETAIL)
-        value = read(snapshot.debug_info)
+        value = read(debug_info.of(snapshot))
         return _unknown(absent) if value is None else _from_debug_info(snapshot, value)
 
     return fact
@@ -527,7 +529,7 @@ def _cluster_fact(read: Callable, absent: str) -> Callable:
     """A fact read from the cluster section, which older n8n versions do not write."""
 
     def fact(snapshot: Snapshot, failed: tuple) -> dict:
-        if snapshot.debug_info is not None and snapshot.debug_info.get("cluster") is None:
+        if debug_info.of(snapshot) is not None and debug_info.of(snapshot).get("cluster") is None:
             return _unknown(debug_info.NO_CLUSTER)
         return _debug_info_fact(lambda section: read(section["cluster"]), absent=absent)(snapshot, failed)
 
@@ -547,9 +549,15 @@ def _flagged(name: str) -> Callable:
     return lambda section: False if (section.get("insecure") or {}).get(name) else None
 
 
-def _versions_aligned(cluster: dict) -> Optional[bool]:
-    versions = cluster.get("versions") or []
-    return len(versions) == 1 if versions else None
+def _versions_aligned(snapshot: Snapshot, failed: tuple) -> dict:
+    """Gives way where rule MAINT-003 does: when Kubernetes names the versions."""
+    if debug_info.of(snapshot) is not None and image_versions(snapshot.kubernetes):
+        return _unknown(VERSIONS_ELSEWHERE_DETAIL)
+
+    def aligned(cluster: dict) -> Optional[bool]:
+        return len(cluster["versions"]) == 1 if cluster["versions"] else None
+
+    return _cluster_fact(aligned, "the debug information lists no version of an instance")(snapshot, failed)
 
 
 def _checks_failed(cluster: dict) -> Optional[int]:
@@ -646,10 +654,7 @@ CATALOGUE += (
     ("executions.save_progress", _debug_info_fact(_key("save_progress"), "EXECUTIONS_DATA_SAVE_ON_PROGRESS")),
     ("executions.save_manual", _debug_info_fact(_key("save_manual"), "EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS")),
     ("pruning.max_count", _debug_info_fact(_pruning("max_count"), "EXECUTIONS_DATA_PRUNE_MAX_COUNT")),
-    (
-        "cluster.versions_aligned",
-        _cluster_fact(_versions_aligned, "the debug information lists no version of an instance"),
-    ),
+    ("cluster.versions_aligned", _versions_aligned),
     ("cluster.checks_failed", _cluster_fact(_checks_failed, "the debug information lists no cluster check")),
     (
         "security.secure_cookie",
@@ -680,6 +685,16 @@ FORMAT_1_FACT_IDS = frozenset(
 
 
 # --- settings ----------------------------------------------------------------------
+
+
+def text_version(snapshot: Snapshot) -> Optional[str]:
+    """The n8n version of the debug information, when the fact `n8n.version` rests on it.
+
+    None when a probe measured the version: the report's title then shows what it shows
+    without a debug information, so the title and the fact cannot disagree.
+    """
+    fact = dict(CATALOGUE)["n8n.version"](snapshot, ())
+    return fact["value"] if fact["source"] == "debug_info" else None
 
 
 def setting_listed(name) -> bool:
@@ -762,7 +777,7 @@ def _sources(snapshot: Snapshot, failed: tuple) -> dict:
         sources[section] = state
     # Not one of the six a file must hold (report.SECTIONS). Never "failed": a text that
     # cannot be read stops the run before anything is collected.
-    sources["debug_info"] = "collected" if snapshot.debug_info is not None else "not_provided"
+    sources["debug_info"] = "collected" if debug_info.of(snapshot) is not None else "not_provided"
     return sources
 
 

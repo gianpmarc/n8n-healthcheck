@@ -101,9 +101,9 @@ def file_access_not_blocked(snapshot: Snapshot) -> Optional[Finding]:
     name = "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES"
     # Fires only on what the debug information flags. A probe that states the variable
     # still wins: set to true there, the rule is silent.
-    if not ((snapshot.debug_info or {}).get("insecure") or {}).get("file_access_blocked"):
+    if not ((debug_info.of(snapshot) or {}).get("insecure") or {}).get("file_access_blocked"):
         return None
-    env = with_debug_info(snapshot, name)
+    env = with_debug_info(snapshot, name, rests_on_text=True)
     if env is None or env_flag(env, name) is not False:
         return None
     return Finding(
@@ -112,7 +112,7 @@ def file_access_not_blocked(snapshot: Snapshot) -> Optional[Finding]:
         severity="warning",
         title="Access to n8n's own files is not blocked",
         evidence=(
-            f"The {debug_info.phrase(snapshot.debug_info)} flags blockFileAccessToN8nFiles as false; "
+            f"The {debug_info.phrase(debug_info.of(snapshot))} flags blockFileAccessToN8nFiles as false; "
             f"{shown(env, name)} (default: true).{env.note}"
         ),
         impact=(

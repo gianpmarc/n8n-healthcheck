@@ -317,7 +317,7 @@ def missing_resources(snapshot: Snapshot) -> Optional[Finding]:
 # n8n's instance registry runs these checks itself; the debug information reports each
 # one's status. Only the text states them, so there is no probe to give way to.
 def cluster_check_failed(snapshot: Snapshot) -> Optional[Finding]:
-    failed = ((snapshot.debug_info or {}).get("cluster") or {}).get("checks_failed")
+    failed = ((debug_info.of(snapshot) or {}).get("cluster") or {}).get("checks_failed")
     if not failed:
         return None
     known = [name for name in failed if name != debug_info.OTHER_CHECK]
@@ -331,7 +331,7 @@ def cluster_check_failed(snapshot: Snapshot) -> Optional[Finding]:
         severity="warning",
         title="A cluster check failed",
         evidence=(
-            f"The {debug_info.phrase(snapshot.debug_info)} lists "
+            f"The {debug_info.phrase(debug_info.of(snapshot))} lists "
             f"{len(failed)} failed cluster check{'s' if len(failed) != 1 else ''}: {', '.join(known)}."
         ),
         impact=(

@@ -204,15 +204,19 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
 def read_debug_info(path: str) -> dict:
     """The Snapshot section for the debug information in a file, or on standard input for "-".
 
-    Raises OSError, or debug_info.DebugInfoError for a text that is refused. Reads one
-    byte more than the limit at most; bytes that are not UTF-8 are replaced, not refused.
+    Raises OSError, or debug_info.DebugInfoError for a text that is refused. The text is
+    UTF-8, or UTF-16 when it starts with that byte order mark (what Windows PowerShell
+    writes with `>`); bytes that do not fit are replaced, not refused. No more is read
+    than a text of the size limit can take in UTF-16, and parse() checks the limit.
     """
+    most = 2 * debug_info.MAX_BYTES + 3
     if path == "-":
-        raw = sys.stdin.buffer.read(debug_info.MAX_BYTES + 1)
+        raw = sys.stdin.buffer.read(most)
     else:
         with open(path, "rb") as handle:
-            raw = handle.read(debug_info.MAX_BYTES + 1)
-    return debug_info.parse(raw.decode("utf-8", "replace"))
+            raw = handle.read(most)
+    utf_16 = raw.startswith((b"\xff\xfe", b"\xfe\xff"))
+    return debug_info.parse(raw.decode("utf-16" if utf_16 else "utf-8", "replace"))
 
 
 def failed_sections(target: Target, snapshot: Snapshot) -> tuple[list[str], bool]:

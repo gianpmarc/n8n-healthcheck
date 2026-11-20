@@ -42,8 +42,14 @@ more `#` on every heading.
 | `cluster` | `instanceCount`, `versions` (comma separated), `instances` (one line each: `instanceKey`, `hostId`, `instanceType` in `main`, `worker`, `webhook`, `engine`, `instanceRole` in `leader`, `follower`, `unset`, `version`), `checks` (one line each: `check`, `status` in `succeeded`, `failed`, `warnings`) | only on n8n versions from May 2026 on, and only when the instance registry is loaded |
 
 `concurrency` is the limit on concurrent production executions of the main
-process. It is not the worker concurrency. On older n8n versions `database` can
-also be `mysqldb` or `mariadb`.
+process. It is not the worker concurrency.
+
+n8n 1.x writes two values differently (`useDebugInfo.ts` at the tags 1.50.0,
+1.70.0 and 1.90.0): `executionMode` is `regular` or a bare `scaling`, which
+does not say how many mains there are, and `database` is `sqlite`, `postgres`,
+`mysql` or `mariadb`. Both are read: `scaling` is queue mode with the number of
+mains unknown, `mysql` is `mysqldb`. No other value of a key that is read
+differs in 1.x.
 
 The shape of the two list items, with made-up ids (the parser must be built on
 this shape, taken from n8n's source and from a real 3.3.0 instance):
@@ -149,6 +155,19 @@ A new module parses the text into a small dictionary and nothing else survives.
   the text. Size limit 64 KB.
 - **Generated at.** Kept as a date. Missing, unreadable or in the future means
   "date unknown".
+- **One text only.** A text that holds more than one debug information (a
+  second title, a section that comes twice, or a second `Generated at`) is
+  refused with a third fixed sentence. Two texts are never merged: the values
+  of the older one would stand under the date of the newer, and instances
+  would be counted twice. *(Added after the review of the first build.)*
+- **Hard-wrapped list items.** An instance or check line that a mail client
+  broke is joined again before it is read. A continuation is a line that
+  follows such an item with no blank line between, has no bullet and no `#`,
+  and does not start a section, an item or the date line. Anywhere else a line
+  without a colon is a heading, and one that is not known ends the section.
+  *(Added after the review.)*
+- **UTF-16.** A file in UTF-16 with a byte order mark, which Windows PowerShell
+  writes, is read. *(Added after the review.)*
 
 ### What is kept (the snapshot section)
 
@@ -222,7 +241,7 @@ does not grow. Tool version becomes `0.4.0`.
 |---|---|
 | `n8n.version` | `n8nVersion` |
 | `executions.mode` | `executionMode`: `regular`, or `queue` for both scaling values |
-| `multi_main.enabled` | `executionMode` |
+| `multi_main.enabled` | `executionMode`; stays unknown for the bare `scaling` of n8n 1.x, and `REL-006` then stays silent from the text |
 | `database.engine` | `database` |
 | `pruning.enabled`, `pruning.max_age_hours` | `pruning` |
 | `binary_data.mode` | `binaryMode` |
@@ -252,7 +271,7 @@ loaded)". `worker.concurrency` is never filled from it.
 | `executions.save_progress` | boolean | `storage.progress` |
 | `executions.save_manual` | boolean | `storage.manual` |
 | `pruning.max_count` | whole number | `pruning.maxCount` |
-| `cluster.versions_aligned` | boolean | one version among the instances |
+| `cluster.versions_aligned` | boolean | one version among the instances; gives way like `MAINT-003`: unknown when Kubernetes names the versions |
 | `cluster.checks_failed` | whole number | checks whose status is `failed`; a succeeded check with warnings does not count |
 | `security.secure_cookie` | `false` only | `security.secureCookie` |
 | `security.file_access_blocked` | `false` only | `security.blockFileAccessToN8nFiles` |

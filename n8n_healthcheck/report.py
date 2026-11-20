@@ -146,7 +146,7 @@ def build_report(
     area_scores = score(findings)
     # Rules are not tied to one data source, so any gap makes every score
     # partial; with no data at all there is no score to show.
-    alone = len(missing) == len(SECTIONS) and snapshot.debug_info is not None
+    alone = len(missing) == len(SECTIONS) and debug_info.of(snapshot) is not None
     no_data = len(missing) == len(SECTIONS) and not alone
     scores = [
         {
@@ -186,13 +186,20 @@ def build_report(
         summary = _not_run_summary(failed, could_not_run)
     else:
         summary = _summary(findings, len(missing), len(skipped), len(SECTIONS) - metrics_disabled)
-        if snapshot.debug_info is not None:
+        if debug_info.of(snapshot) is not None:
             today = today or datetime.now(timezone.utc).date()
-            summary += " " + _debug_info_summary(snapshot.debug_info, alone, failed, today)
+            summary += " " + _debug_info_summary(debug_info.of(snapshot), alone, failed, today)
+
+    version = snapshot.n8n_version
+    if version is None and debug_info.of(snapshot) is not None:
+        # The version in the text, under the precedence of the fact `n8n.version`: not
+        # when Kubernetes names one. Imported here: profile imports this module.
+        from . import profile
+
+        version = profile.text_version(snapshot)
 
     return {
-        # What n8n reported to a probe, else what the debug information states.
-        "n8n_version": snapshot.n8n_version or (snapshot.debug_info or {}).get("n8n_version"),
+        "n8n_version": version,
         "summary": summary,
         "partial": partial,
         "scores": scores,

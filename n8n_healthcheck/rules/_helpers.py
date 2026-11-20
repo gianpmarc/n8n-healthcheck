@@ -24,11 +24,14 @@ class Env(dict):
     missing here may still be set. `source` names the Kubernetes container the values
     came from; it is empty for an env file. `from_debug_info` lists the variables whose
     value was taken from the debug information instead (see with_debug_info()), and
-    `debug_info_label` names that text by its date.
+    `debug_info_label` names that text by its date. `from_env_file` lists the other
+    variables a finding reads when it rests on an env file and on the text, so that its
+    evidence names both.
     """
 
     complete = True
     source = ""
+    from_env_file: tuple = ()
     from_debug_info: tuple = ()
     debug_info_label = ""
 
@@ -40,6 +43,8 @@ class Env(dict):
             note = f" Environment read from {self.source}."
             if not self.complete:
                 note += " Part of it could not be read (a Secret or an unavailable ConfigMap)."
+        if self.from_env_file:
+            note += f" From the env file: {', '.join(self.from_env_file)}."
         if self.from_debug_info:
             note += f" From the {self.debug_info_label}: {', '.join(self.from_debug_info)}."
         return note
@@ -120,28 +125,54 @@ def stated(snapshot: Snapshot, name: str) -> bool:
     return any(name in env or name + "_FILE" in env for env in envs)
 
 
-def with_debug_info(snapshot: Snapshot, *names: str) -> Optional[Env]:
+def with_debug_info(snapshot: Snapshot, *names: str, rests_on_text: bool = False) -> Optional[Env]:
     """effective_env(), with each of `names` no probe states taken from the debug information.
 
     A rule asks only for the variables it reads, so its evidence names exactly the values
     that came from the text. With no probe at all the result holds those values alone and
     is not `complete`: a variable the text does not state is unknown, never a default.
     None when neither a probe nor the text says anything.
+
+    A finding that rests on two sources names both. Kubernetes is always named by
+    `Env.note`; the env file is named, with the variables read from it, as soon as one
+    value came from the text, or always when the caller says the finding `rests_on_text`
+    for something that is not a variable (an instance count, a flag).
     """
     env = effective_env(snapshot)
-    if snapshot.debug_info is None:
+    section = debug_info.of(snapshot)
+    if section is None:
         return env
-    values = debug_info_env(snapshot.debug_info)
+    values = debug_info_env(section)
     taken = tuple(name for name in names if name in values and not stated(snapshot, name))
-    if not taken:
+    others = tuple(name for name in names if name not in taken)
+    from_file = others if env is not None and not env.source and (taken or rests_on_text) else ()
+    if not taken and not from_file:
         return env
     merged = Env(env or {})
     merged.complete = env.complete if env is not None else False
     merged.source = env.source if env is not None else ""
     merged.update({name: values[name] for name in taken})
+    merged.from_env_file = from_file
     merged.from_debug_info = taken
-    merged.debug_info_label = debug_info.phrase(snapshot.debug_info)
+    merged.debug_info_label = debug_info.phrase(section)
     return merged
+
+
+def image_versions(kubernetes: Optional[dict]) -> dict:
+    """{version: ["Deployment (role)", ...]} for the n8n containers whose image tag names one.
+
+    Compared on the leading x.y.z, so 2.40.1 and 2.40.1-build7 are one release. Digests,
+    mutable tags and custom tags name no version and are skipped: a digest may well be
+    the same release as a tag next to it. Empty when Kubernetes names no version: only
+    then are the versions the debug information lists used, by rule MAINT-003 and by the
+    fact cluster.versions_aligned alike.
+    """
+    by_tag: dict = {}
+    for deployment, container, role in n8n_containers(kubernetes or {}):
+        version = image_version(container.get("image"))
+        if version is not None:
+            by_tag.setdefault(version, []).append(f"{deployment['name']} ({role})")
+    return by_tag
 
 
 def unknown(env: dict, name: str) -> bool:

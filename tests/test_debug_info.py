@@ -10,6 +10,7 @@ import io
 import json
 import os
 import tempfile
+import textwrap
 import unittest
 from datetime import date
 from unittest import mock
@@ -268,7 +269,7 @@ class ParserTest(unittest.TestCase):
         self.assertIsNone(parse(text(("enabled: true", "enabled: maybe")))["pruning"])
         self.assertIsNone(parse(text(("maxAge: 336 hours", "maxAge: 336")))["pruning"]["max_age_hours"])
         self.assertIsNone(parse(text(("maxCount: 10000 executions", "maxCount: many executions")))["pruning"]["max_count"])
-        mode = parse(text(("executionMode: scaling (single-main)", "executionMode: scaling")))
+        mode = parse(text(("executionMode: scaling (single-main)", "executionMode: scaling (two-main)")))
         self.assertEqual((mode["execution_mode"], mode["multi_main"]), (None, None))
 
     def test_cluster_instances_are_counted_by_type_and_nothing_else_is_kept(self):
@@ -843,7 +844,7 @@ class CliTest(CliRun):
         self.assertEqual((code, err), (2, ""))
         self.assertIn("#### REL-001 — Queue mode on SQLite", out)
         # Bytes that are not UTF-8 around the text do not stop it from being read.
-        code, out, _ = self.run_cli(["--debug-info", "-"], stdin=b"\xff\xfe junk\n" + text(SQLITE).encode("utf-8"))
+        code, out, _ = self.run_cli(["--debug-info", "-"], stdin=b"\x80\x81 junk\n" + text(SQLITE).encode("utf-8"))
         self.assertEqual(code, 2)
 
     def test_next_to_another_source_the_probe_wins(self):
@@ -919,6 +920,225 @@ class CliTest(CliRun):
         self.assertNotEqual(self.run_cli(argv)[0], 3)
         self.assertEqual(json.loads(self.read("snapshot.json"))["env"], {"EXECUTIONS_MODE": "queue"})
         self.assertIn("--debug-info FILE", self.run_cli(["--help"])[1])
+
+
+# --- the review of af078e3: one test per fix ---------------------------------------
+
+ON_2_40_1 = kube(("n8n-main", 1, container()), ("n8n-worker", 2, container(command=["n8n", "worker"])))
+# n8n 1.x: no client or cluster section, `scaling` without the number of mains, `mysql`.
+ONE_X = text(
+    ("n8nVersion: 3.3.0", "n8nVersion: 1.90.0"),
+    ("executionMode: scaling (single-main)", "executionMode: scaling"),
+    ("database: postgres", "database: mysql"),
+    (f"- nodeEnv: {MARK}-env\n", ""),
+    (CLUSTER, ""),
+)
+
+
+def wrapped(source, width, prefix=""):
+    """`source` as a mail client sends it: every line longer than `width` broken at a space."""
+    lines = []
+    for line in source.splitlines():
+        parts = textwrap.wrap(line, width, break_long_words=False, break_on_hyphens=False) or [""]
+        lines += [prefix + part for part in parts]
+    return "\n".join(lines)
+
+
+class ReviewTest(CliRun):
+    def test_1_the_title_follows_the_precedence_of_the_fact(self):
+        custom = kube(("n8n-main", 1, container(image="registry.example/n8n-custom:9.9.9")))
+        cases = {
+            "Kubernetes names the version": (snapshot(kubernetes=ON_2_40_1), None, ("2.40.1", "kubernetes")),
+            "metrics name it": (snapshot(kubernetes=ON_2_40_1, n8n_version="2.41.0"), "2.41.0", ("2.41.0", "metrics")),
+            "an image that names no version": (snapshot(kubernetes=custom), "3.3.0", ("3.3.0", "debug_info")),
+            "the text alone": (snapshot(), "3.3.0", ("3.3.0", "debug_info")),
+        }
+        for name, (snap, title, fact) in cases.items():
+            with self.subTest(case=name):
+                found = facts_of(snap)["n8n.version"]
+                self.assertEqual((found["value"], found["source"]), fact)
+                self.assertEqual(report.build_report(snap, [], today=TODAY)["n8n_version"], title)
+        # As on main without the text: no version in the title, never the text's.
+        markdown = report.render_markdown(snapshot(kubernetes=ON_2_40_1), [], today=TODAY)
+        self.assertEqual(markdown.splitlines()[0], "# n8n health check report")
+        self.assertEqual(report.render_markdown(Snapshot(kubernetes=ON_2_40_1), []).splitlines()[0], "# n8n health check report")
+
+    def test_2_versions_aligned_gives_way_where_maint_003_does(self):
+        skewed = kube(("n8n-main", 1, container()), ("n8n-worker", 2, container(command=["n8n", "worker"], image="n8nio/n8n:2.39.0")))
+        unnamed = kube(("n8n-main", 1, container(image="n8nio/n8n:latest")))
+        detail = "another source of this run states the versions, so the debug information was not used for it"
+        for name, snap, fires, fact in (
+            ("Kubernetes on one version, the text lists two", snapshot(TWO_VERSIONS, kubernetes=ON_2_40_1), False, ("unknown", None, detail)),
+            ("Kubernetes on two versions, the text lists one", snapshot(kubernetes=skewed), True, ("unknown", None, detail)),
+            ("Kubernetes names no version, the text lists two", snapshot(TWO_VERSIONS, kubernetes=unnamed), True, ("measured", False, "debug information generated on 2026-11-19")),
+            ("Kubernetes names no version, the text lists one", snapshot(kubernetes=unnamed), False, ("measured", True, "debug information generated on 2026-11-19")),
+            ("the text alone lists two", snapshot(TWO_VERSIONS), True, ("measured", False, "debug information generated on 2026-11-19")),
+        ):
+            with self.subTest(case=name):
+                found = facts_of(snap)["cluster.versions_aligned"]
+                self.assertEqual((found["provenance"], found["value"], found["detail"]), fact)
+                self.assertEqual(maint.version_skew(snap) is not None, fires)
+                # The rule and the fact never say opposite things.
+                self.assertFalse(fires and found["value"] is True)
+                self.assertFalse(not fires and found["value"] is False)
+        # Without the text the fact still says that the text is what is missing.
+        self.assertEqual(facts_of(Snapshot(kubernetes=ON_2_40_1))["cluster.versions_aligned"]["detail"], "The debug information was not provided")
+
+    def test_2_checks_failed_and_rel_009_read_the_same_thing(self):
+        # No probe states a cluster check, so there is nothing for either to give way to.
+        for changes in ((), (FAILED_CHECK,), ((CLUSTER, ""),), ((CLUSTER, "## cluster\n\n- instanceCount: 0\n\n"),)):
+            for sections in ({}, {"kubernetes": ON_2_40_1, "env": {"EXECUTIONS_MODE": "queue"}}):
+                snap = snapshot(*changes, **sections)
+                count = facts_of(snap)["cluster.checks_failed"]["value"]
+                self.assertEqual(rel.cluster_check_failed(snap) is not None, bool(count))
+
+    def test_3_a_text_that_holds_more_than_one_debug_information_is_refused(self):
+        older = text(("n8nVersion: 3.3.0", "n8nVersion: 1.99.0"), REGULAR, (STAMP, "Generated at: 2025-01-05T08:00:00.000Z"))
+        several = {
+            "an old one above a new one": older + "\n\n" + FULL,
+            "the same text twice": FULL + "\n" + FULL,
+            "quoted once, then again": "> " + FULL.replace("\n", "\n> ") + "\n\n" + FULL,
+            "a second title": FULL + "\n\n# Debug info\n",
+            "a section that comes twice": FULL + "\n\n## storage\n\n- progress: true\n",
+            "the first section again, without its #": FULL + "\ncore\n- n8nVersion: 9.9.9\n",
+            "a second date": FULL + "\nGenerated at: 2026-11-18T00:00:00.000Z",
+            "the same date twice": FULL + "\n" + STAMP,
+        }
+        for name, pasted in several.items():
+            with self.subTest(text=name):
+                with self.assertRaises(debug_info.DebugInfoError) as caught:
+                    parse(pasted)
+                self.assertEqual(str(caught.exception), debug_info.SEVERAL)
+        self.assertNotIn(MARK, debug_info.SEVERAL)
+        self.assertEqual(len({debug_info.SEVERAL, debug_info.NOT_DEBUG_INFO, debug_info.TOO_LARGE}), 3)
+        with mock.patch("n8n_healthcheck.collectors.collect") as collect:
+            code, out, err = self.run_cli(["--debug-info", self.write("twice.txt", FULL + "\n" + FULL)])
+        self.assertEqual((code, out, err), (3, "", f"error: --debug-info: {debug_info.SEVERAL}\n"))
+        collect.assert_not_called()
+
+    def test_4_the_values_n8n_1_x_writes(self):
+        got = parse(ONE_X)
+        self.assertEqual((got["execution_mode"], got["multi_main"], got["database"]), ("queue", None, "mysqldb"))
+        self.assertEqual({**got, "multi_main": False, "database": "postgresdb", "n8n_version": "3.3.0"}, {**PARSED, "cluster": None})
+        snap = Snapshot(debug_info=got)
+        facts = facts_of(snap)
+        self.assertEqual((facts["executions.mode"]["value"], facts["executions.mode"]["source"]), ("queue", "debug_info"))
+        self.assertEqual((facts["database.engine"]["value"], facts["database.engine"]["source"]), ("mysqldb", "debug_info"))
+        self.assertEqual(facts["multi_main.enabled"]["provenance"], "unknown")
+        self.assertIsNone(rel.single_main(snap))  # the text does not say how many mains
+        # Queue mode is known, so the rules that need only that still fire.
+        on_sqlite = Snapshot(debug_info=parse(ONE_X.replace("database: mysql", "database: sqlite")))
+        self.assertEqual(rel.sqlite_in_queue_mode(on_sqlite).rule_id, "REL-001")
+        # Next to an env file that does not set the mode, the text's queue mode is used.
+        self.assertEqual(facts_of(Snapshot(debug_info=got, env={}))["executions.mode"]["value"], "queue")
+
+    def test_5_a_utf_16_file_is_read(self):
+        expected = self.run_cli(["--debug-info", self.write("utf8.txt", text(SQLITE))])
+        self.assertEqual(expected[0], 2)
+        for name, encoded in (
+            ("little endian", b"\xff\xfe" + text(SQLITE).encode("utf-16-le")),
+            ("big endian", b"\xfe\xff" + text(SQLITE).encode("utf-16-be")),
+            ("windows line ends", b"\xff\xfe" + text(SQLITE).replace("\n", "\r\n").encode("utf-16-le")),
+        ):
+            with self.subTest(encoding=name):
+                with open(self.path("utf16.txt"), "wb") as handle:
+                    handle.write(encoded)
+                self.assertEqual(self.run_cli(["--debug-info", self.path("utf16.txt")]), expected)
+                self.assertEqual(self.run_cli(["--debug-info", "-"], stdin=encoded), expected)
+        # The size limit is on the text, not on the two bytes a character takes in the file.
+        large = b"\xff\xfe" + (FULL + "\n" + "x" * debug_info.MAX_BYTES).encode("utf-16-le")
+        with open(self.path("large16.txt"), "wb") as handle:
+            handle.write(large)
+        self.assertEqual(self.run_cli(["--debug-info", self.path("large16.txt")]), (3, "", f"error: --debug-info: {debug_info.TOO_LARGE}\n"))
+        fits = b"\xff\xfe" + (FULL + "\n" + "x" * (debug_info.MAX_BYTES - len(FULL.encode()) - 1)).encode("utf-16-le")
+        with open(self.path("fits16.txt"), "wb") as handle:
+            handle.write(fits)
+        self.assertNotEqual(self.run_cli(["--debug-info", self.path("fits16.txt")])[0], 3)
+
+    def test_6_a_list_item_a_mail_client_broke_is_joined_again(self):
+        source = text(FAILED_CHECK, TWO_VERSIONS)
+        expected = parse(source)
+        self.assertEqual(expected["cluster"]["instances"], {"main": 1, "worker": 2, "webhook": 0, "engine": 0})
+        broken = 0
+        for width in range(40, 161):  # no other line of the text is 40 characters long
+            for prefix in ("", "> "):
+                with self.subTest(width=width, prefix=prefix):
+                    mail = wrapped(source, width, prefix)
+                    broken += mail.count("\n") > source.count("\n")
+                    self.assertEqual(parse(mail), expected)
+        self.assertGreater(broken, 150)
+        # The reviewer's case: the break falls between `instanceType:` and its value.
+        at_the_value = source.replace("instanceType: worker", "instanceType:\nworker")
+        self.assertEqual(parse(at_the_value), expected)
+        self.assertEqual(parse(at_the_value.replace("- ", "* ")), expected)
+        self.assertEqual(parse(source.replace("status: failed, warnings:", "status:\nfailed, warnings:")), expected)
+
+    def test_6_a_line_without_a_colon_still_ends_a_section_where_it_cannot_be_a_continuation(self):
+        # Not after an instance or a check: nothing that long is read there, so it is a heading.
+        cut = text(("- instanceCount: 3\n", f"- instanceCount: 3\nfuture{MARK}\n"))
+        self.assertEqual(parse(cut)["cluster"]["instances"], dict.fromkeys(debug_info.INSTANCE_TYPES, 0))
+        # After a blank line, with a bullet or with a "#": it starts something of its own.
+        for start in (f"\nfuture{MARK}\n", f"## future{MARK}\n"):
+            cut = text(("- checks:\n", f"{start}- instanceKey: {MARK}, hostId: {MARK}, instanceType: worker, instanceRole: unset, version: 3.3.0\n- checks:\n"))
+            self.assertEqual(parse(cut)["cluster"]["instances"]["worker"], 2, start)
+        # A new item is never taken for the rest of the one before it, with or without bullets.
+        self.assertEqual(parse("\n".join(line.lstrip("- ") for line in FULL.splitlines())), PARSED)
+
+    def test_7_only_known_values_come_out_of_a_section_whatever_it_holds(self):
+        for changes in ((), (SQLITE, PRUNING_OFF), (FAILED_CHECK, TWO_VERSIONS, SANDBOX), (SECURE, (STAMP, "")), ((CLUSTER, ""),)):
+            parsed = parse(text(*changes))
+            self.assertEqual(debug_info.checked(parsed), parsed)  # what parse() writes is left as it is
+        self.assertEqual(debug_info.checked(parse(ONE_X)), parse(ONE_X))
+        hostile = {
+            "generated_on": f"{MARK}-day", "n8n_version": f"{MARK}V", "node_version": "22.16", "platform": "<b>",
+            "database": f"postgres://{MARK}", "execution_mode": MARK, "multi_main": "yes", "concurrency_limit": -7,
+            "license": f"{MARK}L", "save_success": MARK, "save_error": ["all"], "save_progress": 1, "save_manual": MARK,
+            "binary_mode": f"/var/{MARK}", "pruning": {"enabled": True, "max_age_hours": -5, "max_count": f"{MARK}"},
+            "insecure": {"secure_cookie": MARK, "file_access_blocked": 1},
+            "cluster": {"instances": {"main": -3, "worker": MARK, MARK: 9}, "versions": [MARK, "3.3.0", 7, f"3.3.0-{MARK}"], "checks_failed": [MARK, "split-brain", 5]},
+            MARK: MARK,
+        }  # fmt: skip
+        snap = Snapshot(debug_info=hostile)
+        findings = engine.run(snap, ALL_RULES)
+        built = profile.build_profile(snap, findings)
+        outputs = (profile.to_json(built), repr(findings), report.render_markdown(snap, findings, today=TODAY), profile.render_questions(built))
+        for output in outputs:
+            self.assertNotIn(MARK, output)
+            self.assertNotIn("<b>", output)
+        facts = {fact["id"]: fact for fact in built["facts"]}
+        measured = {fact_id: fact["value"] for fact_id, fact in facts.items() if fact["provenance"] == "measured"}
+        self.assertEqual(measured, {"pruning.enabled": True, "cluster.versions_aligned": True, "cluster.checks_failed": 3})
+        self.assertEqual(profile.validate(json.loads(profile.to_json(built))), built)
+        self.assertEqual([f.rule_id for f in findings], ["REL-009"])
+        self.assertIn("3 failed cluster checks: split-brain, 2 other checks.", findings[0].evidence)
+        self.assertIn("debug information of unknown date", findings[0].evidence)
+        # A value of the wrong type that equals a good one is not let through either.
+        self.assertIsNone(debug_info.checked({"concurrency_limit": True})["concurrency_limit"])
+        self.assertIsNone(debug_info.checked({"pruning": {"enabled": 1}})["pruning"])
+        for not_a_section in ("text", ["list"], 7):
+            self.assertIsNone(debug_info.checked(not_a_section))
+            self.assertEqual(profile.build_profile(Snapshot(debug_info=not_a_section), [])["sources"]["debug_info"], "not_provided")
+
+    def test_8_a_finding_resting_on_an_env_file_and_on_the_text_names_both(self):
+        date_ = "debug information generated on 2026-11-19"
+        both = rel.sqlite_in_queue_mode(snapshot(SQLITE, env={"EXECUTIONS_MODE": "queue"})).evidence
+        self.assertTrue(both.endswith(f" From the env file: EXECUTIONS_MODE. From the {date_}: DB_TYPE."), both)
+        # Where the text gives no variable but the finding rests on it all the same.
+        workers = scal.single_worker(snapshot(ONE_WORKER, env={"EXECUTIONS_MODE": "queue"})).evidence
+        self.assertEqual(workers, f"The {date_} lists 1 worker instance; EXECUTIONS_MODE=queue. From the env file: EXECUTIONS_MODE.")
+        files = sec.file_access_not_blocked(snapshot(env={"N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES": "false"})).evidence
+        self.assertTrue(files.endswith("N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES=false (default: true). From the env file: N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES."), files)
+        # Every value from the text: the env file is not named for nothing.
+        only_text = rel.sqlite_in_queue_mode(snapshot(SQLITE, env={})).evidence
+        self.assertNotIn("env file", only_text)
+        self.assertIn(f"From the {date_}: EXECUTIONS_MODE, DB_TYPE.", only_text)
+        # A finding that does not rest on the text reads as it does without one.
+        env = {"EXECUTIONS_MODE": "queue", "DB_TYPE": "sqlite", "EXECUTIONS_DATA_PRUNE": "false"}
+        for rule in (rel.sqlite_in_queue_mode, perf.pruning_disabled):
+            self.assertEqual(rule(snapshot(env=env)), rule(Snapshot(env=env)))
+        # Kubernetes was already named.
+        main = kube(("n8n-main", 1, container(env={"EXECUTIONS_MODE": "queue"})))
+        self.assertIn("Environment read from Deployment n8n-main, container n8n. From the", rel.sqlite_in_queue_mode(snapshot(SQLITE, kubernetes=main)).evidence)
 
 
 if __name__ == "__main__":
