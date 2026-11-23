@@ -24,6 +24,8 @@
   --accent-hover: #ffa8ba;
   --accent-border: #212121;
   --on-accent: #212121;
+  /* The accent as text, for the titles of the form's sources: the pink itself is unreadable on a light page. */
+  --accent-text: #a8127e;
   /* Every other button. */
   --pill: #d9d9d9;
   --pill-hover: #c9c9c9;
@@ -51,6 +53,7 @@
   --panel-muted: #c4c4c4;
   --panel-critical: #ff7a66;
   --panel-warning: #f1b950;
+  --panel-info: #68c9d3;
   --panel-ok: #74d093;
   --panel-neutral: #c4c4c4;
 
@@ -92,6 +95,7 @@
 
     --accent-hover: #ffd0da;
     --accent-border: #ffbcca;
+    --accent-text: #ffbcca;
     --pill-hover: #ececec;
     --pill-border: #d9d9d9;
 
@@ -312,6 +316,7 @@ main { padding-block: var(--space-7); }
   letter-spacing: -0.01em;
 }
 .source legend + * { clear: both; }
+.source__name { color: var(--accent-text); font-weight: 600; }
 .source__state {
   margin-left: var(--space-2);
   color: var(--muted);
@@ -524,6 +529,7 @@ input[data-masked="true"] { -webkit-text-security: disc; }
 .stat__l { color: var(--muted); font: 400 0.8125rem/1.4 var(--mono); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .stat--critical .stat__n { color: var(--panel-critical); }
 .stat--warning .stat__n { color: var(--panel-warning); }
+.stat--info .stat__n { color: var(--panel-info); }
 .urgent {
   margin-top: var(--space-4);
   padding: var(--space-3) var(--space-4);
@@ -663,12 +669,20 @@ input[data-masked="true"] { -webkit-text-security: disc; }
   border: 1px solid var(--border);
   overflow: hidden;
 }
-.score__fill { height: 100%; width: calc(var(--score, 0) * 1%); background: var(--text); }
+.score__fill { height: 100%; width: calc(var(--score, 0) * 1%); background: var(--score-ink, var(--text)); }
 .score__findings { margin-top: var(--space-2); color: var(--muted); font-size: 0.875rem; }
+/* A score takes the colour of the most severe finding of its area (green when it was checked in full and has none);
+   the words "worst: …" under it say the same, so the colour only repeats them. */
+.score--critical { --score-ink: var(--critical); }
+.score--warning { --score-ink: var(--warning); }
+.score--info { --score-ink: var(--info); }
+.score--ok { --score-ink: var(--ok); }
+.score__number, .score__worst { color: var(--score-ink, var(--text)); }
+.score__worst { font-weight: 600; }
 /* A partial score is drawn hatched and dashed so it cannot be read as a full result. */
 .score--partial { border-style: dashed; border-color: var(--border-strong); }
 .score--partial .score__fill {
-  background: repeating-linear-gradient(135deg, var(--text) 0 4px, transparent 4px 7px);
+  background: repeating-linear-gradient(135deg, var(--score-ink, var(--text)) 0 4px, transparent 4px 7px);
 }
 .score--none { border-style: dashed; border-color: var(--border-strong); background: transparent; }
 .score--none .score__number { font-size: 1.25rem; color: var(--muted); line-height: 2; letter-spacing: -0.01em; }
@@ -769,6 +783,12 @@ input[data-masked="true"] { -webkit-text-security: disc; }
 @media (prefers-reduced-motion: reduce) { .chevron { transition: none; } }
 .finding__head { min-width: 0; }
 .finding__title { display: block; font-size: 1.0625rem; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
+/* In the report a title takes the colour of its severity; the tag under it says it in words.
+   A severity this page does not know keeps the text colour: its bar is drawn as info, its tag says the word. */
+.finding .finding__title { font-weight: 600; }
+.finding[data-severity="critical"] .finding__title,
+.finding[data-severity="warning"] .finding__title,
+.finding[data-severity="info"] .finding__title { color: var(--sev); }
 .finding__tags {
   display: flex;
   flex-wrap: wrap;
@@ -977,14 +997,14 @@ p.pdetail { margin-top: var(--space-1); }
     color-scheme: light;
     --bg: #fff; --dot: transparent; --surface: #fff; --surface-2: #f1f2f4; --text: #000; --muted: #333;
     --border: #999; --border-strong: #555; --focus: #000;
-    --accent: #fff; --accent-border: #000; --on-accent: #000;
+    --accent: #fff; --accent-border: #000; --on-accent: #000; --accent-text: #000;
     --pill: #fff; --pill-border: #555; --on-pill: #000;
     --critical: #8c1a12; --critical-bg: #fff; --critical-solid: #fff; --on-critical-solid: #8c1a12;
     --warning: #6b4000; --warning-bg: #fff;
     --info: #084f58; --info-bg: #fff; --ok: #14532d; --ok-bg: #fff;
     --neutral: #333; --neutral-bg: #fff;
     --panel-bg: #fff; --panel-dot: transparent; --panel-border: #555; --panel-text: #000; --panel-muted: #333;
-    --panel-critical: #8c1a12; --panel-warning: #6b4000; --panel-ok: #14532d; --panel-neutral: #333;
+    --panel-critical: #8c1a12; --panel-warning: #6b4000; --panel-info: #084f58; --panel-ok: #14532d; --panel-neutral: #333;
     --mark-bg: #fff; --mark-line: #000;
   }
   /* No grid, no ornament, no panel fill: black on white. */

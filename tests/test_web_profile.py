@@ -922,6 +922,53 @@ class PageBehaviourTest(unittest.TestCase):
         self.assertNotIn(pasted.MARK, got["over"]["error"])
         self.assertEqual((got["sent"], got["bytes"]), (1, debug_info.MAX_BYTES))
 
+    def test_a_score_names_the_most_severe_finding_of_its_area_and_takes_its_colour(self):
+        sent = cli.json_safe(web.run_check(web.parse_run_request(json.dumps({"debug_info_text": pasted.FULL}).encode())))
+        finding = lambda area, severity: {"rule_id": "X-001", "severity": severity, "area": area, "title": "A title", "evidence": "e", "impact": "i", "recommendation": "r"}  # noqa: E731
+        sent["findings"] = [finding("reliability", "critical"), finding("security", "warning"), finding("reliability", "info"), finding("performance", "info"), finding("other", "new")]
+        sent["scores"] = [
+            {"area": "reliability", "score": 55, "partial": False, "findings": 2},
+            {"area": "security", "score": 85, "partial": True, "findings": 1},
+            {"area": "performance", "score": 95, "partial": False, "findings": 1},
+            {"area": "scalability", "score": 100, "partial": False, "findings": 0},
+            {"area": "unread", "score": 100, "partial": True, "findings": 0},  # almost nothing was checked: not green
+            {"area": "other", "score": 90, "partial": False, "findings": 1},  # a severity this page does not know
+            {"area": "maintainability", "score": None, "partial": False, "findings": 0},
+        ]
+        got = run_page(
+            """async (page, input) => {
+              page.type("f-debug", input.text);
+              await page.submit();
+              await page.finishRun(input.response);
+              const read = () => ({ scores: page.$("scores").children.map((card) => [card.className, card.textContent]), stats: page.$("stats").children.map((item) => item.className),
+                                    findings: page.walk(page.$("findings")).filter((node) => node.tagName === "li").map((node) => [node.className, node.attributes["data-severity"]]) });
+              const first = read();
+              page.$("act-again").click();
+              await page.submit();
+              await page.finishRun(input.withoutInfo);
+              return { ...first, withoutInfo: read().stats };
+            }""",
+            raw=PATHS[0], response=json.dumps(sent, allow_nan=False), text=pasted.FULL,
+            withoutInfo=json.dumps({**sent, "findings": [f for f in sent["findings"] if f["severity"] != "info"]}, allow_nan=False),
+        )  # fmt: skip
+        self.assertEqual(got["scores"], [
+            ["score score--critical", "reliability55/ 1002 findings · worst: critical"],
+            ["score score--partial score--warning", "security85/ 100Partial1 finding · worst: warning"],
+            ["score score--info", "performance95/ 1001 finding · worst: info"],
+            ["score score--ok", "scalability100/ 100No findings"],
+            ["score score--partial", "unread100/ 100PartialNo findings"],
+            ["score", "other90/ 1001 finding"],
+            ["score score--none", "maintainabilityNot scoredNo data was collected"],
+        ])  # fmt: skip
+        self.assertEqual(got["stats"][:3], ["stat stat--critical", "stat stat--warning", "stat stat--info"])
+        self.assertEqual(got["withoutInfo"][:3], ["stat stat--critical", "stat stat--warning", "stat"])  # a zero has no colour
+        # A severity this page does not know is drawn as info, and its title is not coloured: the
+        # stylesheet colours a title by the severity the finding really has, for the three known ones only.
+        self.assertIn(["finding finding--info", "new"], got["findings"])
+        css = (web.STATIC_DIR / "app.css").read_text(encoding="utf-8")
+        self.assertNotIn("color", re.search(r"\n\.finding \.finding__title \{[^}]*\}", css).group())
+        self.assertIn('.finding[data-severity="critical"] .finding__title,\n.finding[data-severity="warning"] .finding__title,\n.finding[data-severity="info"] .finding__title { color: var(--sev); }', css)
+
     def test_a_run_on_the_debug_information_alone_is_a_partial_report_not_a_failed_one(self):
         sent = web.run_check(web.parse_run_request(json.dumps({"debug_info_text": pasted.FULL}).encode()))
         response = json.dumps(cli.json_safe(sent), allow_nan=False)
