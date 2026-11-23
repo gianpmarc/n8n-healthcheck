@@ -429,7 +429,8 @@
     }
     // The key has done its work: it is not kept in the form for a second run.
     $("f-apikey").value = "";
-    if ($("f-apikey").dataset.masked === "false") document.querySelector('[data-toggle="f-apikey"]').click(); // and it is masked again
+    // And it is masked again, were it shown.
+    for (const toggle of document.querySelectorAll('[data-toggle="f-apikey"]')) if ($("f-apikey").dataset.masked === "false") toggle.click();
     report = { ...data, finishedAt: new Date() };
     renderReport();
     showView("report");
