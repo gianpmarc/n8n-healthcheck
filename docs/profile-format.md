@@ -106,6 +106,13 @@ debug information"). Its state is `collected` or `not_provided`, never
 A file written by version 0.2.0 or 0.3.0 does not have it, and a reader must
 not require it.
 
+From tool version 0.5.0 a file lists an eighth source, `api`: n8n's public API,
+read with an API key for the usage numbers (see "Usage numbers from the n8n
+API"). Its state is `collected` when at least one of the numbers was read,
+`failed` when a key was given and none could be read, and `not_provided`
+without a key. A file written by an earlier version does not have it, and a
+reader must not require it.
+
 ## Facts
 
 Every fact has the same five fields:
@@ -316,6 +323,80 @@ ids of "Declared facts", in this order. A file written by version 0.2.0 or
   when it is insecure", never `true`.
 - **The two `cluster` facts** are `unknown` without a `cluster` section.
 
+## Usage numbers from the n8n API
+
+From tool version 0.5.0 a run can be given an n8n API key next to the URL
+(`--api-key-file`, or the field in the web interface). The tool then reads four
+numbers through n8n's public API, with `GET` requests only: executions per
+day, the failure rate, the active workflows and the users. The numbers
+describe the instance. No finding and no score rests on them. The key itself
+is never written, in a profile or anywhere else, and neither is a workflow, a
+user, an execution or any text of an answer: only counts.
+
+A fact read this way has `provenance: "measured"`, `source: "api"` and a
+`detail` that says how it was obtained.
+
+**Executions** are counted over the 7 days before the run, in one of two ways,
+which `usage.method` names:
+
+- `insights`: n8n's own Insights summary of the last 7 days (n8n 2.17.0 and
+  later, with a key that may read it). An execution is whatever Insights
+  counts. Insights can lag behind by up to an hour.
+- `listed`: counted from the executions list, newest first, when the Insights
+  summary is not available. This is **always an estimate**, and
+  `usage.estimate` is `true`: the list holds only executions n8n saved and has
+  not pruned. Executions with the status `success`, `error` or `crashed` are
+  counted, and `error` and `crashed` are the failed ones. `usage.period_days`
+  is the time the list actually covers, which is shorter than 7 when the list
+  ends earlier or the tool's bound of 10 000 executions is reached. When less
+  than one day is covered, the numbers are `unknown`.
+
+  n8n 1.x does not say in the list how an execution ended. There the
+  executions that have stopped and are not waiting are counted, and
+  `usage.failure_rate_percent` is `unknown`.
+
+**A key that does not see everything.** For a user who is not the owner or an
+admin, n8n's lists return only that user's workflows and executions. The tool
+asks n8n for the detail of one user, which only an owner or an admin may read,
+and looks at nothing but whether the request was allowed. When it was not,
+`usage.active_workflows_partial` is `true`, the detail of
+`usage.active_workflows` says "as far as this key's user can see", and a
+listed count of executions says the same. Numbers from the Insights summary
+are for the whole instance.
+
+### Added in tool version 0.5.0
+
+| Id | Value | Meaning |
+|---|---|---|
+| `usage.executions_per_day` | number | Executions per day over the period. |
+| `usage.failure_rate_percent` | number, 0 to 100 | Failed executions out of 100 counted ones. Unknown when no execution was counted. |
+| `usage.period_days` | number, 1 to 7 | The days the two numbers above cover. |
+| `usage.method` | `insights`, `listed` | How the two numbers were obtained. |
+| `usage.estimate` | boolean | `true` when they are an estimate: always for `listed`, never for `insights`. |
+| `usage.active_workflows` | integer | Workflows that are active. |
+| `usage.active_workflows_partial` | boolean | `true` when the key may not see every workflow. |
+| `usage.users` | integer | Users, without invitations that were not accepted. |
+
+These ids are in every file written by tool version 0.5.0 or later, after the
+ids of "Facts from the debug information", in this order. A file written by an
+earlier version has none of them.
+
+- **No API key.** Each is `unknown` with the detail "The n8n API key was not
+  provided".
+- **A number that could not be read** is `unknown` with the reason: the key
+  was refused or is not allowed to read it, the instance answered too slowly,
+  the answer was too large, or there are more than 10 000 items. One number
+  failing leaves the others.
+- **Executions that are not saved.** When another source of the same run
+  states that successful executions are not saved, a listed count cannot count
+  them and both execution numbers are `unknown`; when it states that failed
+  ones are not saved, the failure rate is `unknown`.
+- `usage.period_days`, `usage.method` and `usage.estimate` are `unknown`
+  whenever `usage.executions_per_day` is.
+
+`database.execution_count`, from Postgres, is a different thing: how many
+executions are stored, not how many run.
+
 ## Declared facts
 
 Some of what decides whether a setup is risky cannot be read by any probe:
@@ -491,7 +572,8 @@ document that quotes raw values as evidence; share it or not as before.
   file written by an older one. Version 0.3.0 added the ids under "Declared
   facts" this way, and version 0.4.0 the ids under "Facts from the debug
   information" and the source `debug_info`, which is not required of a file
-  either.
+  either. Version 0.5.0 added the ids under "Usage numbers from the n8n API"
+  and the source `api` in the same way.
 - When a file is opened, `run.reference` must obey the rules it is typed
   under: one line, at most 200 characters, no control characters, no
   surrounding spaces. A file that is not valid is refused with a message that

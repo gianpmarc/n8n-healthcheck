@@ -16,7 +16,7 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from . import __version__, debug_info, n8n_settings, questions, report
+from . import __version__, debug_info, n8n_settings, questions, report, usage
 from .models import REDACTED, Finding, Snapshot
 from .rules._helpers import (
     VALUE_FROM,
@@ -565,6 +565,19 @@ def _checks_failed(cluster: dict) -> Optional[int]:
     return None if failed is None else len(failed)
 
 
+def _usage_fact(name: str) -> Callable:
+    """A usage number read through the n8n API (usage.numbers()). It describes; no rule reads it."""
+
+    def fact(snapshot: Snapshot, failed: tuple) -> dict:
+        found = usage.numbers(snapshot)
+        if found is None:
+            return _unknown(usage.NOT_READ_DETAIL if "usage" in failed else usage.NOT_PROVIDED_DETAIL)
+        value, detail = found[name]
+        return _unknown(detail) if value is None else _measured(value, "api", detail)
+
+    return fact
+
+
 def _not_answered(snapshot: Snapshot, failed: tuple) -> dict:
     """A fact no probe can fill: only an answer to its operator question gives it a value."""
     return _unknown(NOT_ANSWERED_DETAIL)
@@ -666,6 +679,20 @@ CATALOGUE += (
             _flagged("file_access_blocked"), "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES", ONLY_WHEN_INSECURE_DETAIL
         ),
     ),
+)
+# Added in tool version 0.5.0: usage numbers read through the n8n API with a key, after the rest.
+CATALOGUE += tuple(
+    (f"usage.{name}", _usage_fact(name))
+    for name in (
+        "executions_per_day",
+        "failure_rate_percent",
+        "period_days",
+        "method",
+        "estimate",
+        "active_workflows",
+        "active_workflows_partial",
+        "users",
+    )
 )
 FACT_IDS = tuple(fact_id for fact_id, _ in CATALOGUE)
 
@@ -778,6 +805,12 @@ def _sources(snapshot: Snapshot, failed: tuple) -> dict:
     # Not one of the six a file must hold (report.SECTIONS). Never "failed": a text that
     # cannot be read stops the run before anything is collected.
     sources["debug_info"] = "collected" if debug_info.of(snapshot) is not None else "not_provided"
+    # Not one of the six either. Collected when at least one number was read.
+    section = usage.of(snapshot)
+    if section is not None and any(section[name] is not None for name in usage.NUMBERS):
+        sources["api"] = "collected"
+    else:
+        sources["api"] = "failed" if section is not None or "usage" in failed else "not_provided"
     return sources
 
 

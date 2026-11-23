@@ -81,6 +81,8 @@
     kubernetes: { label: "Kubernetes workloads", source: "kubernetes", missing: "No Kubernetes namespace was given." },
     // Not one of the six data sources: it is named among a profile's sources, never under "Not assessed".
     debug_info: { label: "n8n debug information" },
+    // Nor is the n8n API, read with a key for the usage numbers.
+    api: { label: "n8n API (usage numbers)" },
   };
 
   const REASONS = {
@@ -236,7 +238,7 @@
   }
 
   function clearErrors() {
-    for (const id of ["e-debug", "e-url", "e-env", "e-postgres", "e-redis", "e-kube"]) setFieldError(id, null);
+    for (const id of ["e-debug", "e-url", "e-apikey", "e-env", "e-postgres", "e-redis", "e-kube"]) setFieldError(id, null);
     $("form-error").hidden = true;
   }
 
@@ -277,6 +279,11 @@
       if (valid) body.url = url;
       else errors.push({ errorId: "e-url", focus: "f-url", message: "Enter the full address, starting with http:// or https:// — for example https://n8n.example.com." });
     }
+
+    // The key is of no use without the instance it belongs to. It is checked by the server.
+    const apiKey = value("f-apikey").trim();
+    if (apiKey && body.url) body.api_key = apiKey;
+    else if (apiKey && !url) errors.push({ errorId: "e-apikey", focus: "f-url", inputs: [$("f-apikey")], message: "Add the n8n URL this key belongs to, or clear the key. The key alone is not a source." });
 
     const envOff = $("f-env").closest("fieldset").disabled;
     const envText = envOff ? "" : envFile ? envFile.text : $("f-env").value;
@@ -369,7 +376,8 @@
     setRunning(true);
     announce("Health check running. This can take up to a minute. A profile can be opened when it has finished.");
     let failure = null;
-    let refused = null; // the server's sentence for a debug information it did not accept
+    let refused = null; // the server's sentence for a debug information or an API key it did not accept
+    let refusedField = null;
     let data = null;
     const abort = new AbortController();
     const deadline = setTimeout(() => abort.abort(), RUN_TIMEOUT_MS);
@@ -388,8 +396,9 @@
       if (response.ok && data && data.profile) data.profile = parseExact(text).profile;
       // The deadline can also pass while the body is still arriving; that is a timeout, not a bad report.
       if (abort.signal.aborted) throw new Error("timeout");
-      if (response.status === 400 && data && data.field === "debug_info_text" && typeof data.error === "string") {
+      if (response.status === 400 && data && ["debug_info_text", "api_key"].includes(data.field) && typeof data.error === "string") {
         refused = `${capitalize(data.error)}.`;
+        refusedField = data.field;
       } else if (!response.ok) {
         failure = describeFailure(response.status, data && typeof data.error === "string" ? data.error : "");
       } else if (!data || !Array.isArray(data.findings) || !Array.isArray(data.scores)) {
@@ -406,9 +415,10 @@
     if (refused) {
       // Nothing was collected. The sentence is the server's own and quotes nothing of the text.
       if ($("view-form").hidden) showView("form");
-      setFieldError("e-debug", refused, [$("f-debug")]);
-      $("f-debug").focus();
-      announce(`The debug information was not accepted. ${refused}`);
+      const [errorId, inputId, what] = refusedField === "api_key" ? ["e-apikey", "f-apikey", "API key"] : ["e-debug", "f-debug", "debug information"];
+      setFieldError(errorId, refused, [$(inputId)]);
+      $(inputId).focus();
+      announce(`The ${what} was not accepted. ${refused}`);
       return;
     }
     if (failure) {
@@ -417,6 +427,8 @@
       $("form-error").focus();
       return;
     }
+    // The key has done its work: it is not kept in the form for a second run.
+    $("f-apikey").value = "";
     report = { ...data, finishedAt: new Date() };
     renderReport();
     showView("report");
@@ -494,6 +506,7 @@
     $("status-note").textContent = note || "";
     $("status-note").hidden = !note;
 
+    renderUsage(data);
     renderScores(data);
     renderFindings(data, status);
     renderNotAssessed(data);
@@ -512,6 +525,21 @@
     announce(status.kind === "error"
       ? `${status.label}. Nothing was assessed.`
       : `Report ready. ${status.label}${data.partial ? " (partial report)" : ""}. ${plural(counts[0], "critical issue")}, ${plural(counts[1], "warning")}, ${plural(counts[2], "informational note")}.`);
+  }
+
+  /** The usage numbers read through the n8n API. Shown only when a key was given; never a score. */
+  function renderUsage(data) {
+    const usage = data.usage && Array.isArray(data.usage.rows) ? data.usage : null;
+    $("usage-block").hidden = !usage;
+    $("usage-basis").hidden = !usage || !usage.basis;
+    $("usage-basis").textContent = usage && usage.basis ? String(usage.basis) : "";
+    $("usage").replaceChildren(...(usage ? usage.rows.map((row) => {
+      const read = row.value != null;
+      return el("div", { class: `usage__item${read ? "" : " usage__item--unread"}` },
+        el("dt", { class: "usage__label" }, String(row.label)),
+        el("dd", { class: "usage__value" }, read ? String(row.value) : "Not read"),
+        row.note ? el("dd", { class: "usage__note" }, String(row.note)) : null);
+    }) : []));
   }
 
   function renderScores(data) {
@@ -1383,8 +1411,9 @@
   // An inline error disappears as soon as its field is edited.
   for (const input of document.querySelectorAll("#run-form input, #run-form textarea")) {
     input.addEventListener("input", () => {
-      const errorId = input.getAttribute("aria-describedby");
-      if (errorId && !$(errorId).hidden) setFieldError(errorId, null);
+      // The error is the last id: a field may name its hint before it.
+      const errorId = (input.getAttribute("aria-describedby") || "").split(" ").pop();
+      if (errorId && !$(errorId).hidden) setFieldError(errorId, null, [input]);
     });
   }
 

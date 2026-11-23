@@ -25,15 +25,18 @@ n8n's public API. They describe; they do not judge.
 
 ## What the API offers
 
-Read from n8n's source (branch `master` on 2026-11-23), not yet from a running
-instance. Base path `/api/v1`, key in the header `X-N8N-API-KEY`.
+Observed on two running instances, n8n 3.3.0 and n8n 2.16.1 (community
+licence, SQLite), and read in n8n's source at the tags 1.50.0, 1.70.0, 1.90.0
+and 2.16.1. Base path `/api/v1`, key in the header `X-N8N-API-KEY`. Without a
+key, or with one n8n does not know, every call answers 401. *(Changed after the check against real n8n, decided by the owner on 2026-11-23.)*
 
 | Call | Gives | Key scope | Notes |
 |---|---|---|---|
-| `GET /insights/summary` | `total.value`, `failed.value`, `failureRate.value` (a ratio) for a date range; default range the last 7 days | `insights:read` | Added by n8n commit `13d153ef` (7 Apr 2026): not in 2.16.0, in 2.17.0. Answers 403 when the range is longer than the licence allows. Which range each plan allows was not established. |
-| `GET /executions` | a page of executions, each with `status` and `startedAt`; `limit` up to 250, `cursor` | `execution:list` | Only executions that pruning has not deleted. Has `status`, `startedAfter`, `startedBefore` filters on `master`. |
-| `GET /workflows?active=true` | a page of workflows, each the full workflow | `workflow:list` | No count field: pages must be walked. |
-| `GET /users` | a page of users, each with e-mail and name | `user:list` | Only for the instance owner's key. |
+| `GET /insights/summary` | `total.value`, `failed.value`, `failureRate.value` (a ratio) for a date range; with no dates, the last 7 days | `insights:read` | 200 on 3.3.0, 404 on 2.16.1 (added in 2.17.0). 403 for a key without the scope, and for a member's key on 3.3.0. The community licence allows only the 7-day range: 14 days and more answer 403. Dates must be full ISO date-times. **It lags**: n8n compacts Insights once an hour by default, so the summary said 0 right after 24 executions and matched the executions list exactly (27 in total, 5 failed) once compacted. |
+| `GET /executions` | a page of executions, newest first (`id DESC` at every tag), each with `startedAt`, `stoppedAt`, `waitTill`, `finished`; `limit` up to 250, `nextCursor` | `execution:list` (no scopes before 1.90.0) | Only executions that n8n saved and pruning has not deleted, never the ones still running, and only those of workflows the key's user may see. `status` is in each item on 2.16.1 and 3.3.0 (`success`, `error` observed) and **is not there at 1.50.0, 1.70.0 and 1.90.0**. `startedAfter` is an unknown parameter on 2.16.1 (400), so no filter is used. |
+| `GET /workflows?active=true` | a page of workflows, each the full workflow; `nextCursor` | `workflow:list` | No count field: pages must be walked. Only the workflows the key's user may see: a member's key got 1 of 4. |
+| `GET /users` | a page of users, each with e-mail, name and `isPending` | `user:list` | **A member's key gets the whole list too** (200, all 4 users) on 2.16.1 and 3.3.0: a member may hold `user:list`. 403 for a key without the scope and, in the source of every tag, when the licence limits the number of users. At 1.50.0 and 1.70.0 the path needs the global scopes `user:list` and `user:read`, which a member does not have. |
+| `GET /users/{id}` | one user | `user:read` | Used only for its status: 200 for the owner's key, 403 for a member's, on both instances. Only an owner or an admin holds `user:read`. |
 
 ## Goals
 
@@ -115,7 +118,8 @@ URL is a usage error. The key goes in the `X-N8N-API-KEY` header of requests to
   address, the Summary says the key was sent without encryption.
 - **Bounds.** Every request uses the tool's existing timeout. A list is walked
   for at most 40 pages of 250 items (10 000 items). The whole collector issues
-  at most 130 requests, reads at most 32 MB for one response, and has 60
+  at most 130 requests (1 + 40 for the executions, 40 + 1 for the users, 40 for
+  the workflows: 122, so the fifth call fits the bound), reads at most 32 MB for one response, and has 60
   seconds in all, measured on the clock and not per request. A number that is
   not read when the time is over, or whose response is too large, is unknown
   ("the instance answered too slowly" or "the answer was too large"). The
@@ -168,6 +172,17 @@ smooths the difference between working days and weekends.)*
      ones are not saved, the failure rate is unknown. This is decided where the
      facts and the report are built, with the precedence of piece 3; the
      collector stores what it counted and does not read other sources.
+   - **n8n versions whose list has no `status`** (1.x). *(Changed after the check against real n8n, decided by the owner on 2026-11-23.)*
+     Executions per day is still given, method `listed`, always an estimate. An
+     execution is counted there when it has stopped (`stoppedAt` is set) and is
+     not waiting (`waitTill` is empty); the list never holds the ones still
+     running. This also counts canceled executions, which the list cannot tell
+     apart. The failure rate is unknown, with the detail "this n8n version does
+     not report the outcome of an execution in the list": no failure is derived
+     from `finished`. The snapshot stores `failed: None` for it.
+   - An empty list covers no time at all, so it is "less than one day", not
+     zero executions per day: an instance that saves nothing would look idle.
+     *(Builder's call.)*
 3. A total of zero gives `0` executions per day and an unknown failure rate
    ("no execution in the period").
 
@@ -180,16 +195,27 @@ brought back before it is built.
 
 ### A key that does not see everything
 
-*(Added after the builder check.)* For a user who is not the owner or an
-admin, n8n's lists return only what that user may see, so the same calls give
-part of the instance and nothing in the answer says so. The tool does not
-inspect the key. It uses the one signal it has: when `GET /users` answers 403,
-the key may not see the whole instance. Then the listed executions and the
-active workflows are marked as partial: the facts' details and the Usage
-section say "as far as this key's user can see", `usage.estimate` is true with
-the reason `partial_view`, and `usage.active_workflows_partial` is true. Numbers
-from the Insights summary are not marked. A key of the owner whose scopes leave
-out the user list is marked too; the form's help line says how to avoid it.
+*(Changed after the check against real n8n, decided by the owner on 2026-11-23.)* For a user who is not the owner or an admin, n8n's lists
+return only what that user may see, so the same calls give part of the instance
+and nothing in the answer says so. A 403 on `GET /users` is not the signal: a
+member's key lists the users (see the table). The signal is a fifth call,
+`GET /users/<id>` with the id of the first user of the list just read. Only an
+owner or an admin may read a user's detail. The tool looks at the status and
+nothing else: the answer is not read, and the id is used in the request path
+only and never kept. An id that is not letters, digits and hyphens is not sent.
+
+When that call does not answer 200 (or could not be made, because the users
+list was refused), the key may not see the whole instance. Then the listed
+executions and the active workflows are marked as partial: the facts' details
+and the Usage section say "as far as this key's user can see", `usage.estimate`
+is true with the reason `partial_view`, and `usage.active_workflows_partial` is
+true. Numbers from the Insights summary are not marked. A key of the owner
+whose scopes leave out `user:list` or `user:read` is marked too; the form's
+help line names both scopes. A 403 on the users list only makes the users
+number unknown.
+
+The users number is not partial for a member's key: on both instances it got
+the same list as the owner's.
 
 ### Active workflows
 
@@ -200,27 +226,33 @@ active workflows".
 ### Users
 
 Walk `GET /users`, count the users that are not pending (an invitation not yet
-accepted is not a user). On 403: unknown, "the API key cannot list users: n8n
-allows it only to the instance owner".
+accepted is not a user). On 403: unknown, "the API key cannot list users: its
+scopes leave that out, or the licence limits the number of users". *(Changed after the check against real n8n, decided by the owner on 2026-11-23.)*
+More than 10 000 users: unknown, like the active workflows.
 
 ### What is kept (the snapshot section)
 
 `Target` gains `api_key`. `Snapshot` gains `usage`, `None` when no key was
-given or nothing could be read:
+given. *(Changed after the check against real n8n, decided by the owner on 2026-11-23.)* With a key the section is always there, also when
+no number could be read, so that the report can say why:
 
 ```
-{"executions": None | {"method": "insights" | "listed", "total": int, "failed": int,
+{"executions": None | {"method": "insights" | "listed", "total": int, "failed": int | None,
                        "period_days": number, "estimate": bool,
                        "estimate_reason": "page_limit" | "short_history" | "saved_only" | None},
  "active_workflows": int | None, "users": int | None,
- "refused": {"executions": int | None, "active_workflows": int | None, "users": int | None},
- "key_unencrypted": bool}
+ "refused": {"executions": R, "users": R, "active_workflows": R},
+ "whole_instance": bool, "key_unencrypted": bool}
 ```
 
-`refused` holds what made a number unknown: the HTTP status, or one of
-`"limit"` (the page bound on workflows), `"slow"`, `"large"`, `"short"` (less
-than one day covered). `partial_view` is not stored: it follows from a 403 in
-`refused.users`. The key is not a field of `Snapshot`. As with the
+`failed` is `None` when the list has no `status`. `refused` holds what made a
+number unknown (`R`): the HTTP status, or one of `"limit"` (the page bound on
+workflows or users), `"slow"`, `"large"`, `"short"` (less than one day
+covered), `"unreachable"`, `"invalid"` (an answer that is not what n8n writes),
+`"redirect"` (a redirect to another origin, not followed); `None` when the
+number was read. `whole_instance` is true only when the detail of a user
+answered 200; `partial_view` is not stored, it follows from
+`whole_instance` being false. The key is not a field of `Snapshot`. As with the
 debug information, the section is read back through strict readers (whole
 numbers that are not negative, the listed words), because a snapshot can be
 loaded from a file. The exact shape is the builder's, as long as no key, no
@@ -265,7 +297,8 @@ debug information.
 
 - **No key.** The report and the page are exactly as today, word for word.
 - **Key given.** A section "Usage" after the Summary: the period and method on
-  one line, then the four numbers. An estimate is written with "about" and its
+  one line, then the four numbers. When the method is `insights` that line also
+  says that Insights can lag behind by up to an hour. *(Changed after the check against real n8n, decided by the owner on 2026-11-23.)* An estimate is written with "about" and its
   reason; a number that could not be read is listed with its reason. One line
   in the Summary: "Usage numbers were read through the n8n API." (or that the
   key was refused), followed when it applies by the line about the unencrypted
@@ -301,8 +334,10 @@ used for both `--debug-info` and `--api-key-file`.
 - The form gains an "n8n API key" field in the "n8n URL" source: a password
   field, not filled in again after a run, with a line that says where to create
   the key in n8n, that it is used only to read four numbers, which scopes are
-  enough where n8n lets them be chosen, that the user count needs the owner's
-  key, and that the key can be revoked after the run.
+  enough where n8n lets them be chosen (with `user:read`), that the key should
+  be the owner's or an admin's because any other sees only its own user's
+  workflows and executions, and that the key can be revoked after the run.
+  *(Changed after the check against real n8n, decided by the owner on 2026-11-23.)*
 - The results show the Usage section in the page's own structure, after the
   summary card and before the scores. It is not a score card and has no
   severity colour.
@@ -323,8 +358,12 @@ the advice to create a key for the run and revoke it afterwards.
 - Each number: the Insights path; the listed path after 404 and after 403; zero
   executions; the page bound; a list that ends before 7 days; less than one
   day covered; statuses that are not counted; successful or failed executions
-  known not to be saved; pending users; the owner-only refusal and the partial
-  marking that follows from it; more than 10 000 active workflows.
+  known not to be saved; pending users; a refused users list, which leaves only
+  the users unknown; the refused detail of a user (a member's key that lists
+  the users all the same) and the partial marking that follows from it; a list
+  without `status` (n8n 1.x): executions per day given, failure rate unknown,
+  running and waiting ones not counted; more than 10 000 active workflows.
+  *(Changed after the check against real n8n, decided by the owner on 2026-11-23.)*
 - One number failing leaves the other three; 401 stops the collector.
 - Zero leak: a key, workflow names, e-mails, user names and execution ids that
   are marker strings; no marker in the snapshot, the saved snapshot, the report,
@@ -345,10 +384,11 @@ the advice to create a key for the run and revoke it afterwards.
 
 ## Not verified by this design
 
-- The calls against a running n8n: the table above comes from n8n's source
-  only. Before the merge the result must be compared once with a real instance
-  of a recent version and, if one is available, of a version below 2.17.0.
-- Which date ranges of the Insights summary each licence allows.
+- A running n8n 1.x: the table above comes from two running instances (3.3.0
+  and 2.16.1) and, for 1.x, from n8n's source only. *(Changed after the check against real n8n, decided by the owner on 2026-11-23.)*
+- Which date ranges of the Insights summary the paid licences allow (the
+  community licence allows 7 days and no more).
+- A licence that limits the number of users (403 on `GET /users`): source only.
 - What n8n's Insights counts as an execution (for example whether manual
   executions are in it).
 - How the executions list behaves on n8n 1.x (left to the builder, see above).

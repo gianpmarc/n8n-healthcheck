@@ -195,8 +195,8 @@ class PageSourceTest(unittest.TestCase):
         self.assertEqual(tuple(js_constant("PROFILE_SOURCES")), tuple(report.SECTIONS))
 
     def test_page_names_every_source_of_a_profile(self):
-        # The six a file must hold, and `debug_info`, which a profile lists from 0.4.0 on.
-        self.assertEqual(list(built()["sources"]), [*report.SECTIONS, "debug_info"])
+        # The six a file must hold, `debug_info`, which a profile lists from 0.4.0 on, and `api`, from 0.5.0 on.
+        self.assertEqual(list(built()["sources"]), [*report.SECTIONS, "debug_info", "api"])
         for section in built()["sources"]:
             self.assertRegex(APP_JS, rf"\n    {section}: \{{ label: ")
 
@@ -705,7 +705,7 @@ class PageCodeTest(unittest.TestCase):
         older = dict(files)["written by 0.2.0"]
         self.assertEqual(len(older["facts"]), 32)
         unknown = sum(fact["provenance"] == "unknown" for fact in older["facts"])  # orchestrator among them
-        self.assertEqual(printed["written by 0.2.0"].count("\n- **"), 3 + unknown + 14 + 13 + 10)  # the header, and the 14 + 13 it never held
+        self.assertEqual(printed["written by 0.2.0"].count("\n- **"), 3 + unknown + 14 + 13 + 8 + 10)  # the header, and the 14 + 13 + 8 it never held
         self.assertIn("\\<script\\>", printed["Markdown and HTML in its text"])
         self.assertIn("(`executions.mode`): tab line nul wide", printed["Markdown and HTML in its text"])
 
@@ -1071,7 +1071,7 @@ class PageBehaviourTest(unittest.TestCase):
                 self.assert_saved(got["second"], profile.apply_withholding({**sent, "run": run}, WITHHELD[1:]), raw)
                 self.assertNotIn("2.40.1", got["first"])
                 self.assertEqual(got["status"], f"Download started: n8n-profile-{sent['created_at'][:10]}.json")
-                self.assertIn("1 of 59 facts, 2 of ", got["summary"])
+                self.assertIn("1 of 67 facts, 2 of ", got["summary"])
 
     def test_answers_are_saved_as_profile_py_writes_them(self):
         answers = {"hosting.model": "private_cloud", "worker.autoscaling": "no", "n8n.image_modified": "yes", MULTI: ["grafana", "prometheus"]}
@@ -1137,7 +1137,7 @@ class PageBehaviourTest(unittest.TestCase):
                 self.assertIn("observability.toolsprometheus: yes, grafana: yesdeclared", got["table"])
                 self.assertIn("proxy.kindunknownnot answered", got["table"])
                 self.assertIn("orchestratorkubernetesmeasured", got["table"])
-                self.assertIn("Answered: 4 of 14 questions. Withheld: 0 of 59 facts", got["summary"])
+                self.assertIn("Answered: 4 of 14 questions. Withheld: 0 of 67 facts", got["summary"])
                 self.assertEqual(got["boxes"], len(all_ids(sent)))
                 self.assertEqual((got["notesBefore"], got["notesAfter"]), (0, 1))
                 self.assert_saved(got["second"], profile.apply_withholding(declared, ["worker.autoscaling", "n8n.version"]), raw)
@@ -1243,7 +1243,7 @@ class PageBehaviourTest(unittest.TestCase):
         )  # fmt: skip
         facts = [f["id"] for f in sent["facts"]]
         settings = [profile.setting_id(s) for s in sent["settings"]]
-        self.assertEqual(len(facts), 59)
+        self.assertEqual(len(facts), 67)
         self.assertGreater(len(settings), 3)
         for name, ids in (
             ("Withhold all facts", facts),

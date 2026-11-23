@@ -92,7 +92,7 @@ const document = {
 // What index.html hides at the start is hidden here too.
 for (const [, id] of fs.readFileSync(request.index, "utf8").matchAll(/<[^>]*\bid="([^"]+)"[^>]*\shidden[\s>]/g)) document.getElementById(id).hidden = true;
 // The form fields are read through their fieldset (a source the server lacks is disabled).
-for (const id of ["f-debug", "f-url", "f-env", "f-postgres", "f-redis", "f-kube-ns", "f-kube-ctx"]) new Element("fieldset").append(document.getElementById(id));
+for (const id of ["f-debug", "f-url", "f-apikey", "f-env", "f-postgres", "f-redis", "f-kube-ns", "f-kube-ctx"]) new Element("fieldset").append(document.getElementById(id));
 
 const saved = []; // Blobs handed to URL.createObjectURL: the downloads
 const copied = []; // texts handed to the clipboard
@@ -105,7 +105,8 @@ const context = vm.createContext({
   CSS: { supports: () => true },
   // Without a clipboard the page falls back to document.execCommand, which this document does not have either.
   navigator: request.noClipboard ? {} : { clipboard: { async writeText(text) { copied.push(text); } } },
-  URL: { createObjectURL(blob) { saved.push(blob); return "blob:saved"; }, revokeObjectURL() {} },
+  // The real URL, which the form uses to check an address, with the two calls a download makes.
+  URL: Object.assign(class extends URL {}, { createObjectURL(blob) { saved.push(blob); return "blob:saved"; }, revokeObjectURL() {} }),
   fetch(url, options) {
     if (url === "/api/meta") return Promise.resolve(response(200, JSON.stringify({ version: "test", sources: [], ...request.meta })));
     if (url !== "/api/run") throw new Error(`the page asked for ${url}`);

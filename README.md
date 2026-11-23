@@ -50,6 +50,7 @@ Every source is optional. A source you do not provide is reported as "not assess
 | `--redis-url` | queue depth, memory policy |
 | `--kube-namespace` | replicas, resources, probes, container environment |
 | `--debug-info` | the "Debug information" text of n8n: version, mode, database, pruning, instances |
+| `--api-key-file` | with `--url`: [usage numbers](#usage-numbers) through n8n's public API |
 | `--snapshot` | a previously saved snapshot (offline run) |
 
 ### Kubernetes
@@ -70,6 +71,18 @@ It can be the only source: the rules that can read it run, and the scores are ma
 In the web interface, paste the text in the "Debug information" field, the first of the form. The server reads it in memory and keeps nothing of it; a text it refuses is reported next to the field, and nothing is collected.
 
 The tool reads known values, numbers and versions from the text and discards the rest. The instance id, the host ids and the browser's user agent in it are never stored or shown, in the report, a saved snapshot or the profile. A text that went through a ticket or a chat (quote marks, changed bullets, a code fence, lost `#`) still reads. A line that a mail client broke in two is joined again, and a UTF-16 file (what Windows PowerShell writes with `>`) is read. A file that is larger than 64 KB, is not a debug information, or holds more than one of them stops the run with exit code 3: give a single text, the most recent. Texts of n8n 1.x are read too.
+
+### Usage numbers
+
+The sources above say how an instance is built, not how much it is used. Give an n8n API key next to the URL and the tool reads four numbers through n8n's public API: executions per day and the failure rate over the last 7 days, the active workflows and the users.
+
+```bash
+python3 -m n8n_healthcheck --url https://n8n.example.com --api-key-file n8n-api-key.txt
+```
+
+The key is read from a file (or from standard input with `-`), never from a flag, so that it does not stay in the shell history. In the web interface it is the "n8n API key" field under the URL. It is sent only to the instance of that URL, in `GET` requests, and is never written to the report, a snapshot, the profile or a log. The calls are `GET /api/v1/insights/summary` (or, where n8n does not have it, `GET /api/v1/executions`), `GET /api/v1/workflows?active=true`, `GET /api/v1/users` and `GET /api/v1/users/<id>`; of the answers only counts are kept. Where n8n lets you choose the scopes of a key, these are enough: `insights:read`, `execution:list`, `workflow:list`, `user:list`, `user:read`. Create a key for the run and delete it in n8n afterwards.
+
+Use the key of the owner or of an admin. Any other user's key sees only that user's workflows and executions; the tool notices (the last call is refused) and marks those numbers as partial. The numbers appear in a "Usage" section of the report and as `usage.*` facts in the [environment profile](#environment-profile). They describe the instance: no finding and no score rests on them. Without the Insights summary (n8n before 2.17.0, or a key that may not read it) the executions are counted from the executions list, which holds only what n8n saved and has not pruned: the report then says "about" and why. A number that cannot be read is listed as not read with its reason, and the others are still given.
 
 ## Environment profile
 

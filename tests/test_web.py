@@ -89,7 +89,7 @@ class WebTest(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         self.assertEqual(meta["version"], n8n_healthcheck.__version__)
         self.assertRegex(meta["version"], r"^\d+\.\d+\.\d+$")
-        self.assertEqual([s["id"] for s in meta["sources"]], ["debug_info", "url", "env", "postgres", "redis", "kubernetes"])
+        self.assertEqual([s["id"] for s in meta["sources"]], ["debug_info", "url", "api", "env", "postgres", "redis", "kubernetes"])
         sources = {s["id"]: s for s in meta["sources"]}
         self.assertFalse(sources["postgres"]["available"])
         self.assertIn("psql was not found", sources["postgres"]["hint"])
@@ -162,7 +162,7 @@ class WebTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             set(result),
-            {"n8n_version", "exit_code", "summary", "summary_notes", "sources", "partial", "scores", "not_assessed", "findings", "warnings", "markdown", "snapshot", "profile"},
+            {"n8n_version", "exit_code", "summary", "summary_notes", "sources", "partial", "scores", "not_assessed", "findings", "warnings", "markdown", "snapshot", "profile", "usage"},
         )
         self.assertEqual(result["n8n_version"], "1.70.0")
         self.assertEqual(result["exit_code"], 2)
@@ -600,7 +600,7 @@ class WebTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("Debug information generated on 2026-11-19 was read.", result["summary"])
         self.assertNotIn("rests on the debug information only", result["summary"])
-        self.assertEqual(result["profile"]["sources"], {**dict.fromkeys(profile.report.SECTIONS, "not_provided"), "env": "collected", "debug_info": "collected"})
+        self.assertEqual(result["profile"]["sources"], {**dict.fromkeys(profile.report.SECTIONS, "not_provided"), "env": "collected", "debug_info": "collected", "api": "not_provided"})
         facts = {fact["id"]: fact for fact in result["profile"]["facts"]}
         self.assertEqual((facts["executions.mode"]["value"], facts["executions.mode"]["source"]), ("regular", "env"))
         self.assertEqual((facts["n8n.version"]["value"], facts["n8n.version"]["source"]), ("3.3.0", "debug_info"))

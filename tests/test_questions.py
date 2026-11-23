@@ -96,9 +96,9 @@ class CatalogueTest(unittest.TestCase):
         self.assertEqual(profile.FORMAT_1_FACT_IDS, validate_0_2_0.FORMAT_1_FACT_IDS)
 
     def test_version(self):
-        self.assertEqual(n8n_healthcheck.__version__, "0.4.0")
+        self.assertEqual(n8n_healthcheck.__version__, "0.5.0")
         self.assertEqual(profile.FORMAT_VERSION, 1)
-        self.assertEqual(base.build()["tool_version"], "0.4.0")
+        self.assertEqual(base.build()["tool_version"], "0.5.0")
 
     def test_every_operator_question_is_documented(self):
         with open(base.DOCS, encoding="utf-8") as handle:
@@ -405,7 +405,7 @@ class SheetTest(unittest.TestCase):
 
     def test_nothing_collected_lists_everything(self):
         _, _, measurable, operator, _ = self.sheet_of(base.build())
-        self.assertEqual(measurable.count("\n- **"), 31 + 13)  # and the 13 only a debug information fills
+        self.assertEqual(measurable.count("\n- **"), 31 + 13 + 8)  # and the 13 only a debug information fills, the 8 only the n8n API
         self.assertEqual(operator.count("\n- **"), 15)
 
     def test_text_from_a_file_cannot_become_markup_or_reach_the_terminal(self):

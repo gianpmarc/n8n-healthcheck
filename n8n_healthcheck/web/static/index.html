@@ -76,6 +76,15 @@
           <input id="f-url" name="url" type="url" inputmode="url" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="https://n8n.example.com…" aria-describedby="e-url">
           <p class="field__error" id="e-url" hidden></p>
         </div>
+        <div class="field">
+          <label for="f-apikey">n8n API key <span class="field__note">(optional; needs the URL)</span></label>
+          <div class="secret">
+            <input id="f-apikey" name="api_key" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" aria-describedby="h-apikey e-apikey">
+            <button type="button" class="btn secret__toggle" data-toggle="f-apikey" data-what="n8n API key" aria-label="Show n8n API key">Show</button>
+          </div>
+          <p class="field__hint" id="h-apikey">Adds four usage numbers to the report: executions per day, failure rate, active workflows and users. Create a key in n8n under Settings &gt; n8n API, for this run only, and delete it there afterwards. It is used for <code>GET</code> requests to this URL and is neither kept nor shown again. Where n8n lets you choose scopes, these are enough: <code>insights:read</code>, <code>execution:list</code>, <code>workflow:list</code>, <code>user:list</code>, <code>user:read</code>. Use the key of the owner or of an admin: any other key sees only its own user's workflows and executions, and the numbers are then marked as partial.</p>
+          <p class="field__error" id="e-apikey" hidden></p>
+        </div>
       </fieldset>
 
       <fieldset class="source" data-source="env">
@@ -215,6 +224,13 @@
         <p class="status__note" id="status-note" hidden></p>
       </div>
     </div>
+
+    <section aria-labelledby="usage-title" class="block" id="usage-block" hidden>
+      <h3 id="usage-title">Usage</h3>
+      <p class="block__note"><strong class="lead-in">Read through the n8n API.</strong> These numbers describe the instance: no finding or score rests on them.</p>
+      <p class="block__note" id="usage-basis" hidden></p>
+      <dl class="usage" id="usage"></dl>
+    </section>
 
     <section aria-labelledby="scores-title" class="block">
       <h3 id="scores-title">Scores by area</h3>
