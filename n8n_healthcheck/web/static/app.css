@@ -671,7 +671,7 @@ input[data-masked="true"] { -webkit-text-security: disc; }
 }
 .score__fill { height: 100%; width: calc(var(--score, 0) * 1%); background: var(--score-ink, var(--text)); }
 .score__findings { margin-top: var(--space-2); color: var(--muted); font-size: 0.875rem; }
-/* A score takes the colour of the most severe finding of its area (green when it has none);
+/* A score takes the colour of the most severe finding of its area (green when it was checked in full and has none);
    the words "worst: …" under it say the same, so the colour only repeats them. */
 .score--critical { --score-ink: var(--critical); }
 .score--warning { --score-ink: var(--warning); }
@@ -783,8 +783,12 @@ input[data-masked="true"] { -webkit-text-security: disc; }
 @media (prefers-reduced-motion: reduce) { .chevron { transition: none; } }
 .finding__head { min-width: 0; }
 .finding__title { display: block; font-size: 1.0625rem; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
-/* In the report a title takes the colour of its severity; the tag under it says it in words. */
-.finding .finding__title { color: var(--sev, var(--text)); font-weight: 600; }
+/* In the report a title takes the colour of its severity; the tag under it says it in words.
+   A severity this page does not know keeps the text colour: its bar is drawn as info, its tag says the word. */
+.finding .finding__title { font-weight: 600; }
+.finding[data-severity="critical"] .finding__title,
+.finding[data-severity="warning"] .finding__title,
+.finding[data-severity="info"] .finding__title { color: var(--sev); }
 .finding__tags {
   display: flex;
   flex-wrap: wrap;

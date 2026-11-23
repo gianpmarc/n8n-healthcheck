@@ -530,7 +530,8 @@
       }
       const fill = el("div", { class: "score__fill" });
       fill.style.setProperty("--score", String(Math.max(0, Math.min(100, Number(row.score) || 0))));
-      const colour = worst || (data.findings.some((f) => f.area === row.area) ? "" : "ok");
+      // Green only for an area that was checked in full and has no finding: a partial score says too little.
+      const colour = worst || (row.partial || data.findings.some((f) => f.area === row.area) ? "" : "ok");
       return el("li", { class: `score${row.partial ? " score--partial" : ""}${colour ? ` score--${colour}` : ""}` },
         el("p", { class: "score__area" }, String(row.area)),
         el("p", { class: "score__value" },
