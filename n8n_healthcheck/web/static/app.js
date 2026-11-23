@@ -481,7 +481,7 @@
     $("stats").replaceChildren(...(notes ? [
       stat(counts[0], "critical", counts[0] ? "critical" : ""),
       stat(counts[1], counts[1] === 1 ? "warning" : "warnings", counts[1] ? "warning" : ""),
-      stat(counts[2], "info"),
+      stat(counts[2], "info", counts[2] ? "info" : ""),
       data.sources ? stat(`${Number(data.sources.assessed)}/${Number(data.sources.total)}`, "data sources read") : null,
       // A debug information is not one of the data sources counted above, so it is named.
       data.sources && data.sources.debug_info === true ? el("li", { class: "stat" }, el("span", { class: "stat__l" }, "debug information read")) : null,
@@ -517,7 +517,10 @@
   function renderScores(data) {
     const rows = data.scores.map((row) => {
       const count = Number(row.findings) || 0;
-      const footer = el("p", { class: "score__findings" }, count ? plural(count, "finding") : "No findings");
+      // The score takes the colour of the most severe finding of its area, and says which in words.
+      const worst = SEVERITIES.find((severity) => data.findings.some((f) => f.area === row.area && f.severity === severity));
+      const footer = el("p", { class: "score__findings" }, count ? plural(count, "finding") : "No findings",
+        worst ? el("span", { class: "score__worst" }, ` · worst: ${worst}`) : null);
       if (row.score == null) {
         return el("li", { class: "score score--none" },
           el("p", { class: "score__area" }, String(row.area)),
@@ -527,7 +530,8 @@
       }
       const fill = el("div", { class: "score__fill" });
       fill.style.setProperty("--score", String(Math.max(0, Math.min(100, Number(row.score) || 0))));
-      return el("li", { class: `score${row.partial ? " score--partial" : ""}` },
+      const colour = worst || (data.findings.some((f) => f.area === row.area) ? "" : "ok");
+      return el("li", { class: `score${row.partial ? " score--partial" : ""}${colour ? ` score--${colour}` : ""}` },
         el("p", { class: "score__area" }, String(row.area)),
         el("p", { class: "score__value" },
           el("span", { class: "score__number" }, String(row.score)),
