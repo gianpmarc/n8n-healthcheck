@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 from typing import Iterator, Optional
@@ -39,11 +40,23 @@ def source_missing(*needs: str) -> Outcome:
 
 
 def rule(rule_id: str, area: str, *, subject: str, passed: str, variants=(), facts=(), settings=(), scopes=("instance", "main")):
-    """Declare a rule: its id, its area and its fixed texts (models.RuleInfo), as `function.info`."""
+    """Declare a rule: its id, its area and its fixed texts (models.RuleInfo).
+
+    The function it decorates states an outcome on every run: a Finding or an Outcome.
+    The rule itself keeps the contract it had before outcomes existed, a Finding or None,
+    so that it can still be called alone; `rule.assess` is the function that says why
+    there is no finding, which the engine calls, and `rule.info` what the rule is.
+    """
 
     def declare(function):
-        function.info = RuleInfo(rule_id, area, subject, passed, tuple(variants), tuple(facts), tuple(settings), tuple(scopes))
-        return function
+        @functools.wraps(function)
+        def finding_or_none(snapshot: Snapshot):
+            result = function(snapshot)
+            return None if isinstance(result, Outcome) else result
+
+        finding_or_none.assess = function
+        finding_or_none.info = RuleInfo(rule_id, area, subject, passed, tuple(variants), tuple(facts), tuple(settings), tuple(scopes))
+        return finding_or_none
 
     return declare
 

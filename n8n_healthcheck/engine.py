@@ -30,14 +30,15 @@ def assess(snapshot: Snapshot, rules: list[Rule]) -> list[Check]:
     A rule that raises, or returns something that is neither a valid Finding nor a valid
     Outcome, does not stop the run: its Check is `not_assessed` for the reason
     `rule_error`, and carries an info Finding with rule_id SKIPPED_RULE_ID so the reader
-    of the report knows the check did not happen. A declared rule (one with `info`) must
-    state an outcome; a bare callable may still return None, which is left out by run().
+    of the report knows the check did not happen. A declared rule (rules/_helpers.py,
+    rule()) is asked through its `assess`, and must state an outcome; a bare callable may
+    still return None, which is left out by run().
     """
     checks = []
     for rule in rules:
         info = getattr(rule, "info", None)
         try:
-            result = rule(snapshot)
+            result = getattr(rule, "assess", rule)(snapshot)
             if isinstance(result, Outcome):
                 if (
                     result.outcome not in OUTCOMES[1:]
