@@ -163,6 +163,10 @@ smooths the difference between working days and weekends.)*
    started more than 7 days ago are skipped, and the walk ends after the first
    page that holds such executions and none of the period. This can cost one
    page more than before, within the same bounds.
+   *(Changed after the second review, 2026-11-24.)* The walk ends there only
+   once it has met an older execution that proves the period is covered
+   (below); a page of older executions that are all waiting does not end it,
+   and the walk goes on to the end of the list or the page bound.
    - Counted: executions whose status is `success`, `error` or `crashed`.
      Failed: `error` and `crashed`. Running, waiting, new, canceled and unknown
      ones are in neither number.
@@ -173,7 +177,19 @@ smooths the difference between working days and weekends.)*
    - The period is the time actually covered: 7 days when the walk passed the
      period, or the list ended and holds an execution older than that
      *(Changed after the review, 2026-11-24.)*; otherwise from the oldest execution read to the run,
-     whether the page bound was reached or the list simply ended. Executions
+     whether the page bound was reached or the list simply ended.
+     *(Changed after the second review, 2026-11-24.)* An older execution
+     proves that the period is covered only when n8n's pruning could have
+     removed it before any execution of the period: it stopped before the 7
+     days, it is not waiting (`waitTill` empty), and its status is not `new`,
+     `running` or `waiting`. n8n prunes by the date an execution stopped and by
+     count in the order of the ids, and never removes one in those three
+     states (`softDeletePrunableExecutions`, read at 1.90.0, 2.16.1 and 3.3.0),
+     so one that has been waiting for 9 days says nothing about what was
+     pruned after it. Without such a proof the period is the time back to the
+     oldest execution counted, reason `short_history`. Not told apart:
+     pruning also keeps executions that carry an annotation, which the list
+     does not show; an old annotated execution is taken as a proof. Executions
      per day is the count divided by that period. *(Changed after the builder
      check: n8n's default pruning keeps 10 000 executions, the same number as
      the page bound, so dividing by 7 when the list ends would be wrong many
@@ -408,6 +424,11 @@ the advice to create a key for the run and revoke it afterwards.
   to `https` on the same host; a zero from Insights; a key file in UTF-8 with
   a byte order mark and in UTF-16; the key's error that asks for the URL going
   away when the URL is typed.
+- *(Changed after the second review, 2026-11-24.)* 216 executions over 3 days
+  and one older execution that pruning leaves alone (waiting, new, running,
+  not stopped, stopped inside the period, waiting on n8n 1.x): 3 days and
+  `short_history`; with one that pruning could have removed: 7 days; a page
+  of older waiting executions does not end the walk as covered.
 - Zero leak: a key, workflow names, e-mails, user names and execution ids that
   are marker strings; no marker in the snapshot, the saved snapshot, the report,
   the profile, any error or warning, the JSON of the web interface or the page.

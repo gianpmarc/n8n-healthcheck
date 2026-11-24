@@ -36,6 +36,8 @@ MAX_REQUESTS = 130  # 1 + 40 for the executions, 40 + 1 for the users, 40 for th
 MAX_BYTES = 32 * 1024 * 1024  # of one answer
 TIME_LIMIT = 60  # seconds for the whole collector, on the clock
 MAX_CURSOR = 2048
+# The statuses n8n's pruning never removes, whatever the age of the execution.
+NOT_PRUNED = ("new", "running", "waiting")
 # A user id as n8n writes it; anything else is not put in a request path.
 _USER_ID = re.compile(r"[0-9A-Za-z-]{1,64}")
 
@@ -235,13 +237,16 @@ def _listed(session: _Session, now: datetime) -> dict:
 
     The list is in the order of the ids, not of the start dates, so one older execution
     does not end the walk: it ends after the first page that holds older executions and
-    none of the period. n8n 1.x does not write a status in the list: when no execution
+    none of the period, once an older one that n8n's pruning could have removed was met.
+    Only such an execution shows that the list holds the whole period: pruning removes by
+    the date an execution stopped, and never one that is new, running or waiting.
+    n8n 1.x does not write a status in the list: when no execution
     of the period has one, those that have stopped and are not waiting are counted, and
     how they ended stays unknown (`failed` is None).
     """
     cutoff = now - timedelta(days=PERIOD_DAYS)
     by_status = failed = stopped = 0
-    with_status, oldest, older, reached, cut = False, None, False, False, False
+    with_status, oldest, prunable, reached, cut = False, None, False, False, False
     for items, cut in _pages(session, "/executions?"):
         inside = before = 0
         for item in items:
@@ -250,6 +255,14 @@ def _listed(session: _Session, now: datetime) -> dict:
                 continue
             if started < cutoff:
                 before += 1
+                stopped_at = _time(item.get("stoppedAt"))
+                if (
+                    stopped_at is not None
+                    and stopped_at < cutoff
+                    and item.get("waitTill") is None
+                    and item.get("status") not in NOT_PRUNED
+                ):
+                    prunable = True
                 continue
             inside += 1
             oldest = started if oldest is None else min(oldest, started)
@@ -261,13 +274,13 @@ def _listed(session: _Session, now: datetime) -> dict:
                 failed += status in FAILED
             if item.get("stoppedAt") is not None and item.get("waitTill") is None:
                 stopped += 1
-        older = older or before > 0
-        if before and not inside:
+        if before and not inside and prunable:
             reached = True
             break
-    # The whole period is covered when the walk went past it, or the list ended and holds
-    # something older. Else the time covered is back to the oldest execution counted.
-    reached = reached or (older and not cut)
+    # The whole period is covered when the walk went past it, or the list ended, and it
+    # holds something older that pruning could have removed. Else the time covered is
+    # back to the oldest execution counted.
+    reached = reached or (prunable and not cut)
     period = PERIOD_DAYS if reached else (now - oldest).total_seconds() / 86400 if oldest else 0
     if period < 1:
         raise _Refused("busy" if cut else "short")

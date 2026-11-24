@@ -352,7 +352,10 @@ which `usage.method` names:
   ends earlier or the tool's bound of 10 000 executions is reached. When less
   than one day is covered, the numbers are `unknown`. The list is in the order
   of the ids: executions started earlier than the 7 days are skipped, and the
-  reading ends after the first page that holds only such executions.
+  reading ends after the first page that holds only such executions. The list
+  is taken to cover the whole 7 days only when it holds an older execution
+  that n8n's pruning could have removed: one that stopped before the 7 days
+  and is not new, running or waiting.
 
   n8n 1.x does not say in the list how an execution ended. When no execution
   of the period has a status, the executions that have stopped and are not waiting are counted, and

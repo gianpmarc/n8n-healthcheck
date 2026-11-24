@@ -353,6 +353,33 @@ class CollectorTest(Base):
         self.assertEqual((found["total"], found["period_days"], found["estimate_reason"]), (600, 7, "saved_only"))
         self.assertEqual(sum("/executions" in path for path in self.n8n.api_paths()), 4)  # 1 201 items would be 5
 
+    def test_an_older_execution_that_pruning_leaves_alone_does_not_prove_the_period(self):
+        # One every 20 minutes over 3 days, and one that has been waiting for 9 days: pruning
+        # never removes it, so it does not say that the 7 days are all in the list.
+        recent = spread(216, 3, first=1)
+        old = execution(0, days=9)
+        kept = {
+            "waiting": {**old, "status": "waiting"},
+            "new": {**old, "status": "new"},
+            "running": {**old, "status": "running"},
+            "waiting, n8n 1.x": {key: value for key, value in {**old, "waitTill": ago(hours=-1)}.items() if key != "status"},
+            "not stopped": {**old, "stoppedAt": None},
+            "stopped in the period": {**old, "stoppedAt": ago(days=2)},
+        }
+        for name, item in kept.items():
+            with self.subTest(name):
+                found = self.read(executions=[*recent, item])["executions"]
+                self.assertEqual((found["total"], found["period_days"], found["estimate_reason"]), (216, 3, "short_history"))
+        # One that pruning could have removed does.
+        found = self.read(executions=[*recent, old])["executions"]
+        self.assertEqual((found["total"], found["period_days"], found["estimate_reason"]), (216, 7, "saved_only"))
+        # A page of older ones that are all waiting does not end the walk as if the period were covered.
+        waiting = [execution(1000 + i, "waiting", days=9) for i in range(300)]
+        found = self.read(executions=[*recent, *waiting])["executions"]
+        self.assertEqual((found["total"], found["period_days"], found["estimate_reason"]), (216, 3, "short_history"))
+        found = self.read(executions=[*recent, *waiting, execution(2000, days=10)])["executions"]
+        self.assertEqual((found["total"], found["period_days"], found["estimate_reason"]), (216, 7, "saved_only"))
+
     def test_only_finished_statuses_are_counted(self):
         listed = [
             execution(1, "success", hours=1),
