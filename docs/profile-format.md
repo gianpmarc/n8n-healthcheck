@@ -341,7 +341,8 @@ which `usage.method` names:
 
 - `insights`: n8n's own Insights summary of the last 7 days (n8n 2.17.0 and
   later, with a key that may read it). An execution is whatever Insights
-  counts. Insights can lag behind by up to an hour.
+  counts. Insights can lag behind by up to an hour, and a count of zero says
+  so in its `detail`.
 - `listed`: counted from the executions list, newest first, when the Insights
   summary is not available. This is **always an estimate**, and
   `usage.estimate` is `true`: the list holds only executions n8n saved and has
@@ -349,10 +350,12 @@ which `usage.method` names:
   counted, and `error` and `crashed` are the failed ones. `usage.period_days`
   is the time the list actually covers, which is shorter than 7 when the list
   ends earlier or the tool's bound of 10 000 executions is reached. When less
-  than one day is covered, the numbers are `unknown`.
+  than one day is covered, the numbers are `unknown`. The list is in the order
+  of the ids: executions started earlier than the 7 days are skipped, and the
+  reading ends after the first page that holds only such executions.
 
-  n8n 1.x does not say in the list how an execution ended. There the
-  executions that have stopped and are not waiting are counted, and
+  n8n 1.x does not say in the list how an execution ended. When no execution
+  of the period has a status, the executions that have stopped and are not waiting are counted, and
   `usage.failure_rate_percent` is `unknown`.
 
 **A key that does not see everything.** For a user who is not the owner or an

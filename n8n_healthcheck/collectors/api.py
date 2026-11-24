@@ -5,7 +5,8 @@ the executions list), the users and the active workflows. A fifth call, the deta
 one user, only tells whether the key sees the whole instance: its answer is not read.
 
 The key goes in one header of requests to the origin of the given URL and nowhere else:
-a redirect to another origin is refused. Of every answer only counts, known status
+a redirect to another origin is refused, and no proxy is used, whatever the machine is
+set to. Of every answer only counts, known status
 words and dates are read; nothing else is kept, and no error text is passed on.
 """
 
@@ -48,7 +49,11 @@ class _Refused(Exception):
 
 
 class _OtherOrigin(urllib.error.URLError):
-    pass
+    """A redirect that was not followed. `to_https` when it is the same host over https."""
+
+    def __init__(self, to_https: bool):
+        super().__init__("redirect to another origin")
+        self.to_https = to_https
 
 
 def _origin(url: str) -> tuple:
@@ -70,9 +75,10 @@ class _Session:
 
         class SameOrigin(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, headers, newurl):
-                if _origin(newurl) != origin:
+                other = _origin(newurl)
+                if other != origin:
                     fp.close()
-                    raise _OtherOrigin("redirect to another origin")
+                    raise _OtherOrigin(origin[0] == "http" and other[:2] == ("https", origin[1]))
                 return super().redirect_request(req, fp, code, msg, headers, newurl)
 
         # The sockets are kept so that the time limit can end a read that is under way: a
@@ -95,7 +101,9 @@ class _Session:
             def https_open(self, req):
                 return self.do_open(Secure, req)
 
-        self._open = urllib.request.build_opener(SameOrigin, Http, Https).open
+        # No proxy, not even the one of the environment or of the system: a proxy would
+        # receive the key of a plain http request.
+        self._open = urllib.request.build_opener(urllib.request.ProxyHandler({}), SameOrigin, Http, Https).open
         self._timer = threading.Timer(TIME_LIMIT, self._expire)
         self._timer.daemon = True
         self._timer.start()
@@ -151,8 +159,8 @@ class _Session:
         except urllib.error.HTTPError as error:
             error.close()
             raise _Refused(error.code) from None
-        except _OtherOrigin:
-            raise _Refused("redirect") from None
+        except _OtherOrigin as other:
+            raise _Refused("https" if other.to_https else "redirect") from None
         except (OSError, http.client.HTTPException, ValueError) as error:  # URLError is an OSError
             late = self._expired or time.monotonic() >= self._deadline
             timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
@@ -225,39 +233,49 @@ def _executions(session: _Session, now: datetime) -> dict:
 def _listed(session: _Session, now: datetime) -> dict:
     """Count the executions list, newest first, back to PERIOD_DAYS before the run.
 
-    n8n 1.x does not write a status in the list. There the executions that have stopped
-    and are not waiting are counted, and how they ended stays unknown (`failed` is None).
+    The list is in the order of the ids, not of the start dates, so one older execution
+    does not end the walk: it ends after the first page that holds older executions and
+    none of the period. n8n 1.x does not write a status in the list: when no execution
+    of the period has one, those that have stopped and are not waiting are counted, and
+    how they ended stays unknown (`failed` is None).
     """
     cutoff = now - timedelta(days=PERIOD_DAYS)
     by_status = failed = stopped = 0
-    with_status, oldest, reached, cut = True, None, False, False
+    with_status, oldest, older, reached, cut = False, None, False, False, False
     for items, cut in _pages(session, "/executions?"):
+        inside = before = 0
         for item in items:
             started = _time(item.get("startedAt"))
             if started is None:
                 continue
             if started < cutoff:
-                reached = True
-                break
+                before += 1
+                continue
+            inside += 1
             oldest = started if oldest is None else min(oldest, started)
             status = item.get("status")
-            if status is None:
-                with_status = False
-            elif status in COUNTED:
+            if status is not None:
+                with_status = True
+            if status in COUNTED:
                 by_status += 1
                 failed += status in FAILED
             if item.get("stoppedAt") is not None and item.get("waitTill") is None:
                 stopped += 1
-        if reached:
+        older = older or before > 0
+        if before and not inside:
+            reached = True
             break
-    # The time actually covered: the list may end, or the bound be reached, before 7 days.
+    # The whole period is covered when the walk went past it, or the list ended and holds
+    # something older. Else the time covered is back to the oldest execution counted.
+    reached = reached or (older and not cut)
     period = PERIOD_DAYS if reached else (now - oldest).total_seconds() / 86400 if oldest else 0
     if period < 1:
-        raise _Refused("short")
+        raise _Refused("busy" if cut else "short")
+    by_list = with_status or oldest is None  # an empty period has no outcome to miss
     return {
         "method": "listed",
-        "total": by_status if with_status else stopped,
-        "failed": failed if with_status else None,
+        "total": by_status if by_list else stopped,
+        "failed": failed if by_list else None,
         "period_days": min(PERIOD_DAYS, round(period, 2)),
         "estimate": True,
         "estimate_reason": "saved_only" if reached else "page_limit" if cut else "short_history",

@@ -138,7 +138,7 @@ def _usage_section(snapshot: Snapshot) -> dict | None:
 
     def row(name: str, label: str, shown) -> dict:
         value, note = found[name]
-        if value is not None and name in ("executions_per_day", "failure_rate_percent"):
+        if value is not None and name in ("executions_per_day", "failure_rate_percent") and note != usage.INSIGHTS_ZERO:
             note = ""  # the line above the numbers says how they were obtained
         return {"id": f"usage.{name}", "label": label, "value": None if value is None else shown(value), "note": note}
 

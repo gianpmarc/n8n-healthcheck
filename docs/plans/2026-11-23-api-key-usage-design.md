@@ -76,6 +76,9 @@ It is a failure, even if everything works, when:
 - a run without a key gives a report, a score or a profile fact that differs
   from what version 0.4.0 gives, other than the new facts being `unknown`;
 - a file written by this version is refused by tool versions 0.2.0 to 0.4.0;
+  *(Changed after the review, 2026-11-24.)* This is about profiles. A snapshot saved by a run with a key holds
+  the `usage` section and is refused by 0.2.0 to 0.4.0, as a snapshot with
+  `debug_info` has been by 0.2.0 and 0.3.0 since piece 3. Left as it is.
 - a slow or huge instance makes the run hang or issue requests without a bound;
 - anything in the anti-goals of pieces 1 to 3 stops holding.
 
@@ -112,7 +115,16 @@ URL is a usage error. The key goes in the `X-N8N-API-KEY` header of requests to
 
 - **Redirects.** A request that carries the key does not follow a redirect to
   another origin (scheme, host and port). A refused redirect makes that number
-  unknown.
+  unknown. *(Changed after the review, 2026-11-24.)* When the URL is `http` and the redirect goes to the same
+  host over `https`, the reason says so and asks for the `https` URL ("the
+  instance redirects to https, which was not followed: give the URL with
+  https"); it is still not followed.
+- **No proxy.** *(Changed after the review, 2026-11-24.)* The requests that carry the key never go through a
+  proxy: the proxy variables of the environment and the proxy settings of the
+  system are ignored for them, because a proxy would receive the key of a plain
+  `http` request. An instance that can only be reached through a proxy gives
+  "the n8n API could not be reached". The collector of the health endpoints,
+  which carries no key, is unchanged.
 - **Plain HTTP.** Allowed, because instances on a private network or on the same
   machine are common. When the URL is `http` and the host is not a loopback
   address, the Summary says the key was sent without encryption.
@@ -145,13 +157,22 @@ smooths the difference between working days and weekends.)*
    the detail says so and the tool does not second-guess it.
 2. On 403 or 404 (older n8n, Insights not available, scope missing, range not
    licensed): walk `GET /executions`, newest first, without execution data,
-   until an execution started more than 7 days ago is met, the list ends, or the
-   page bound is reached. Method `listed`.
+   until the period is passed, the list ends, or the page bound is reached.
+   Method `listed`. *(Changed after the review, 2026-11-24.)* The list is in the order of the ids, not of the
+   start dates, so one older execution does not end the walk. Executions
+   started more than 7 days ago are skipped, and the walk ends after the first
+   page that holds such executions and none of the period. This can cost one
+   page more than before, within the same bounds.
    - Counted: executions whose status is `success`, `error` or `crashed`.
      Failed: `error` and `crashed`. Running, waiting, new, canceled and unknown
      ones are in neither number.
-   - The period is the time actually covered: 7 days when an execution older
-     than that was met; otherwise from the oldest execution read to the run,
+   - *(Changed after the review, 2026-11-24.)* The status rule is chosen for the list, not for one item:
+     an execution of the period without a status is simply not counted. Only
+     when no execution of the period has a status is the list read as that of
+     n8n 1.x (below).
+   - The period is the time actually covered: 7 days when the walk passed the
+     period, or the list ended and holds an execution older than that
+     *(Changed after the review, 2026-11-24.)*; otherwise from the oldest execution read to the run,
      whether the page bound was reached or the list simply ended. Executions
      per day is the count divided by that period. *(Changed after the builder
      check: n8n's default pruning keeps 10 000 executions, the same number as
@@ -159,7 +180,9 @@ smooths the difference between working days and weekends.)*
      times over on a busy instance.)*
    - When the period covered is shorter than one day, both numbers are unknown
      ("less than one day of executions is stored"): a rate per day from a few
-     hours, or from three executions, would mislead.
+     hours, or from three executions, would mislead. *(Changed after the review, 2026-11-24.)* When it is the
+     page bound that ended the walk there, the reason is its own: "more than
+     10 000 executions in less than one day, the bound of this tool".
    - A listed result is **always an estimate**: the list holds only executions
      that n8n saved and has not pruned, and only those the key's user may see.
      The reason says what is known: `page_limit` (the bound was reached),
@@ -184,7 +207,12 @@ smooths the difference between working days and weekends.)*
      zero executions per day: an instance that saves nothing would look idle.
      *(Builder's call.)*
 3. A total of zero gives `0` executions per day and an unknown failure rate
-   ("no execution in the period").
+   ("no execution in the period"). *(Changed after the review, 2026-11-24.)* A zero from the Insights summary
+   is not left to read as an exact number: both the `0` and the unknown
+   failure rate carry "n8n's Insights counted no execution in the last 7 days;
+   it can lag behind by up to an hour", in the fact's detail and next to the
+   number in the report and the page. No new fact id; `usage.estimate` stays
+   `false` for the method `insights`.
 
 The builder must check, in n8n's source at the tags 1.50.0, 1.70.0, 1.90.0 and
 a 2.x tag below 2.17.0, how the executions list is ordered, which fields and
@@ -248,8 +276,11 @@ no number could be read, so that the report can say why:
 `failed` is `None` when the list has no `status`. `refused` holds what made a
 number unknown (`R`): the HTTP status, or one of `"limit"` (the page bound on
 workflows or users), `"slow"`, `"large"`, `"short"` (less than one day
-covered), `"unreachable"`, `"invalid"` (an answer that is not what n8n writes),
-`"redirect"` (a redirect to another origin, not followed); `None` when the
+covered), `"busy"` (the page bound reached with less than one day covered),
+`"unreachable"`, `"invalid"` (an answer that is not what n8n writes),
+`"redirect"` (a redirect to another origin, not followed), `"https"` (a
+redirect from `http` to `https` on the same host, not followed)
+*(Changed after the review, 2026-11-24.)*; `None` when the
 number was read. `whole_instance` is true only when the detail of a user
 answered 200; `partial_view` is not stored, it follows from
 `whole_instance` being false. The key is not a field of `Snapshot`. As with the
@@ -323,7 +354,9 @@ and in the process list. There is no environment variable either *(dropped
 after the builder check: one left set in a shell would turn runs that work
 today into usage errors; in the web interface the key is typed in the form)*. A file that cannot be read, is empty, or holds
 more than one line is a usage error (exit 3) with no part of its content in the
-message. The key with `--snapshot`, or without `--url`, is a usage error.
+message. *(Changed after the review, 2026-11-24.)* The file is UTF-8, with or without a byte order mark, or
+UTF-16 when it starts with that mark (what Windows PowerShell writes with `>`),
+as for the debug information. The key with `--snapshot`, or without `--url`, is a usage error.
 `--save-snapshot` stores the `usage` section and never the key. `"-"` cannot be
 used for both `--debug-info` and `--api-key-file`.
 
@@ -338,6 +371,10 @@ used for both `--debug-info` and `--api-key-file`.
   be the owner's or an admin's because any other sees only its own user's
   workflows and executions, and that the key can be revoked after the run.
   *(Changed after the check against real n8n, decided by the owner on 2026-11-23.)*
+- *(Changed after the review, 2026-11-24.)* A key without a URL shows its error under the key field and puts
+  the focus in the URL field. That error goes away as soon as the URL is typed,
+  or the key edited. An error the server gave about the key itself stays until
+  the key is edited.
 - The results show the Usage section in the page's own structure, after the
   summary card and before the scores. It is not a score card and has no
   severity colour.
@@ -365,6 +402,12 @@ the advice to create a key for the run and revoke it afterwards.
   running and waiting ones not counted; more than 10 000 active workflows.
   *(Changed after the check against real n8n, decided by the owner on 2026-11-23.)*
 - One number failing leaves the other three; 401 stops the collector.
+- *(Changed after the review, 2026-11-24.)* A proxy set in the environment receives nothing; more than 10 000
+  executions in under a day; one execution without a status among others; one
+  older execution first in the list, on one page and over several; a redirect
+  to `https` on the same host; a zero from Insights; a key file in UTF-8 with
+  a byte order mark and in UTF-16; the key's error that asks for the URL going
+  away when the URL is typed.
 - Zero leak: a key, workflow names, e-mails, user names and execution ids that
   are marker strings; no marker in the snapshot, the saved snapshot, the report,
   the profile, any error or warning, the JSON of the web interface or the page.

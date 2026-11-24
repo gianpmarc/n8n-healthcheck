@@ -240,8 +240,10 @@ def read_debug_info(path: str) -> dict:
 def read_api_key(path: str) -> str:
     """The n8n API key in a file, or on standard input for "-".
 
-    Raises OSError, or usage.KeyRefused for a content that is not one key. No more is read
-    than a key can take, and nothing of the content is ever in a message.
+    Raises OSError, or usage.KeyRefused for a content that is not one key. The file is
+    UTF-8, with or without a byte order mark, or UTF-16 when it starts with that mark
+    (what Windows PowerShell writes with `>`). No more is read than a key can take, and
+    nothing of the content is ever in a message.
     """
     most = 4 * usage.KEY_MAX
     if path == "-":
@@ -250,7 +252,8 @@ def read_api_key(path: str) -> str:
         with open(path, "rb") as handle:
             raw = handle.read(most)
     try:
-        return usage.check_key(raw.decode("utf-8"))
+        utf_16 = raw.startswith((b"\xff\xfe", b"\xfe\xff"))
+        return usage.check_key(raw.decode("utf-16" if utf_16 else "utf-8-sig"))
     except UnicodeDecodeError:
         raise usage.KeyRefused("the file is not text") from None
 

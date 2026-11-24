@@ -36,9 +36,11 @@ REFUSED_WORDS = {
     "slow": "the instance answered too slowly",
     "large": "the answer was too large",
     "short": "less than one day of executions is stored",
+    "busy": "more than 10 000 executions in less than one day, the bound of this tool",
     "unreachable": "the n8n API could not be reached",
     "invalid": "the n8n API gave an answer this tool does not recognise",
     "redirect": "the n8n API redirected to another address, which was not followed",
+    "https": "the instance redirects to https, which was not followed: give the URL with https",
 }
 LIMIT = {"active_workflows": "more than 10 000 active workflows", "users": "more than 10 000 users"}
 USERS_FORBIDDEN = "the API key cannot list users: its scopes leave that out, or the licence limits the number of users"
@@ -51,6 +53,8 @@ ESTIMATE = {
 }
 INSIGHTS_DETAIL = "from n8n's Insights summary of the last 7 days, which counts what Insights counts"
 INSIGHTS_LAG = "Insights can lag behind by up to an hour"
+# A zero is not shown as an exact number: executions of the last hour may not be in it yet.
+INSIGHTS_ZERO = "n8n's Insights counted no execution in the last 7 days; it can lag behind by up to an hour"
 NO_EXECUTION = "no execution in the period"
 NO_OUTCOME = "this n8n version does not report the outcome of an execution in the list"
 SUCCESS_NOT_SAVED = "successful executions are not saved, so the list cannot count them"
@@ -179,19 +183,19 @@ def numbers(snapshot) -> Optional[dict]:
     executions = section["executions"]
     per_day = rate = reason = None
     if executions is None:
-        about = rate_about = _why(section, "executions")
+        about = day_about = rate_about = _why(section, "executions")
     elif executions["method"] == "insights":
-        about = rate_about = INSIGHTS_DETAIL
+        about = day_about = rate_about = INSIGHTS_DETAIL
         per_day = _rounded(executions["total"] / PERIOD_DAYS, 2)
         if executions["total"]:
             rate = _rounded(100 * executions["failed"] / executions["total"], 1)
         else:
-            rate_about = NO_EXECUTION
+            day_about = rate_about = INSIGHTS_ZERO
     else:
         reason = "partial_view" if partial else executions["estimate_reason"]
-        about = rate_about = f"estimate, counted from the executions list: {ESTIMATE[reason]}"
+        about = day_about = rate_about = f"estimate, counted from the executions list: {ESTIMATE[reason]}"
         if _not_saved(snapshot, "EXECUTIONS_DATA_SAVE_ON_SUCCESS", "save_success"):
-            about = rate_about = SUCCESS_NOT_SAVED
+            about = day_about = rate_about = SUCCESS_NOT_SAVED
         else:
             per_day = _rounded(executions["total"] / executions["period_days"], 2)
             if executions["failed"] is None:
@@ -202,7 +206,7 @@ def numbers(snapshot) -> Optional[dict]:
                 rate_about = NO_EXECUTION
             else:
                 rate = _rounded(100 * executions["failed"] / executions["total"], 1)
-    result["executions_per_day"] = (per_day, about)
+    result["executions_per_day"] = (per_day, day_about)
     result["failure_rate_percent"] = (rate, rate_about)
     known = per_day is not None
     listed = known and executions["method"] == "listed"

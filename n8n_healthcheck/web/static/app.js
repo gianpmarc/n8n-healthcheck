@@ -226,6 +226,8 @@
 
   // ── Validation and request ──────────────────────────────────────────
 
+  const KEY_NEEDS_URL = "Add the n8n URL this key belongs to, or clear the key. The key alone is not a source.";
+
   function setFieldError(errorId, message, inputs) {
     const box = $(errorId);
     box.textContent = message || "";
@@ -283,7 +285,7 @@
     // The key is of no use without the instance it belongs to. It is checked by the server.
     const apiKey = value("f-apikey").trim();
     if (apiKey && body.url) body.api_key = apiKey;
-    else if (apiKey && !url) errors.push({ errorId: "e-apikey", focus: "f-url", inputs: [$("f-apikey")], message: "Add the n8n URL this key belongs to, or clear the key. The key alone is not a source." });
+    else if (apiKey && !url) errors.push({ errorId: "e-apikey", focus: "f-url", inputs: [$("f-apikey")], message: KEY_NEEDS_URL });
 
     const envOff = $("f-env").closest("fieldset").disabled;
     const envText = envOff ? "" : envFile ? envFile.text : $("f-env").value;
@@ -1416,6 +1418,8 @@
       // The error is the last id: a field may name its hint before it.
       const errorId = (input.getAttribute("aria-describedby") || "").split(" ").pop();
       if (errorId && !$(errorId).hidden) setFieldError(errorId, null, [input]);
+      // The key's error that asks for the URL is answered in the URL field.
+      if (input.id === "f-url" && $("e-apikey").textContent === KEY_NEEDS_URL) setFieldError("e-apikey", null, [$("f-apikey")]);
     });
   }
 

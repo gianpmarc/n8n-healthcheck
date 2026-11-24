@@ -281,9 +281,16 @@ class CollectorTest(Base):
 
     def test_zero_executions(self):
         found = self.numbers(self.read(insights=(200, summary(0, 0))))
-        self.assertEqual(found["executions_per_day"][0], 0)
-        self.assertEqual(found["failure_rate_percent"], (None, "no execution in the period"))
+        # Insights lags: its zero is given with that said, not as a bare exact number.
+        zero = "n8n's Insights counted no execution in the last 7 days; it can lag behind by up to an hour"
+        self.assertEqual(found["executions_per_day"], (0, zero))
+        self.assertEqual(found["failure_rate_percent"], (None, zero))
         self.assertEqual(found["period_days"][0], 7)
+        self.assertNotEqual(self.numbers(self.read(insights=(200, summary(3, 0))))["executions_per_day"][1], zero)
+        # Counted from the list, no execution in the period is what the list says.
+        listed = self.numbers(self.read(executions=[execution(1, days=9)]))
+        self.assertEqual(listed["executions_per_day"][0], 0)
+        self.assertEqual(listed["failure_rate_percent"], (None, "no execution in the period"))
 
     def test_the_page_bound_ends_the_walk_and_the_period_is_what_was_covered(self):
         # A list that never ends: 250 a page, 20 seconds apart, so 10 000 cover 2.3 days.
@@ -315,6 +322,36 @@ class CollectorTest(Base):
                 found = self.numbers(section)
                 for name in ("executions_per_day", "failure_rate_percent", "period_days", "method", "estimate"):
                     self.assertEqual(found[name], (None, "less than one day of executions is stored"))
+
+    def test_more_than_the_page_bound_in_under_a_day_says_so(self):
+        # 250 a page, one second apart: the 10 000 read cover under three hours.
+        def endless(offset):
+            return [execution(offset + i, seconds=offset + i + 1) for i in range(api.PAGE_SIZE)]
+
+        section = self.read(executions=endless)
+        self.assertIsNone(section["executions"])
+        self.assertEqual(section["refused"]["executions"], "busy")
+        found = self.numbers(section)
+        for name in ("executions_per_day", "failure_rate_percent", "period_days", "method", "estimate"):
+            self.assertEqual(found[name], (None, "more than 10 000 executions in less than one day, the bound of this tool"))
+        self.assertEqual(sum("/executions" in path for path in self.n8n.api_paths()), api.MAX_PAGES)
+
+    def test_one_execution_without_a_status_does_not_change_the_rule(self):
+        listed = spread(99, 5, first=1)
+        listed[10] = {**listed[10], "status": "error"}
+        listed.insert(40, {**execution(0, days=2), "status": None})
+        found = self.read(executions=listed)["executions"]
+        self.assertEqual((found["total"], found["failed"]), (99, 1))  # the one without a status is not counted
+
+    def test_one_older_execution_does_not_end_the_walk(self):
+        # The list is in the order of the ids: an execution started long ago can come first.
+        found = self.read(executions=[execution(0, days=8), *spread(200, 4, first=1)])["executions"]
+        self.assertEqual((found["total"], found["period_days"], found["estimate_reason"]), (200, 7, "saved_only"))
+        # Over the pages too; the walk ends after the first page that is older throughout.
+        listed = [execution(0, days=8), *spread(600, 6, first=1), *[execution(1000 + i, days=9) for i in range(600)]]
+        found = self.read(executions=listed)["executions"]
+        self.assertEqual((found["total"], found["period_days"], found["estimate_reason"]), (600, 7, "saved_only"))
+        self.assertEqual(sum("/executions" in path for path in self.n8n.api_paths()), 4)  # 1 201 items would be 5
 
     def test_only_finished_statuses_are_counted(self):
         listed = [
@@ -543,6 +580,30 @@ class SafetyTest(Base):
             self.assertEqual(section["refused"], dict.fromkeys(usage.NUMBERS, "redirect"))
             self.assertEqual(self.numbers(section)["users"][1], "the n8n API redirected to another address, which was not followed")
 
+    def test_a_redirect_to_https_on_the_same_host_says_to_give_the_https_url(self):
+        fake = self.fake()
+        secure = fake.url.replace("http://", "https://")
+        for path in ("/api/v1/insights/summary", "/api/v1/users", "/api/v1/workflows"):
+            fake.odd[path] = ("redirect", secure + path)
+        section = self.read(fake)
+        self.assertEqual(section["refused"], dict.fromkeys(usage.NUMBERS, "https"))
+        self.assertEqual(self.numbers(section)["users"][1], "the instance redirects to https, which was not followed: give the URL with https")
+        self.assertEqual(len(fake.api_paths()), 3)  # each call once, none again over https
+        # Another host over https is another address, as before.
+        fake.odd["/api/v1/users"] = ("redirect", "https://other.example.test/api/v1/users")
+        self.assertEqual(self.read(fake)["refused"]["users"], "redirect")
+
+    def test_a_proxy_of_the_machine_never_gets_the_key(self):
+        proxy = self.fake()
+        variables = {name: proxy.url for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY")}
+        with mock.patch.dict(os.environ, variables):
+            os.environ.pop("no_proxy", None)
+            os.environ.pop("NO_PROXY", None)
+            section = self.read(insights=(200, summary(7, 0)))
+        self.assertEqual(proxy.requests, [], "a request went to the proxy")
+        self.assertEqual((section["executions"]["total"], section["users"], section["active_workflows"]), (7, 2, 3))
+        self.assertEqual(len(self.n8n.api_paths()), 4)
+
     def test_a_redirect_within_the_origin_keeps_working(self):
         fake = self.fake(insights=(200, summary(7, 0)))
         fake.odd["/api/v1/users"] = ("redirect", fake.url + "/api/v1/workflows?active=true&limit=250")
@@ -562,7 +623,7 @@ class SafetyTest(Base):
         section = self.read(executions=endless, users=lambda offset: [user(offset)] * api.PAGE_SIZE, workflows=lambda offset: [workflow(offset)] * api.PAGE_SIZE)
         self.assertLessEqual(len(self.n8n.api_paths()), api.MAX_REQUESTS)
         self.assertEqual(len(self.n8n.api_paths()), 1 + 3 * api.MAX_PAGES)
-        self.assertEqual(section["refused"], {"executions": "short", "users": "limit", "active_workflows": "limit"})
+        self.assertEqual(section["refused"], {"executions": "busy", "users": "limit", "active_workflows": "limit"})
         self.assertEqual(self.numbers(section)["users"], (None, "more than 10 000 users"))
 
     def test_the_request_bound_holds_whatever_the_lists_do(self):
@@ -851,8 +912,9 @@ class ReportTest(Base):
     def test_a_number_that_could_not_be_read_is_listed_with_its_reason(self):
         snap = Snapshot(usage=self.read(insights=(200, summary(0, 0)), users=403))
         text = report.render_markdown(snap, [])
-        self.assertIn("- **Executions per day:** 0\n", text)
-        self.assertIn("- **Failure rate:** not read (no execution in the period)\n", text)
+        zero = "n8n's Insights counted no execution in the last 7 days; it can lag behind by up to an hour"
+        self.assertIn(f"- **Executions per day:** 0 ({zero})\n", text)
+        self.assertIn(f"- **Failure rate:** not read ({zero})\n", text)
         self.assertIn("- **Users:** not read (the API key cannot list users: its scopes leave that out, or the licence limits the number of users)\n", text)
 
     def test_a_refused_key_is_said_in_the_summary(self):
@@ -920,6 +982,19 @@ class RunTest(Base):
         self.assertIn("- **Failure rate:** about 10%\n", out)
         self.assertEqual({key for _, path, key in fake.requests if path.startswith("/api/")}, {KEY})
 
+    def test_a_key_file_written_on_windows_is_read(self):
+        fake = self.leaky()
+        written = {"bom": b"\xef\xbb\xbf" + KEY.encode() + b"\r\n", "utf-16": (KEY + "\r\n").encode("utf-16"), "utf-16-be": b"\xfe\xff" + KEY.encode("utf-16-be")}
+        for name, content in written.items():
+            with self.subTest(name):
+                with open(self.path(name), "wb") as handle:
+                    handle.write(content)
+                fake.requests.clear()
+                code, out, err = self.run_cli(["--url", fake.url, "--api-key-file", self.path(name)])
+                self.assertEqual((code, err), (0, ""))
+                self.assertIn("## Usage\n", out)
+                self.assertEqual({key for _, path, key in fake.requests if path.startswith("/api/")}, {KEY})
+
     def test_without_a_key_nothing_of_the_api_is_asked_and_the_snapshot_has_no_section(self):
         fake = self.leaky()
         code, out, _ = self.run_cli(["--url", fake.url, "--save-snapshot", self.path("s.json")])
@@ -931,7 +1006,7 @@ class RunTest(Base):
 
     def test_usage_errors(self):
         fake = self.fake()
-        written = {"empty.txt": b"", "blank.txt": b" \n\n", "two.txt": f"{KEY}\n{MARK}second\n".encode(), "words.txt": f"{MARK} not a key".encode(), "binary.txt": b"\xff\xfe" + MARK.encode()}
+        written = {"empty.txt": b"", "blank.txt": b" \n\n", "two.txt": f"{KEY}\n{MARK}second\n".encode(), "words.txt": f"{MARK} not a key".encode(), "binary.txt": b"\x80" + MARK.encode(), "odd.txt": b"\xff\xfe" + MARK.encode() + b"\x00"}
         for name, content in written.items():
             with open(self.path(name), "wb") as handle:
                 handle.write(content)
@@ -944,6 +1019,7 @@ class RunTest(Base):
             "two lines": (["--url", fake.url, "--api-key-file", self.path("two.txt")], "--api-key-file: the API key must be a single line"),
             "words": (["--url", fake.url, "--api-key-file", self.path("words.txt")], "--api-key-file: this is not an n8n API key"),
             "not text": (["--url", fake.url, "--api-key-file", self.path("binary.txt")], "--api-key-file: the file is not text"),
+            "a broken UTF-16": (["--url", fake.url, "--api-key-file", self.path("odd.txt")], "--api-key-file: the file is not text"),
             "no file name": (["--url", fake.url, "--api-key-file", " "], "--api-key-file must not be empty"),
             "without a URL": (["--env-file", self.key_file, "--api-key-file", self.key_file], "--api-key-file needs --url"),
             "with a snapshot": (["--snapshot", self.path("snapshot.json"), "--api-key-file", self.key_file], "--api-key-file cannot be combined with --snapshot"),
@@ -1161,6 +1237,29 @@ class PageTest(Base):
             key=KEY,
         )
         self.assertEqual(got, {"sent": 0, "error": "Add the n8n URL this key belongs to, or clear the key. The key alone is not a source.", "invalid": "true", "focus": "f-url", "kept": True})
+
+    def test_the_error_that_asks_for_the_url_goes_when_the_url_is_typed(self):
+        got = page_tests.run_page(
+            """async (page, input) => {
+              const state = () => [page.visible("e-apikey"), page.$("f-apikey").getAttribute("aria-invalid")];
+              page.type("f-apikey", input.key);
+              page.type("f-env", "A=1");
+              await page.submit();
+              const shown = state();
+              page.type("f-env", "A=2");
+              const other = state();
+              page.type("f-url", "h");
+              const typed = state();
+              // A key the server refused is not put right by the URL: that error stays.
+              page.type("f-url", "https://n8n.example.test");
+              await page.submit();
+              await page.finishRun(JSON.stringify({ error: "the API key must be a single line", field: "api_key" }), 400);
+              page.type("f-url", "https://n8n.example.test/");
+              return { shown, other, typed, refused: state() };
+            }""",
+            key=KEY,
+        )
+        self.assertEqual(got, {"shown": [True, "true"], "other": [True, "true"], "typed": [False, None], "refused": [True, "true"]})
 
     def test_a_key_the_server_refuses_is_shown_next_to_its_field(self):
         got = page_tests.run_page(
