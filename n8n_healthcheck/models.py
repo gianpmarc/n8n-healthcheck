@@ -32,6 +32,9 @@ class Target:
     # The "Debug information" text of n8n, already read by debug_info.parse(): the
     # text itself is never kept. It is a source like the others and may be the only one.
     debug_info: Optional[dict] = None
+    # An n8n API key, used next to `url` to read usage numbers. It is never copied into
+    # a Snapshot, a report, a profile, a log line or an error message.
+    api_key: Optional[str] = None
 
 
 @dataclass
@@ -81,6 +84,22 @@ class Snapshot:
     # names each failed check ("other" for a name the tool does not know) and is None when
     # the text listed no check. It is not one of the data sources the report counts.
     debug_info: Optional[dict] = None
+    # Usage numbers read through the n8n API with a key (collectors/api.py): counts, known
+    # words and a period only, never the key, an identifier or text of an answer.
+    # {"executions": None | {"method": "insights" | "listed", "total": int,
+    #                        "failed": int | None, "period_days": number, "estimate": bool,
+    #                        "estimate_reason": "page_limit" | "short_history" | "saved_only" | None},
+    #  "active_workflows": int | None, "users": int | None,
+    #  "refused": {"executions": R, "users": R, "active_workflows": R},
+    #  "whole_instance": bool, "key_unencrypted": bool}
+    # `failed` is None when the list does not say how executions ended (n8n 1.x). R says
+    # why a number is None: an HTTP status, or "limit", "slow", "large", "short",
+    # "unreachable", "invalid", "redirect"; None when it was read. `whole_instance` is True
+    # only when the key could read a user's detail, as only an owner or an admin may;
+    # otherwise the listed executions and the active workflows may be a part of the
+    # instance. Read through usage.of(). No rule reads it, and it is not one of the data
+    # sources the report counts.
+    usage: Optional[dict] = None
 
 
 @dataclass

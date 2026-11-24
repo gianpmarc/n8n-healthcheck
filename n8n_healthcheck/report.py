@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from . import debug_info
+from . import debug_info, usage
 from .engine import SKIPPED_RULE_ID, score
 from .models import AREAS, SEVERITIES, Finding, Snapshot
 from .rules._helpers import effective_env
@@ -100,6 +100,59 @@ def _debug_info_summary(section: dict, alone: bool, failed: tuple[str, ...], tod
     return sentences
 
 
+def _usage_summary(section: dict | None, failed: tuple[str, ...]) -> list[str]:
+    """The Summary sentences about the n8n API key; none when no key was given."""
+    if section is None and "usage" not in failed:
+        return []
+    if section is not None and any(section[name] is not None for name in usage.NUMBERS):
+        sentences = ["Usage numbers were read through the n8n API."]
+    elif section is not None and all(refused == 401 for refused in section["refused"].values()):
+        sentences = ["The n8n API key was refused, so no usage number was read."]
+    else:
+        sentences = ["No usage number could be read through the n8n API."]
+    if section is not None and section["key_unencrypted"]:
+        sentences.append("The API key was sent without encryption: the URL is http and the host is not this machine.")
+    return sentences
+
+
+def _usage_section(snapshot: Snapshot) -> dict | None:
+    """The Usage section as data: {"basis", "rows": [{"id", "label", "value", "note"}]}.
+
+    `value` is None for a number that could not be read, and `note` then says why. An
+    estimate is written with "about". `basis` says the period and the method.
+    """
+    found = usage.numbers(snapshot)
+    if found is None:
+        return None
+    method, estimate, period = found["method"][0], found["estimate"][0], found["period_days"][0]
+    about = "about " if estimate else ""
+    if method is None:
+        basis = None
+    elif method == "insights":
+        basis = f"Executions over the last {period} days, as n8n's Insights counts them. {usage.INSIGHTS_LAG}."
+    else:
+        basis = (
+            f"Executions over the last {period} days, counted from the executions list. "
+            f"An estimate: {found['estimate_reason'][1]}."
+        )
+
+    def row(name: str, label: str, shown) -> dict:
+        value, note = found[name]
+        if value is not None and name in ("executions_per_day", "failure_rate_percent") and note != usage.INSIGHTS_ZERO:
+            note = ""  # the line above the numbers says how they were obtained
+        return {"id": f"usage.{name}", "label": label, "value": None if value is None else shown(value), "note": note}
+
+    return {
+        "basis": basis,
+        "rows": [
+            row("executions_per_day", "Executions per day", lambda value: f"{about}{value}"),
+            row("failure_rate_percent", "Failure rate", lambda value: f"{about}{value}%"),
+            row("active_workflows", "Active workflows", str),
+            row("users", "Users", str),
+        ],
+    }
+
+
 def _not_run_summary(failed: tuple[str, ...], reasons: tuple[str, ...]) -> str:
     names = ", ".join(label.split(" (")[0] for name, label in SECTIONS.items() if name in failed)
     sentences = [f"This health check could not run: none of the requested data sources could be collected ({names})."]
@@ -135,7 +188,11 @@ def build_report(
     than the counts and the most urgent fix; None when the check could not run), "sources":
     {"assessed", "total", "debug_info" (whether a debug information was read)}, "partial", "scores": [{"area", "score"
     (None when nothing was collected), "partial", "findings"}], "not_assessed":
-    [{"id", "label", "reason", "detail"}], "findings": [Finding] most severe first}.
+    [{"id", "label", "reason", "detail"}], "findings": [Finding] most severe first,
+    "usage": None without an n8n API key, else what _usage_section() returns}.
+
+    The usage numbers (snapshot.usage) describe the instance: they add a section and a
+    line to the summary, and change no score, finding or count of data sources.
     """
     skipped = [f for f in findings if f.rule_id == SKIPPED_RULE_ID]
     # Stable sort, so this also works for findings that did not come from engine.run().
@@ -201,6 +258,10 @@ def build_report(
             about_text = _debug_info_summary(debug_info.of(snapshot), alone, failed, today)
             summary += " " + " ".join(about_text)
             notes += about_text
+        about_usage = _usage_summary(usage.of(snapshot), failed)
+        if about_usage:
+            summary += " " + " ".join(about_usage)
+            notes += about_usage
 
     version = snapshot.n8n_version
     if version is None and debug_info.of(snapshot) is not None:
@@ -223,6 +284,7 @@ def build_report(
         "scores": scores,
         "not_assessed": not_assessed,
         "findings": findings,
+        "usage": None if could_not_run is not None else _usage_section(snapshot),
     }
 
 
@@ -241,6 +303,17 @@ def render_markdown(
     if data["n8n_version"]:
         title += f" — n8n {data['n8n_version']}"
     lines = [title, "", "## Summary", "", data["summary"], ""]
+
+    if data["usage"]:
+        lines += ["## Usage", "", "Read through the n8n API. These numbers describe the instance: no finding or score rests on them.", ""]
+        if data["usage"]["basis"]:
+            lines += [data["usage"]["basis"], ""]
+        for entry in data["usage"]["rows"]:
+            if entry["value"] is None:
+                lines.append(f"- **{entry['label']}:** not read ({entry['note']})")
+            else:
+                lines.append(f"- **{entry['label']}:** {entry['value']}" + (f" ({entry['note']})" if entry["note"] else ""))
+        lines.append("")
 
     lines += ["## Scores", "", "| Area | Score | Findings |", "|---|---|---|"]
     for row in data["scores"]:

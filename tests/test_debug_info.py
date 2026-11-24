@@ -656,8 +656,8 @@ EXISTING_FACTS = {
 
 class ProfileTest(unittest.TestCase):
     def test_the_thirteen_new_ids_come_after_the_existing_ones(self):
-        self.assertEqual(list(profile.FACT_IDS[-13:]), list(NEW_FACTS))
-        self.assertEqual(len(profile.FACT_IDS), 32 + 14 + 13)
+        self.assertEqual(list(profile.FACT_IDS[46:59]), list(NEW_FACTS))  # the 8 usage facts of 0.5.0 follow
+        self.assertEqual(len(profile.FACT_IDS), 32 + 14 + 13 + 8)
         self.assertFalse(set(NEW_FACTS) & profile.FORMAT_1_FACT_IDS)
         self.assertEqual(len(profile.FORMAT_1_FACT_IDS), 32)
 
@@ -670,9 +670,9 @@ class ProfileTest(unittest.TestCase):
             self.assertEqual(facts[fact_id]["source"], "debug_info")
             self.assertTrue(facts[fact_id]["detail"].startswith("debug information generated on 2026-11-19"), fact_id)
         self.assertEqual(facts["worker.replicas"]["detail"], "debug information generated on 2026-11-19; counted from the instances n8n listed")
-        self.assertEqual(built["sources"], {**dict.fromkeys(report.SECTIONS, "not_provided"), "debug_info": "collected"})
+        self.assertEqual(built["sources"], {**dict.fromkeys(report.SECTIONS, "not_provided"), "debug_info": "collected", "api": "not_provided"})
         self.assertEqual(list(built["sources"])[:6], list(report.SECTIONS))
-        self.assertEqual((built["tool_version"], built["format_version"]), ("0.4.0", 1))
+        self.assertEqual((built["tool_version"], built["format_version"]), ("0.5.0", 1))
 
     def test_a_date_that_is_not_known_is_said_in_the_detail(self):
         facts = facts_of(snapshot((STAMP, "")))

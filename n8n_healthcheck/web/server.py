@@ -5,7 +5,8 @@ and databases, so every request is checked against the Host header (DNS
 rebinding) and a run also against Content-Type and Origin (cross-site
 requests). Nothing from a request is logged, and nothing is written to disk
 except the pasted env file, in a private temporary directory, for the duration
-of the run. A pasted debug information is read in memory by debug_info.parse()
+of the run. An n8n API key goes to the collector and nowhere else: it is not in the
+response, a log line or an error. A pasted debug information is read in memory by debug_info.parse()
 and only what the parser kept goes on: the text is never written, logged or
 returned.
 """
@@ -32,7 +33,7 @@ from urllib.parse import unquote, urlsplit
 
 import n8n_healthcheck
 
-from .. import cli, debug_info, engine, profile, questions, report
+from .. import cli, debug_info, engine, profile, questions, report, usage
 from ..models import Target
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -51,6 +52,8 @@ CONTENT_SECURITY_POLICY = (
 RUN_FIELDS = {
     "debug_info_text": "debug_info",
     "url": "url",
+    # An n8n API key, used with `url` to read usage numbers. Never logged or returned.
+    "api_key": "api_key",
     "env_text": "env_file",
     "postgres_dsn": "postgres_dsn",
     "redis_url": "redis_url",
@@ -95,6 +98,13 @@ def meta() -> dict:
                 "The instance ids, host ids and the browser's user agent in it are read and discarded.",
             ),
             source("url", "n8n URL", "Base URL of the n8n instance; reads its health endpoints and /metrics."),
+            # Not a fieldset of its own: the key is a field of the "n8n URL" source.
+            source(
+                "api",
+                "n8n API key",
+                "Optional, with the URL: reads executions per day, the failure rate, the active "
+                "workflows and the users through n8n's public API, with GET requests only.",
+            ),
             source("env", "Environment file", "Content of the n8n env file (KEY=VALUE lines); secret values are redacted."),
             source("postgres", "Postgres", "Connection string of the n8n database; read with the psql client.", "psql"),
             source("redis", "Redis", "Connection URL of the Redis that holds the n8n queue."),
@@ -146,6 +156,13 @@ def parse_run_request(body: bytes) -> dict:
     # urllib would also open file:, ftp: and data: URLs, i.e. read local files.
     if "url" in fields and not cli.valid_url(fields["url"]):
         raise BadRequest("url must be an http:// or https:// URL with a host")
+    if "api_key" in fields:
+        if "url" not in fields:
+            raise BadRequest("the API key needs the n8n URL: it is used on the API of that instance", "api_key")
+        try:
+            fields["api_key"] = usage.check_key(fields["api_key"])
+        except usage.KeyRefused as exc:
+            raise BadRequest(str(exc), "api_key") from None
     if not set(fields) - {"kube_context"}:
         raise BadRequest(
             "nothing to inspect: give at least one of debug_info_text, url, env_text, postgres_dsn, redis_url, kube_namespace"

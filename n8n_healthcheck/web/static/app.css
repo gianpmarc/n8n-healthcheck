@@ -631,6 +631,41 @@ input[data-masked="true"] { -webkit-text-security: disc; }
 }
 
 /* Scores */
+/* Usage numbers: plain tiles. They describe, so they carry no bar and no severity colour. */
+.usage {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+.usage__item {
+  min-width: 0;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+.usage__label {
+  color: var(--muted);
+  font: 400 0.8125rem/1.4 var(--mono);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+.usage__value {
+  margin-top: var(--space-2);
+  font-size: 2rem;
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: var(--tracking-tight);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.usage__note { margin-top: var(--space-2); color: var(--muted); font-size: 0.875rem; overflow-wrap: anywhere; }
+/* A number that could not be read is dashed, like everything that was not assessed. */
+.usage__item--unread { border-style: dashed; border-color: var(--border-strong); }
+.usage__item--unread .usage__value { color: var(--muted); font-size: 1.25rem; }
+
 .scores {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));

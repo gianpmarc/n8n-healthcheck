@@ -333,6 +333,7 @@ class CatalogueTest(unittest.TestCase):
     def test_every_table_in_this_file_covers_the_catalogue(self):
         covered = {row[0] for row in ENV_FACTS + SECTION_FACTS} | set(KUBE_FACTS) | set(DECLARED_FACTS)
         covered |= set(DEBUG_INFO_FACTS)
+        covered |= {i for i in profile.FACT_IDS if i.startswith("usage.")}  # added in 0.5.0: tests/test_usage.py
         self.assertEqual(covered | {"n8n.version", "metrics.enabled"}, set(profile.FACT_IDS))
 
     def test_full_catalogue_in_order_whatever_was_collected(self):
@@ -359,6 +360,7 @@ class CatalogueTest(unittest.TestCase):
         catalogue = text.split("### Catalogue, version 1")[1].split("\nValue shapes:")[0]
         added = text.split("### Added in tool version 0.3.0")[1].split("\nThese ids")[0]
         added += text.split("### Added in tool version 0.4.0")[1].split("\nThese ids")[0]
+        added += text.split("### Added in tool version 0.5.0")[1].split("\nThese ids")[0]
         documented = set(re.findall(r"^\| `([a-z0-9_.]+)` \|", catalogue + added, re.MULTILINE))
         self.assertEqual(documented, set(profile.FACT_IDS))
 
@@ -861,6 +863,7 @@ class SourcesTest(unittest.TestCase):
                 "redis": "failed",
                 "kubernetes": "collected",
                 "debug_info": "not_provided",
+                "api": "not_provided",
             },
         )
         self.assertEqual(build(Snapshot(health={}), failed=("metrics",))["sources"]["metrics"], "failed")

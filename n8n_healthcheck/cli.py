@@ -10,7 +10,7 @@ from dataclasses import asdict
 from typing import Optional
 from urllib.parse import urlsplit
 
-from . import debug_info, engine, profile, questions, report
+from . import debug_info, engine, profile, questions, report, usage
 from .models import Snapshot, Target
 
 # Exit code when the check itself could not run (bad usage, I/O error, nothing
@@ -66,12 +66,14 @@ PROFILE_FLAGS = ("save_profile", "reason", "reference", "withhold", "show_profil
 # Flags added with the profile questions. They give way in the same manner, also to the
 # profile flags: `--sh` stays --show-profile.
 QUESTION_FLAGS = ("answer", "list_questions", "show_questions")
+# The flag added with the usage numbers gives way to all of them: `--a` stays --answer.
+API_FLAGS = ("api_key_file",)
 
 
 class _Parser(argparse.ArgumentParser):
     def _get_option_tuples(self, option_string):
         matches = super()._get_option_tuples(option_string)
-        for newer in (QUESTION_FLAGS, QUESTION_FLAGS + PROFILE_FLAGS):
+        for newer in (API_FLAGS, API_FLAGS + QUESTION_FLAGS, API_FLAGS + QUESTION_FLAGS + PROFILE_FLAGS):
             older = [match for match in matches if match[0].dest not in newer]
             if len(matches) > 1 and len(older) == 1:
                 return older
@@ -92,6 +94,7 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         epilog="Exit codes: 0 no critical findings or warnings, 1 at least one warning, "
         "2 at least one critical finding, 3 the check could not run "
         "(usage error, unreadable or unwritable file, a text that is not a debug information, "
+        "a file that does not hold one API key, "
         "no requested source reachable, "
         "every rule failed to run). --show-profile and --show-questions exit 0, or 3 when the file "
         "is not a usable profile.",
@@ -106,6 +109,12 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         "--debug-info",
         metavar="FILE",
         help='the text copied from Help > About n8n > Debug information; "-" reads it from standard input',
+    )
+    parser.add_argument(
+        "--api-key-file",
+        metavar="FILE",
+        help="file holding an n8n API key, used only to read usage numbers "
+        '(executions per day, failure rate, active workflows, users); "-" reads it from standard input. Needs --url',
     )
     parser.add_argument("--snapshot", metavar="FILE", help="load a saved snapshot instead of collecting")
     parser.add_argument("--save-snapshot", metavar="FILE", help="write the collected snapshot as JSON")
@@ -198,6 +207,15 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         parser.error("--debug-info cannot be combined with --snapshot: a saved snapshot already holds what was read")
     if not args.snapshot and not any(getattr(args, source) for source in (*SOURCE_SECTION, "debug_info")):
         parser.error("nothing to inspect: give at least one source flag or --snapshot")
+    if args.api_key_file is not None:
+        if not args.api_key_file.strip():
+            parser.error("--api-key-file must not be empty")
+        if args.snapshot:
+            parser.error("--api-key-file cannot be combined with --snapshot: a saved snapshot is not collected again")
+        if not args.url:
+            parser.error("--api-key-file needs --url: the key is used on the n8n API of that instance")
+        if args.api_key_file == "-" and args.debug_info == "-":
+            parser.error("--debug-info and --api-key-file cannot both be read from standard input")
     return args
 
 
@@ -219,6 +237,27 @@ def read_debug_info(path: str) -> dict:
     return debug_info.parse(raw.decode("utf-16" if utf_16 else "utf-8", "replace"))
 
 
+def read_api_key(path: str) -> str:
+    """The n8n API key in a file, or on standard input for "-".
+
+    Raises OSError, or usage.KeyRefused for a content that is not one key. The file is
+    UTF-8, with or without a byte order mark, or UTF-16 when it starts with that mark
+    (what Windows PowerShell writes with `>`). No more is read than a key can take, and
+    nothing of the content is ever in a message.
+    """
+    most = 4 * usage.KEY_MAX
+    if path == "-":
+        raw = sys.stdin.buffer.read(most)
+    else:
+        with open(path, "rb") as handle:
+            raw = handle.read(most)
+    try:
+        utf_16 = raw.startswith((b"\xff\xfe", b"\xfe\xff"))
+        return usage.check_key(raw.decode("utf-16" if utf_16 else "utf-8-sig"))
+    except UnicodeDecodeError:
+        raise usage.KeyRefused("the file is not text") from None
+
+
 def failed_sections(target: Target, snapshot: Snapshot) -> tuple[list[str], bool]:
     """Sections that were requested but not collected, and whether that is all of them."""
     # Collectors do not raise for an unreachable source: they leave its
@@ -230,6 +269,9 @@ def failed_sections(target: Target, snapshot: Snapshot) -> tuple[list[str], bool
     # --url also asks for metrics; only a disabled endpoint (404) excuses it.
     if target.url and snapshot.metrics is None and not (snapshot.health or {}).get("metrics_disabled"):
         failed.append("metrics")
+    # An API key was given and its collector left nothing, not even why.
+    if target.api_key and snapshot.usage is None:
+        failed.append("usage")
     return failed, nothing_collected
 
 
@@ -325,6 +367,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             return _error(f"cannot read the debug information: {exc.strerror}")
         except debug_info.DebugInfoError as exc:
             return _error(f"--debug-info: {exc}")
+    api_key = None
+    if args.api_key_file is not None:
+        try:
+            api_key = read_api_key(args.api_key_file)
+        except OSError as exc:
+            return _error(f"cannot read the API key file: {exc.strerror}")
+        except usage.KeyRefused as exc:
+            return _error(f"--api-key-file: {exc}")
 
     if args.snapshot:
         try:
@@ -344,13 +394,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             kube_namespace=args.kube_namespace,
             kube_context=args.kube_context,
             debug_info=read,
+            api_key=api_key,
         )
         try:
             snapshot = collect(target)
         except Exception as exc:
             # The DSN and Redis URL contain passwords: never echo them back.
             message = f"{type(exc).__name__}: {exc}"
-            for secret in (args.postgres_dsn, args.redis_url):
+            for secret in (args.postgres_dsn, args.redis_url, api_key):
                 if secret:
                     message = message.replace(secret, "***")
             return _error(f"collection failed: {message}")
@@ -386,6 +437,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if saved["debug_info"] is None:
                     # Left out when not given, so that an older tool version loads the file.
                     del saved["debug_info"]
+                if saved["usage"] is None:
+                    del saved["usage"]
                 # A metric can be NaN or +Inf, which json would write as invalid JSON.
                 json.dump(json_safe(saved), fh, indent=2, allow_nan=False)
         if args.save_profile is not None:

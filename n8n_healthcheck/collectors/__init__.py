@@ -1,7 +1,7 @@
 """Collectors: read-only probes that turn a Target into a Snapshot."""
 
 from ..models import REDACTED, Snapshot, Target
-from . import envfile, http, kubernetes, postgres, redis
+from . import api, envfile, http, kubernetes, postgres, redis
 from ._util import url_secrets, warn
 
 # Target field that enables a source -> module whose collect(target) returns Snapshot fields.
@@ -12,12 +12,15 @@ SOURCES = (
     ("postgres_dsn", postgres),
     ("kube_namespace", kubernetes),
     ("redis_url", redis),
+    ("api_key", api),  # usage numbers, through the URL
 )
 
 
 def collect(target: Target) -> Snapshot:
     snapshot = Snapshot()
     secrets = url_secrets(target.url, target.postgres_dsn, target.redis_url)
+    if target.api_key:
+        secrets.add(target.api_key)
     for field, module in SOURCES:
         if getattr(target, field) is None:
             continue

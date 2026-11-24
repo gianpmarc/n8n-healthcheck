@@ -198,8 +198,8 @@ CONVERSATION = (
     ),
 )
 
-# One sentence for each fact a probe or the debug information can fill, for part 1 of
-# the question sheet.
+# One sentence for each fact a probe, the debug information or the n8n API can fill, for
+# part 1 of the question sheet.
 # `orchestrator` is not here: its sentence is the operator question.
 MEASURED = {
     "n8n.version": "Which n8n version runs?",
@@ -247,6 +247,15 @@ MEASURED = {
     "cluster.checks_failed": "How many of n8n's own cluster checks fail?",
     "security.secure_cookie": "Is the session cookie restricted to HTTPS?",
     "security.file_access_blocked": "Is access to n8n's own files blocked?",
+    # Added in 0.5.0: read through the n8n API with a key.
+    "usage.executions_per_day": "How many executions run per day?",
+    "usage.failure_rate_percent": "Which share of the executions fails?",
+    "usage.period_days": "Over how many days were the executions counted?",
+    "usage.method": "Were the executions counted by n8n's Insights or from the executions list?",
+    "usage.estimate": "Are the execution numbers an estimate?",
+    "usage.active_workflows": "How many workflows are active?",
+    "usage.active_workflows_partial": "Might the count of active workflows cover only a part of the instance?",
+    "usage.users": "How many users does the instance have?",
 }
 
 
