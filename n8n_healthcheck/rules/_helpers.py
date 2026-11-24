@@ -1,4 +1,4 @@
-"""Small readers shared by the rule modules. No rule logic lives here."""
+"""Small readers shared by the rule modules, and how a rule states its outcome. No rule logic lives here."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import Iterator, Optional
 
 from .. import debug_info
-from ..models import REDACTED, Snapshot
+from ..models import REDACTED, Outcome, RuleInfo, Snapshot
 
 # Leading x.y.z of an image tag: "2.40.1", "v2.40.1" and "2.40.1-build7" are one release.
 _VERSION = re.compile(r"v?(\d+\.\d+\.\d+)")
@@ -15,6 +15,37 @@ _VERSION = re.compile(r"v?(\d+\.\d+\.\d+)")
 
 # Value of a Kubernetes container variable that is set but could not be read (a Secret).
 VALUE_FROM = "<valueFrom>"
+
+
+# --- outcomes ----------------------------------------------------------------------
+# A rule returns a Finding, or one of these. The line that matters is between PASSED and
+# the rest: PASSED only when the rule read the values it needs and they are good. A
+# silence kept on purpose is NOT_APPLICABLE, anything the rule could not tell is not assessed.
+
+PASSED = Outcome("passed", basis="read")
+# The variable is not set in an environment read in full, and the n8n default is the good value.
+PASSED_BY_DEFAULT = Outcome("passed", basis="default")
+NOT_APPLICABLE = Outcome("not_applicable")
+# A source the rule reads was given and read, and does not say what the rule needs.
+NOT_STATED = Outcome("not_assessed", reason="not_stated")
+# A source holds the value, but it could not be read: a Secret, a file, a redacted value,
+# or an environment of which a part is missing.
+UNREADABLE = Outcome("not_assessed", reason="value_unreadable")
+
+
+def source_missing(*needs: str) -> Outcome:
+    """None of the sources where the rule looks was given; any one of `needs` would let it decide."""
+    return Outcome("not_assessed", reason="source_missing", needs=tuple(needs))
+
+
+def rule(rule_id: str, area: str, *, subject: str, passed: str, variants=(), facts=(), settings=(), scopes=("instance", "main")):
+    """Declare a rule: its id, its area and its fixed texts (models.RuleInfo), as `function.info`."""
+
+    def declare(function):
+        function.info = RuleInfo(rule_id, area, subject, passed, tuple(variants), tuple(facts), tuple(settings), tuple(scopes))
+        return function
+
+    return declare
 
 
 class Env(dict):
@@ -184,6 +215,50 @@ def unknown(env: dict, name: str) -> bool:
     if name in env:
         return env[name] in (VALUE_FROM, REDACTED)
     return not getattr(env, "complete", True)
+
+
+def undecided(env: dict, name: str) -> Optional[Outcome]:
+    """Why `name` cannot be told, or None when it is readable or provably not set.
+
+    Stricter than unknown(): a variable given through `<NAME>_FILE` cannot be told either.
+    For the path of a rule that has no finding; what raises a finding stays with unknown().
+    """
+    if name in env:
+        return UNREADABLE if env[name] in (VALUE_FROM, REDACTED) else None
+    if name + "_FILE" in env:
+        return UNREADABLE
+    if getattr(env, "complete", True):
+        return None
+    # Kubernetes with a part of the environment missing; else the debug information alone.
+    return UNREADABLE if getattr(env, "source", "") else NOT_STATED
+
+
+def no_environment(snapshot: Snapshot, text: bool = False, needs: tuple = ()) -> Outcome:
+    """The outcome of a rule that has no environment to read.
+
+    `text` says the rule also reads the debug information for it. Not stated when one of
+    those sources was given (Kubernetes without a main container, or with mains that
+    disagree; a text that does not say); else `needs`, by default all of them.
+    """
+    given = snapshot.env is not None or snapshot.kubernetes is not None
+    if given or (text and debug_info.of(snapshot) is not None):
+        return NOT_STATED
+    return source_missing(*(needs or ("env", "kubernetes") + (("debug_info",) if text else ())))
+
+
+def queue_only(env: dict) -> Optional[Outcome]:
+    """For a rule about queue mode: why it says nothing, or None when the mode is queue."""
+    return undecided(env, "EXECUTIONS_MODE") or (None if is_queue_mode(env) else NOT_APPLICABLE)
+
+
+def flag_is(env: dict, name: str, good: bool, default: bool) -> Outcome:
+    """The outcome of a boolean variable that must be `good`, once a finding is ruled out."""
+    why = undecided(env, name)
+    if why is not None:
+        return why
+    if name not in env:
+        return PASSED_BY_DEFAULT if default is good else NOT_STATED
+    return PASSED if env_flag(env, name) is good else NOT_STATED
 
 
 def env_flag(env: dict, name: str) -> Optional[bool]:
