@@ -1254,7 +1254,7 @@
     const tick = (id, key, name) => el("label", { class: "check" },
       el("input", { type: "checkbox", id, "data-withhold": key, checked: withheld.has(key) }),
       el("span", { class: "sr-only" }, `Withhold ${name}`));
-    const table = (first, groups) => el("table", { class: "ptable" },
+    const table = (first, groups, narrow) => el("table", { class: narrow ? "ptable ptable--ids" : "ptable" },
       el("thead", null, el("tr", null,
         el("th", { scope: "col" }, first),
         el("th", { scope: "col" }, edit ? "Written to the file" : "Recorded"),
@@ -1372,7 +1372,7 @@
           el("h5", { class: "pchecks__title" }, `Checks (${entries.length})`),
           el("p", { class: "block__note" }, lead("What every rule stated, with every text written to the file."), " Each text is a fixed sentence of the rule, never a value of this instance.",
             edit ? " A check can be withheld on its own: it stays in the file with its rule id only, and its finding leaves the list above. The scores still count it." : ""),
-          entries.length ? table("Check", rows) : el("p", { class: "block__note" }, "No check is listed."));
+          entries.length ? table("Check", rows, true) : el("p", { class: "block__note" }, "No check is listed."));
       }
     }
 

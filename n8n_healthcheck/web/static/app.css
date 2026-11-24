@@ -946,6 +946,8 @@ input[data-masked="true"] { -webkit-text-security: disc; }
 /* A group is named by text of the profile (the start of a fact id, a scope): shown as it is. */
 .ptable__group th { padding-block: var(--space-2); background: var(--surface-2); box-shadow: inset 4px 0 0 var(--accent); color: var(--text); font-weight: 600; text-transform: none; }
 .ptable th[scope="row"] { width: 38%; font-family: var(--mono); font-size: 0.875rem; }
+/* A first column of short ids (the checks): the room goes to the text. */
+.ptable--ids thead th:first-child, .ptable--ids th[scope="row"] { width: 7.5rem; }
 .ptable .ptable__withhold { width: 6.5rem; padding-block: var(--space-1); text-align: center; vertical-align: middle; }
 .ptable thead .ptable__withhold { padding-block: var(--space-3); }
 .pline { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
@@ -1030,6 +1032,7 @@ p.pdetail { margin-top: var(--space-1); }
   .ptable th, .ptable td { padding: var(--space-2) var(--space-3); }
   .ptable .ptable__withhold { width: 5.25rem; padding-inline: var(--space-1); }
   .ptable th[scope="row"] { width: 42%; font-size: 0.8125rem; }
+  .ptable--ids thead th:first-child, .ptable--ids th[scope="row"] { width: 5.75rem; }
   .pdetails { grid-template-columns: minmax(0, 1fr); }
   .pdetails dd + dt { margin-top: var(--space-2); }
 }
