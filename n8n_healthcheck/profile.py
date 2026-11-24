@@ -930,8 +930,10 @@ def apply_withholding(profile: dict, ids) -> dict:
     An id is a fact id, `setting:<scope>:<NAME>`, `check:<RULE_ID>` for one check, or
     `check` for the whole outcome. A withheld entry stays in the file without its value,
     so the reader can tell removed from unknown; a withheld check keeps its rule id and
-    its area, and its finding leaves `check.findings`. Raises ProfileError when an id
-    matches nothing in this profile.
+    its area, its finding leaves `check.findings`, and the score of its area is withheld
+    with it, whatever the check had stated: a score kept, or computed again without the
+    finding, would tell that the check was one. Raises ProfileError when an id matches
+    nothing in this profile.
     """
     profile = copy.deepcopy(profile)
     ids = set(ids)
@@ -952,6 +954,9 @@ def apply_withholding(profile: dict, ids) -> dict:
             entry.clear()
             entry.update(withheld)
             check["findings"] = [finding for finding in check["findings"] if finding["rule_id"] != entry["rule_id"]]
+            for row in check["scores"]:
+                if row["area"] == entry["area"]:
+                    row.update(score=None, withheld=True)
     if "check" in ids:
         profile["check"] = {"withheld": True}
         ids.discard("check")
@@ -1214,6 +1219,8 @@ def render_markdown(profile: dict) -> str:
             score = "n/a" if row["score"] is None else f"{row['score']}/100"
             if row.get("partial") and row["score"] is not None:
                 score += " (partial)"
+            if score_withheld(row):
+                score = "withheld"
             lines.append(f"| {_cell(row['area'])} | {score} |")
         lines.append("")
         if check["partial"]:
@@ -1257,6 +1264,11 @@ NEED_LABELS = {
     "kubernetes": "Kubernetes",
     "debug_info": "the debug information",
 }
+
+
+def score_withheld(row: dict) -> bool:
+    """True for the score of an area that was withheld with one of its checks: not "no data"."""
+    return row["score"] is None and row.get("withheld") is True
 
 
 def check_entries(profile: dict) -> Optional[list]:
@@ -1541,7 +1553,7 @@ def render_sheet(profile: dict, today: Optional[date] = None) -> str:
             lines.append("No finding. " + (SHEET_PARTIAL if check["partial"] else "Every source was collected and every rule ran."))
         lines += ["", SHEET_NO_CHECKS]
     else:
-        lines += _sheet_checks(entries, check["partial"], facts, settings)
+        lines += _sheet_checks(entries, check["partial"], facts, settings, check["scores"])
 
     lines += ["", "## Questions still open", "", *_question_lines(profile, "###"), ""]
     return "\n".join(lines)
@@ -1561,7 +1573,7 @@ def _rested_value(item: str, facts: dict, settings: dict) -> str:
     return f"{name} is not in the file"
 
 
-def _sheet_checks(entries: list, partial: bool, facts: dict, settings: dict) -> list:
+def _sheet_checks(entries: list, partial: bool, facts: dict, settings: dict, scores: list) -> list:
     """Sections 3 to 7 of the call sheet, from the entries of `check.checks`."""
     of = lambda outcome: [entry for entry in entries if entry["known"] and entry["outcome"] == outcome]
     item = lambda entry: f"{_cell(entry['rule_id'])} {_cell(entry['text'])}"
@@ -1633,6 +1645,11 @@ def _sheet_checks(entries: list, partial: bool, facts: dict, settings: dict) -> 
     not_applicable = of("not_applicable")
     lines.append("; ".join(item(entry) for entry in not_applicable) if not_applicable else "No check was left out as not applying.")
     withheld = len(of("withheld"))
-    if withheld:
-        lines += ["", f"Checks withheld by the operator: {withheld}."]
+    said = [f"Checks withheld by the operator: {withheld}."] if withheld else []
+    areas = [_cell(row["area"]) for row in scores if score_withheld(row)]
+    if areas:
+        # Whatever the check had stated: the score would tell whether it was a finding.
+        said.append(f"The score of its area is withheld with a check: {', '.join(areas)}.")
+    if said:
+        lines += ["", " ".join(said)]
     return lines

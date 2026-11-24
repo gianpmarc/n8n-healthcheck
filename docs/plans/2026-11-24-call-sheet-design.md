@@ -200,6 +200,18 @@ the real rules.
   `"outcome": "withheld"`, and its finding leaves `check.findings`. In the
   review, a withheld fact or setting names the checks that rest on it, so the
   operator can decide. Nothing is withheld automatically.
+- **Decided by the owner after the build, 2026-11-24: the score of the area of
+  a withheld check.** The design said that the finding leaves `check.findings`
+  and was silent on `check.scores`; the build left the scores as they were, so
+  an area score still told that a finding was withheld and how severe. When a
+  check is withheld on its own, the score of that check's area is not written:
+  the row stays in `check.scores` with `"score": null` and `"withheld": true`.
+  The score is never computed again without the finding. It applies whatever
+  the outcome of the withheld check was, so that the hidden score does not
+  tell that the check was a finding. The other areas keep their scores.
+  `--show-profile`, the review step, an opened profile and the call sheet show
+  such a score as withheld, not as missing data. 0.5.0 opens the file and
+  shows that score as "n/a".
 - For the same findings, `checks` and `check.findings` always agree: the
   writer builds both from one list.
 - A profile written before 0.6.0 has no `checks`. It still opens.

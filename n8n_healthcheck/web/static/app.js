@@ -812,8 +812,11 @@
   function withholdChecks(check, ids) {
     if (!Array.isArray(check.checks) || !check.checks.some((entry) => ids.has(checkKey(entry)))) return check;
     const gone = new Set(check.checks.filter((entry) => ids.has(checkKey(entry))).map((entry) => entry.rule_id));
+    // The score of its area goes with a check, whatever the check had stated.
+    const areas = new Set(check.checks.filter((entry) => gone.has(entry.rule_id)).map((entry) => entry.area));
     return {
       ...check,
+      scores: check.scores.map((row) => (areas.has(row.area) ? { ...row, score: null, withheld: true } : row)),
       findings: check.findings.filter((finding) => !gone.has(finding.rule_id)),
       checks: check.checks.map((entry) => (gone.has(entry.rule_id) ? { rule_id: entry.rule_id, area: entry.area, outcome: "withheld", text: "" } : entry)),
     };
@@ -938,6 +941,9 @@
       };
     });
   }
+
+  /** True for the score of an area that was withheld with one of its checks: not "no data" (profile.score_withheld). */
+  const scoreWithheld = (row) => row.score === null && row.withheld === true;
 
   /** "Redis", "Kubernetes or the debug information", "any one of the env file, Kubernetes or the debug information". */
   function anyOf(needs, escape = (text) => text) {
@@ -1115,7 +1121,7 @@
    * The call sheet as data, for the page and for its Markdown: no text of it is escaped here.
    * { age (days, or null when not old), brief: [{ label, value, note }], withheld, entries (null
    * for a file without checks), passed: Map(area -> entries), findings, groups: Map(heading -> entries),
-   * notApplicable, withheldChecks, titles (the findings of a file without checks), partial }
+   * notApplicable, withheldLine (what was withheld, in words), titles (the findings of a file without checks), partial }
    */
   function callSheetOf(profile, today, escape = (text) => text) {
     const facts = new Map();
@@ -1182,7 +1188,11 @@
       for (const entry of notAssessed) if (entry.reason === reason) add(heading, entry);
     }
     for (const entry of entries) if (!entry.known) add(NOT_KNOWN.charAt(0).toUpperCase() + NOT_KNOWN.slice(1), entry);
-    return { ...sheet, passed, findings, groups, notApplicable: of("not_applicable"), withheldChecks: of("withheld").length };
+    const said = of("withheld").length ? [`Checks withheld by the operator: ${of("withheld").length}.`] : [];
+    const areas = check.scores.filter(scoreWithheld).map((row) => escape(row.area));
+    // Whatever the check had stated: the score would tell whether it was a finding.
+    if (areas.length) said.push(`The score of its area is withheld with a check: ${areas.join(", ")}.`);
+    return { ...sheet, passed, findings, groups, notApplicable: of("not_applicable"), withheldLine: said.join(" ") };
   }
 
   /** The call sheet as Markdown: the text `--show-sheet` prints for the same file on the same day. */
@@ -1232,7 +1242,7 @@
       if (!sheet.groups.size) lines.push(CALL.allAssessed);
       lines.push("", "## Does not apply", "");
       lines.push(sheet.notApplicable.length ? sheet.notApplicable.map(item).join("; ") : CALL.allApply);
-      if (sheet.withheldChecks) lines.push("", `Checks withheld by the operator: ${sheet.withheldChecks}.`);
+      if (sheet.withheldLine) lines.push("", sheet.withheldLine);
     }
     lines.push("", "## Questions still open", "", ...questionLines(profile, catalogue, "###"), "");
     return lines.join("\n");
@@ -1334,7 +1344,7 @@
         el("thead", null, el("tr", null, el("th", { scope: "col" }, "Area"), el("th", { scope: "col" }, "Score"))),
         el("tbody", null, ...check.scores.map((row) => el("tr", null,
           el("th", { scope: "row" }, row.area),
-          el("td", null, row.score === null ? "n/a" : `${numberText(row.score)}/100${row.partial ? " (partial)" : ""}`))))));
+          el("td", null, scoreWithheld(row) ? stateTag("withheld") : row.score === null ? "n/a" : `${numberText(row.score)}/100${row.partial ? " (partial)" : ""}`))))));
       if (check.partial) outcome.push(el("p", { class: "block__note" }, "The check was partial: not every source was collected or not every rule ran."));
       outcome.push(check.findings.length
         ? el("ul", { class: "pfindings" }, ...check.findings.map((finding) => el("li", null,
@@ -1371,7 +1381,7 @@
         outcome.push(
           el("h5", { class: "pchecks__title" }, `Checks (${entries.length})`),
           el("p", { class: "block__note" }, lead("What every rule stated, with every text written to the file."), " Each text is a fixed sentence of the rule, never a value of this instance.",
-            edit ? " A check can be withheld on its own: it stays in the file with its rule id only, and its finding leaves the list above. The scores still count it." : ""),
+            edit ? " A check can be withheld on its own: it stays in the file with its rule id only, its finding leaves the list above, and the score of its area is withheld with it, whatever the check says." : ""),
           entries.length ? table("Check", rows, true) : el("p", { class: "block__note" }, "No check is listed."));
       }
     }
@@ -1603,7 +1613,7 @@
             : note(CALL.allAssessed)),
         part(`Does not apply (${sheet.notApplicable.length})`,
           sheet.notApplicable.length ? el("ul", { class: "sheet" }, ...sheet.notApplicable.map((entry) => item(entry))) : note(CALL.allApply),
-          sheet.withheldChecks ? note(`Checks withheld by the operator: ${sheet.withheldChecks}.`) : null));
+          sheet.withheldLine ? note(sheet.withheldLine) : null));
     }
 
     return el("section", { class: "block" }, el("h3", null, "Call sheet"),

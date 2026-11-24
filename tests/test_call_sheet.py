@@ -252,8 +252,14 @@ class WithholdCheckTest(unittest.TestCase):
         self.assertEqual(
             blanked["check"]["findings"], [f for f in made["check"]["findings"] if f["rule_id"] != "SEC-001"]
         )
-        # Nothing else moves: the other entries, the scores and the rest of the file.
-        self.assertEqual(blanked["check"]["scores"], made["check"]["scores"])
+        # The score of each of their areas goes with them; the other areas keep theirs.
+        for row, before in zip(blanked["check"]["scores"], made["check"]["scores"]):
+            if row["area"] in ("security", "reliability"):
+                self.assertEqual(row, {"area": row["area"], "score": None, "partial": before["partial"], "withheld": True})
+                self.assertIsInstance(before["score"], int)
+            else:
+                self.assertEqual(row, before)
+        # Nothing else moves: the other entries and the rest of the file.
         for rule_id, entry in entries(made).items():
             if rule_id not in ("SEC-001", "REL-001"):
                 self.assertEqual(got[rule_id], entry)
@@ -295,6 +301,131 @@ class WithholdCheckTest(unittest.TestCase):
         gone = profile.apply_withholding(blanked, [f"check:{rule_id}" for rules in rested.values() for rule_id in rules])
         self.assertEqual(profile.rested_on_withheld(gone), {})
         self.assertNotIn("still rests on", profile.render_markdown(gone))
+
+
+def restated(made, rule_id, outcome, severity=None):
+    """A copy of a profile in which one rule stated something else, with the findings and the scores that follow from it."""
+    made = copy.deepcopy(made)
+    info = outcomes.RULES[rule_id].info
+    check = made["check"]
+    position = [entry["rule_id"] for entry in check["checks"]].index(rule_id)
+    entry = {"rule_id": rule_id, "area": info.area, "outcome": outcome}
+    if outcome == "finding":
+        variant = info.variants[0]
+        entry.update(severity=severity, text=variant.title, impact=variant.impact, remedy=variant.remedy, rests_on=[])
+    elif outcome == "passed":
+        entry.update(basis="read", text=info.passed, rests_on=[])
+    else:
+        entry.update(text=info.subject, rests_on=[])
+        if outcome == "not_assessed":
+            entry.update(reason="not_stated", needs=[])
+    check["checks"][position] = entry
+    found = [e for e in check["checks"] if e["outcome"] == "finding"]
+    found.sort(key=lambda e: SEVERITIES.index(e["severity"]))
+    check["findings"] = [{"rule_id": e["rule_id"], "severity": e["severity"], "area": e["area"], "title": e["text"]} for e in found]
+    for row in check["scores"]:
+        row["score"] = max(0, 100 - sum(engine.PENALTY[e["severity"]] for e in found if e["area"] == row["area"]))
+    return profile.validate(made)
+
+
+class WithheldScoreTest(unittest.TestCase):
+    """Decided by the owner after the build: a check withheld on its own takes the score of its area with it."""
+
+    STATES = [("finding", "critical"), ("finding", "warning"), ("finding", "info"), ("passed", None), ("not_assessed", None), ("not_applicable", None)]
+
+    def variants(self, rule_id="SEC-001"):
+        return [restated(built(), rule_id, outcome, severity) for outcome, severity in self.STATES]
+
+    def test_the_variants_really_differ_before_the_check_is_withheld(self):
+        files = self.variants()
+        scores = [next(row["score"] for row in file["check"]["scores"] if row["area"] == "security") for file in files]
+        self.assertEqual(scores, [60, 85, 95, 100, 100, 100])
+        self.assertEqual(len({json.dumps(file["check"], sort_keys=True) for file in files}), 6)
+        self.assertEqual(len({profile.render_sheet(file, TODAY) for file in files}), 6)
+
+    def test_nothing_in_the_file_or_on_the_sheet_tells_what_a_withheld_check_had_stated(self):
+        blanked = [profile.apply_withholding(file, ["check:SEC-001"]) for file in self.variants()]
+        for file in blanked[1:]:
+            self.assertEqual(file, blanked[0])
+        for render in (profile.to_json, profile.render_markdown, lambda file: profile.render_sheet(file, TODAY), profile.render_questions):
+            self.assertEqual(len({render(file) for file in blanked}), 1)
+        # Not kept, and not computed again without the finding: either would differ between the variants.
+        row = next(row for row in blanked[0]["check"]["scores"] if row["area"] == "security")
+        self.assertEqual(row, {"area": "security", "score": None, "partial": True, "withheld": True})
+        info = outcomes.RULES["SEC-001"].info
+        text = profile.to_json(blanked[0]) + profile.render_markdown(blanked[0]) + profile.render_sheet(blanked[0], TODAY)
+        for telling in (info.subject, info.passed, info.variants[0].title, info.variants[0].impact, info.variants[0].remedy):
+            self.assertNotIn(telling, text)
+
+    def test_two_instances_that_differ_only_in_what_was_withheld_give_the_same_file(self):
+        def file(cookie):
+            snapshot = Snapshot(env={**QUEUE, "N8N_SECURE_COOKIE": cookie}, health={"healthz": True, "readiness": True})
+            made = profile.build_profile(snapshot, [], (), now=NOW, checks=engine.assess(snapshot, ALL_RULES))
+            return made, profile.apply_withholding(made, ["check:SEC-001", "setting:instance:N8N_SECURE_COOKIE"])
+
+        (insecure, hidden_insecure), (secure, hidden_secure) = file("false"), file("true")
+        self.assertEqual((entries(insecure)["SEC-001"]["outcome"], entries(secure)["SEC-001"]["outcome"]), ("finding", "passed"))
+        self.assertNotEqual(insecure["check"]["scores"], secure["check"]["scores"])
+        self.assertEqual(hidden_insecure, hidden_secure)
+        self.assertEqual(profile.render_sheet(hidden_insecure, TODAY), profile.render_sheet(hidden_secure, TODAY))
+
+    def test_only_the_area_of_the_check_and_only_when_one_check_is_withheld(self):
+        made = built()
+        self.assertTrue(all("withheld" not in row for row in made["check"]["scores"]))
+        self.assertTrue(all("withheld" not in row for row in profile.apply_withholding(made, ["worker.replicas", "setting:instance:DB_TYPE"])["check"]["scores"]))
+        for rule in ALL_RULES:
+            blanked = profile.apply_withholding(made, [f"check:{rule.info.rule_id}"])
+            for row, before in zip(blanked["check"]["scores"], made["check"]["scores"]):
+                expected = {**before, "score": None, "withheld": True} if row["area"] == rule.info.area else before
+                self.assertEqual(row, expected, rule.info.rule_id)
+            self.assertIs(profile.validate(blanked), blanked)
+
+    def test_a_withheld_score_is_shown_as_withheld_and_missing_data_as_missing(self):
+        blanked = profile.apply_withholding(built(), ["check:SEC-001"])
+        shown = profile.render_markdown(blanked)
+        self.assertIn("| security | withheld |\n", shown)
+        self.assertIn("| reliability | 80/100 (partial) |\n", shown)
+        self.assertNotIn("n/a", shown)
+        sheet = profile.render_sheet(blanked, TODAY)
+        self.assertIn("\n\nChecks withheld by the operator: 1. The score of its area is withheld with a check: security.\n", sheet)
+        # A score that is null because nothing was read is not a withheld one.
+        nothing = profile.render_markdown(built(Snapshot(), failed=()))
+        self.assertIn("| security | n/a |\n", nothing)
+        self.assertNotIn("| withheld |", nothing)
+        self.assertNotIn("is withheld with a check", profile.render_sheet(built(Snapshot(), failed=()), TODAY))
+        # The mark alone, next to a score, hides nothing and is not shown as withheld.
+        odd = built()
+        odd["check"]["scores"][0]["withheld"] = True
+        self.assertNotIn("| withheld |", profile.render_markdown(profile.validate(odd)))
+
+    @unittest.skipUnless(page.NODE, page.NO_NODE)
+    def test_the_page_withholds_and_shows_the_same(self):
+        files = self.variants()
+        for raw in page.PATHS:
+            got = page.run_page_code(
+                "input.files.map((text) => { const saved = profileText(withholdEntries(parseExact(text).profile, new Set(['check:SEC-001']), 'baseline', ''));"
+                " return [saved, callSheetMarkdown(parseExact(saved), input.catalogue, new Date(input.today))]; })",
+                raw=raw, files=[page.response_text(file) for file in files], catalogue=page.CATALOGUE, today="2026-11-24T12:00:00Z",
+            )  # fmt: skip
+            expected = profile.apply_withholding(files[0], ["check:SEC-001"])
+            for saved, sheet in got:
+                self.assertEqual(json.loads(saved), expected)
+                self.assertEqual(sheet, profile.render_sheet(expected, TODAY))
+            self.assertEqual(len({saved for saved, _ in got}), 1)
+        shown = page.run_page(
+            """async (page, input) => {
+              const opened = await page.open(input.file);
+              const rows = page.walk(page.$("profile-body")).filter((node) => node.tagName === "tr").map((node) => node.textContent);
+              return { shown: opened.shown, scores: rows.filter((row) => input.areas.some((area) => row.startsWith(area))) };
+            }""",
+            file=profile.to_json(expected), areas=list(AREAS),
+        )
+        self.assertIn("securitywithheld", shown["scores"])
+        self.assertIn("reliability80/100 (partial)", shown["scores"])
+        self.assertNotIn("securityn/a", shown["scores"])
+        self.assertIn("The score of its area is withheld with a check: security.", shown["shown"])
+        for telling in (outcomes.RULES["SEC-001"].info.variants[0].title, outcomes.RULES["SEC-001"].info.passed):
+            self.assertNotIn(telling, shown["shown"])
 
 
 # --- fixed texts -------------------------------------------------------------------
@@ -650,7 +781,7 @@ class SheetTest(unittest.TestCase):
 
         one = profile.render_sheet(files["one check and some facts withheld"], TODAY)
         self.assertEqual(headings(one), HEADINGS)
-        self.assertTrue(part(one, "Does not apply").endswith("\n\nChecks withheld by the operator: 1."))
+        self.assertTrue(part(one, "Does not apply").endswith("\n\nChecks withheld by the operator: 1. The score of its area is withheld with a check: security."))
         self.assertNotIn("SEC-001", one.split("## Questions still open")[0])
         self.assertNotIn("Session cookie", one)
 

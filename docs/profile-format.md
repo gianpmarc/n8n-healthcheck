@@ -542,7 +542,9 @@ The outcome of the health check that ran with the profile:
 - `partial`: not every source was read or not every rule ran, so the scores
   cover only part of the instance.
 - `scores`: one per area (`scalability`, `reliability`, `performance`,
-  `maintainability`, `security`), 0 to 100, or `null` when nothing was read.
+  `maintainability`, `security`), 0 to 100, or `null` when nothing was read. A row with
+  `"withheld": true` and a `null` score is an area whose score was withheld
+  with one of its checks: see "Withholding".
 - `findings`: most severe first. `severity` is `critical`, `warning` or
   `info`. The title is fixed text of the rule. The evidence, impact and
   recommendation of a finding are in the health report, not here: evidence
@@ -659,8 +661,17 @@ block.
 
 A withheld check keeps its `rule_id` and its `area` in `checks`, with
 `"outcome": "withheld"` and an empty text, and its finding, if it had one,
-leaves `findings`. The scores are not recomputed: they still count that
-finding. To hide that too, withhold the whole `check` block.
+leaves `findings`.
+
+The score of that check's area is withheld with it: the row stays in `scores`
+as `{"area": "security", "score": null, "partial": ..., "withheld": true}`.
+This happens whatever the check had stated, a finding or not. A score that was
+kept would still count the finding, and one computed again without it would
+differ from the first, so either would tell that the withheld check was a
+finding and how severe. The scores of the other areas are written as before.
+A reader shows such a row as withheld, not as "n/a": a `null` score without
+`"withheld": true` still means that nothing was read. A reader that does not
+know the key (tool version 0.5.0) shows "n/a".
 
 Nothing is withheld automatically. The text of a check can say something about
 a fact or a setting that was withheld: "workers run with at least 2 replicas"
