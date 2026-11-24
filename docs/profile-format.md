@@ -65,7 +65,8 @@ The only text a person types is `run.reference`.
 }
 ```
 
-(The example shows four facts. A real file always has the full catalogue.)
+(The example shows four facts. A real file always has the full catalogue, and
+from tool version 0.6.0 `check` also holds `checks`: see "Check".)
 
 ## Top-level fields
 
@@ -549,15 +550,124 @@ The outcome of the health check that ran with the profile:
 
 When the whole block was withheld it is `{"withheld": true}`.
 
+### The outcome of every rule
+
+Added in tool version 0.6.0. `check.checks` is a list with one entry per rule,
+in rule order. A file written by an earlier version has no such key and still
+opens. Every rule states exactly one outcome per run:
+
+```json
+{"rule_id": "SCAL-002", "area": "scalability", "outcome": "passed",
+ "basis": "read", "text": "Queue-mode workers run with at least 2 replicas.",
+ "rests_on": ["worker.replicas", "executions.mode"]}
+
+{"rule_id": "REL-001", "area": "reliability", "outcome": "finding",
+ "severity": "critical", "text": "Queue mode on SQLite", "impact": "...",
+ "remedy": "...", "rests_on": ["executions.mode", "database.engine",
+                               "setting:instance:EXECUTIONS_MODE"]}
+
+{"rule_id": "SCAL-005", "area": "scalability", "outcome": "not_assessed",
+ "text": "Postgres connections in use", "reason": "source_missing",
+ "needs": ["postgres"], "rests_on": []}
+
+{"rule_id": "REL-006", "area": "reliability", "outcome": "not_applicable",
+ "text": "Multi-main setup in queue mode", "rests_on": []}
+
+{"rule_id": "SEC-002", "area": "security", "outcome": "withheld", "text": ""}
+```
+
+| Key | In | Meaning |
+|---|---|---|
+| `rule_id`, `area` | every entry | The rule and its area. |
+| `outcome` | every entry | `finding`, `passed`, `not_applicable`, `not_assessed`, or `withheld` when the sender left this check out. |
+| `text` | every entry | For a finding its title, for a passed check the sentence that states the good condition, otherwise the subject of the rule. Empty for a withheld check. |
+| `severity`, `impact`, `remedy` | `finding` | The severity, what goes wrong if left as is, and the fix. |
+| `basis` | `passed` | `read`: the rule read the good value. `default`: the variable is not set in an environment that was read in full, and the n8n default is the good value. |
+| `reason`, `needs` | `not_assessed` | Why the rule could not decide, and the sources of which any one would let it. See below. |
+| `rests_on` | all but `withheld` | The ids of the facts and settings of this file that hold what the rule read. Ids only, the ones `--withhold` takes: their values are the ones already in the file, withheld or not. Empty when the rule reads something the profile does not hold; the values are then in the health report. |
+
+| `reason` | Meaning | `needs` |
+|---|---|---|
+| `source_missing` | None of the sources where the rule looks was given. | Any one of these would let it decide: `url`, `env`, `postgres`, `redis`, `kubernetes`, `debug_info`. |
+| `source_failed` | Such a source was asked for and could not be collected. | Those sources. |
+| `not_stated` | A source where the rule looks was given and read, and does not say it. | empty |
+| `value_unreadable` | A source holds the value, which could not be read (a Secret, a `_FILE` variable, a redacted value, an environment read in part). | empty |
+| `rule_error` | The rule itself failed to run. | empty |
+
+The ids in `needs` name what the operator gives, not the keys of `sources`:
+`url` covers the health and metrics endpoints, `env` is the env file.
+
+**Every text in `checks` is fixed.** `text`, `impact` and `remedy` are each
+one of a closed list of sentences written in the code of the rules, all of
+them printed in [rules.md](rules.md). None is built from a value read from the
+instance, so none can hold a host, a URL, a path or a name. Which sentence was
+chosen can tell a state of the instance (a title about queue mode tells the
+mode), as the title of a finding always did. The evidence of a finding is
+still never written.
+
+`checks` and `findings` are built from one list and always agree: a finding
+is in both, and a rule that failed to run is in neither `findings` nor the
+scores, and is `not_assessed` with the reason `rule_error` in `checks`.
+
+A reader must accept what it does not know here, so that a later version can
+add to it: `checks` must be a list of objects that each have a string
+`rule_id`, `area`, `outcome` and `text`, or the file is refused; any other key
+is read when it has the shape above and ignored when it has not; an entry with
+an `outcome` or a `reason` the reader does not know is shown as "not known to
+this version", not refused.
+
+## The call sheet
+
+`n8n-healthcheck --show-sheet FILE` prints, from a saved profile, an outline
+for a call between the person who supports an instance and the person who
+runs it, as Markdown. The web page shows the same sheet when a profile is
+opened, with "Copy as Markdown". It is a rendering of the file: it changes
+nothing and holds nothing the file does not.
+
+1. **Run.** Date, reason, reference, tool version, the sources and their
+   state, and a line when the profile is more than 30 days old.
+2. **The environment in brief.** n8n version, execution mode, main and worker
+   replicas, database type, and the four usage numbers, each as measured,
+   declared, unknown or withheld. "about" marks a usage number the profile
+   records as an estimate.
+3. **What works well.** The `passed` checks, by area.
+4. **What does not.** The findings, most severe first: title, impact, and what
+   the rule rests on with the values the file holds.
+5. **What to improve.** The remedies of those findings, in the same order.
+6. **Not assessed.** The `not_assessed` checks, grouped by what would have to
+   be given, then those a source did not state, those whose value could not be
+   read, and rules that failed.
+7. **Does not apply.** One line, and a count of the checks that were withheld.
+8. **Questions still open.** The question sheet above.
+
+When `check` was withheld, parts 3 to 7 are one line saying so. For a file
+written before 0.6.0, part 4 lists the findings by title and one line says
+that the file does not record the rest. A withheld fact shows as withheld,
+never as its value.
+
 ## Withholding
 
-Before the file is written, any fact, any setting, or the whole `check` block
-can be withheld. A withheld entry stays in the file, without its value, so a
+Before the file is written, any fact, any setting, any single check, or the
+whole `check` block can be withheld. A withheld entry stays in the file, without its value, so a
 reader can tell "removed" from "unknown". `run`, `sources`, `format`,
 `format_version`, `tool_version` and `created_at` cannot be withheld.
 
 On the command line an entry is named by its fact id (`worker.replicas`), by
-`setting:<scope>:<NAME>` (`setting:main:EXECUTIONS_MODE`), or `check`.
+`setting:<scope>:<NAME>` (`setting:main:EXECUTIONS_MODE`), by
+`check:<RULE_ID>` (`check:SCAL-002`) for one check, or `check` for the whole
+block.
+
+A withheld check keeps its `rule_id` and its `area` in `checks`, with
+`"outcome": "withheld"` and an empty text, and its finding, if it had one,
+leaves `findings`. The scores are not recomputed: they still count that
+finding. To hide that too, withhold the whole `check` block.
+
+Nothing is withheld automatically. The text of a check can say something about
+a fact or a setting that was withheld: "workers run with at least 2 replicas"
+bounds `worker.replicas`. So the review names, for every withheld fact and
+setting, the checks in the file that rest on it (`--show-profile`, a note on
+stderr when the file is saved, and the share step of the web page), and the
+sender decides whether to withhold those checks as well.
 
 Withholding applies to the profile only. The health report is a separate
 document that quotes raw values as evidence; share it or not as before.
@@ -580,6 +690,9 @@ document that quotes raw values as evidence; share it or not as before.
   information" and the source `debug_info`, which is not required of a file
   either. Version 0.5.0 added the ids under "Usage numbers from the n8n API"
   and the source `api` in the same way.
+- Version 0.6.0 added `check.checks` without raising the format version: a
+  file that has it opens in version 0.5.0, which ignores the key, and a file
+  without it opens in 0.6.0.
 - When a file is opened, `run.reference` must obey the rules it is typed
   under: one line, at most 200 characters, no control characters, no
   surrounding spaces. A file that is not valid is refused with a message that

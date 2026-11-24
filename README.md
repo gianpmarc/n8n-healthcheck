@@ -98,24 +98,40 @@ python3 -m n8n_healthcheck --url https://n8n.example.com --kube-namespace n8n \
 | `--save-profile FILE` | write the profile as JSON, next to the usual report |
 | `--reason REASON` | `baseline` (default), `pre_upgrade`, `post_upgrade`, `incident` or `other` |
 | `--reference TEXT` | one line of free text stored in the profile, at most 200 characters; do not put secrets in it |
-| `--withhold ID` | leave an entry out; repeatable. A fact id (`worker.replicas`), `setting:<scope>:<NAME>`, or `check` |
+| `--withhold ID` | leave an entry out; repeatable. A fact id (`worker.replicas`), `setting:<scope>:<NAME>`, `check:<RULE_ID>` for one check, or `check` for the whole outcome |
 | `--show-profile FILE` | print a saved profile as Markdown and exit; works offline, takes only `-o` |
+| `--show-sheet FILE` | print the [call sheet](#call-sheet) of a saved profile as Markdown and exit; works offline, takes only `-o` |
 
 Read the file before you share it: `--show-profile` prints exactly what is in it. A withheld entry stays in the file marked `withheld`, so the reader knows it was removed rather than unknown.
 
 The profile never contains a secret, a host name, a URL, an IP address, a file path, an e-mail address, or a Deployment, namespace or registry name. A setting's value is written only when n8n documents the variable as a boolean, a number or one word of a fixed list; every other documented variable is listed as "set" without its value, and variables n8n does not document are counted, not named. Anything the tool cannot tell for certain is `unknown`, never guessed. The tool does not send the file anywhere.
 
-Withholding a fact does not remove the setting it was read from, or a finding that mentions it: `--withhold executions.mode` leaves the `EXECUTIONS_MODE` setting and any finding about queue mode in the file. Withhold those too (`setting:instance:EXECUTIONS_MODE`, `check`) if you want the datum gone.
+From version 0.6.0 the profile also holds the outcome of every rule: a finding with its impact and its remedy, a check that passed, one that does not apply, or one that could not be assessed and why. Every such text is a fixed sentence of the rule, never a value of your instance; [docs/rules.md](docs/rules.md) lists what each rule reads and every sentence it can write. The evidence of a finding, which quotes what was read, stays in the report.
+
+Withholding a fact does not remove the setting it was read from, or a check that rests on it: `--withhold executions.mode` leaves the `EXECUTIONS_MODE` setting and any check about queue mode in the file. Nothing is withheld for you: when the file is saved, a note on stderr names the checks that rest on a withheld entry, and `--show-profile` lists them. Withhold those too (`setting:instance:EXECUTIONS_MODE`, `check:REL-001`, or `check` for the whole outcome) if you want the datum gone. A withheld check stays in the file with its rule id only; the scores still count its finding.
 
 Withholding applies to the profile only. The report is a separate document and quotes raw values as evidence.
 
 ### In the web interface
 
-After a run, the page shows a step under the report, "Share the environment profile". It lists every fact and every setting exactly as it will be written, each with a box to withhold it, plus one box for the check outcome, the reason and the reference. "Download profile" saves `n8n-profile-YYYY-MM-DD.json` on your computer; the page sends it nowhere. The same rule as on the command line applies: each row is its own entry, so withhold the fact, the setting and the check outcome separately if you want a datum gone.
+After a run, the page shows a step under the report, "Share the environment profile". It lists every fact and every setting exactly as it will be written, each with a box to withhold it, plus one box for the check outcome and one for each check, the reason and the reference. "Download profile" saves `n8n-profile-YYYY-MM-DD.json` on your computer; the page sends it nowhere. The same rule as on the command line applies: each row is its own entry, so withhold the fact, the setting and the check separately if you want a datum gone. A withheld fact or setting names the checks that still rest on it.
 
 Above the tables the step asks "A few questions": the [profile questions](#profile-questions) the tool could not answer itself, as radio buttons and checkboxes. Every one is optional and starts on "No answer". An answer shows in the facts table as `declared` and can be withheld there like any fact; a fact the tool measured is not asked about. The downloaded file is the one `--answer` and `--withhold` write for the same choices.
 
-To read a profile someone sent you, use "Open a profile" on the start page. The file is read in the browser, not uploaded, and shown with its run details, sources, facts, settings and check outcome: the same content as `--show-profile`. Under them, "Questions still open" lists what the profile leaves unknown, and "Copy as Markdown" copies that sheet: the same text as `--show-questions`. A file that is not a profile, was written by a newer version, or is incomplete is refused with a message; nothing of it is shown.
+To read a profile someone sent you, use "Open a profile" on the start page. The file is read in the browser, not uploaded. It opens on the [call sheet](#call-sheet), with "Copy as Markdown" (the same text as `--show-sheet`), followed by its run details, sources, facts, settings and check outcome: the same content as `--show-profile`. Under them, "Questions still open" lists what the profile leaves unknown, and "Copy as Markdown" copies that sheet: the same text as `--show-questions`. A file that is not a profile, was written by a newer version, or is incomplete is refused with a message; nothing of it is shown.
+
+### Call sheet
+
+The person who supports an instance often receives only the profile. `--show-sheet FILE` turns it into an outline for the call with whoever runs the instance:
+
+1. the run and the environment in brief (version, mode, replicas, database, usage numbers);
+2. **what works well**: the checks that read what they need and found it good ("by n8n's default" when the variable is simply not set);
+3. **what does not**: the findings, most severe first, with their impact and the values of the profile they rest on;
+4. **what to improve**: the remedy of each finding;
+5. **not assessed**: the checks that could not decide, grouped by what would have to be provided ("With Postgres: ..."), and those that do not apply;
+6. the questions still open.
+
+The sheet is made from the file alone and changes nothing. A profile written before 0.6.0 opens too: its sheet lists the findings by title and says that the rest was not recorded. A 0.6.0 profile opens in 0.5.0, which ignores what it does not know.
 
 `--save-profile` needs a live run: it cannot be combined with `--snapshot`. The exit code is the one of the health check, with or without a profile. The file format is described in [docs/profile-format.md](docs/profile-format.md).
 
