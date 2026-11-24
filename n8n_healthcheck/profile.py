@@ -1463,7 +1463,7 @@ SHEET_NO_CHECKS = (
     "This file was written by a version of n8n-healthcheck that does not record what passed, "
     "the impact and the remedy of a finding, what was not assessed or what does not apply."
 )
-SHEET_NOT_IN_PROFILE = "Rests on values that are not in the profile: they are in the operator's report."
+SHEET_NOT_IN_PROFILE = "Rests on values that are not in the profile: they are in the report the operator keeps."
 SHEET_PARTIAL = "The check was partial: not every source was collected or not every rule ran."
 
 
@@ -1569,7 +1569,7 @@ def _sheet_checks(entries: list, partial: bool, facts: dict, settings: dict) -> 
     lines = ["", "## What works well", "", "Checks that read the values they need and found the good condition.", ""]
     passed = of("passed")
     for area in dict.fromkeys(entry["area"] for entry in passed):
-        lines += [f"### {_cell(area).capitalize()}", ""]
+        lines += [f"### {_cell(area)[:1].upper()}{_cell(area)[1:]}", ""]
         lines += [
             f"- {item(entry)}" + (f" ({BY_DEFAULT})" if entry["by_default"] else "")
             for entry in passed
