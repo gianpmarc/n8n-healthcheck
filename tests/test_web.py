@@ -193,7 +193,7 @@ class WebTest(unittest.TestCase):
         _, result, _ = self.run_api({"url": "http://n8n.internal:5678"})
         built = result["profile"]
         self.assertIs(profile.validate(built), built)
-        expected = profile.build_profile(SNAPSHOT, engine.run(SNAPSHOT, RULES), ())
+        expected = profile.build_profile(SNAPSHOT, [], (), checks=engine.assess(SNAPSHOT, RULES))
         self.assertEqual({**built, "created_at": ""}, {**expected, "created_at": ""})
         self.assertEqual(built["run"], {"reason": "baseline", "reference": ""})
         self.assertNotIn("withheld", [fact["provenance"] for fact in built["facts"]])

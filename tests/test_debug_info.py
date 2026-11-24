@@ -672,7 +672,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(facts["worker.replicas"]["detail"], "debug information generated on 2026-11-19; counted from the instances n8n listed")
         self.assertEqual(built["sources"], {**dict.fromkeys(report.SECTIONS, "not_provided"), "debug_info": "collected", "api": "not_provided"})
         self.assertEqual(list(built["sources"])[:6], list(report.SECTIONS))
-        self.assertEqual((built["tool_version"], built["format_version"]), ("0.5.0", 1))
+        self.assertEqual((built["tool_version"], built["format_version"]), ("0.6.0", 1))
 
     def test_a_date_that_is_not_known_is_said_in_the_detail(self):
         facts = facts_of(snapshot((STAMP, "")))

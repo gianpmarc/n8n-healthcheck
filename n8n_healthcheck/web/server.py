@@ -217,7 +217,8 @@ def run_check(fields: dict) -> dict:
 
     failed, nothing_collected = cli.failed_sections(target, snapshot)
     warnings = [line for line in "".join(tee.captured).splitlines() if line.strip()]
-    findings = engine.run(snapshot, ALL_RULES)
+    checks = engine.assess(snapshot, ALL_RULES)
+    findings = engine.findings_of(checks)
     # The CLI stops with exit code 3 before the report when no source answered; here a
     # report is still returned, saying that the check could not run and why.
     report_args = (snapshot, findings, tuple(failed), tuple(warnings) if nothing_collected else None)
@@ -230,7 +231,7 @@ def run_check(fields: dict) -> dict:
         "markdown": report.render_markdown(*report_args),
         "snapshot": asdict(snapshot),
         # Default reason, no reference, nothing withheld: the page blanks entries itself.
-        "profile": profile.build_profile(snapshot, findings, tuple(failed)),
+        "profile": profile.build_profile(snapshot, findings, tuple(failed), checks=checks),
     }
 
 

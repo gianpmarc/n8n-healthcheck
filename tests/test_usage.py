@@ -787,7 +787,7 @@ class ProfileTest(Base):
         self.assertEqual(len(profile.FACT_IDS), 32 + 14 + 13 + 8)
         self.assertFalse(set(USAGE_FACTS) & profile.FORMAT_1_FACT_IDS)
         self.assertEqual(len(profile.FORMAT_1_FACT_IDS), 32)
-        self.assertEqual((n8n_healthcheck.__version__, profile.build_profile(Snapshot(), [])["tool_version"]), ("0.5.0", "0.5.0"))
+        self.assertEqual((n8n_healthcheck.__version__, profile.build_profile(Snapshot(), [])["tool_version"]), ("0.6.0", "0.6.0"))
         self.assertEqual(profile.FORMAT_VERSION, 1)
         for fact_id in USAGE_FACTS:
             self.assertTrue(questions.sentence(fact_id).endswith("?"))
