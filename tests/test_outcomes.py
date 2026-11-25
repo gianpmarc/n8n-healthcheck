@@ -707,6 +707,40 @@ class ReviewTest(unittest.TestCase):
                     self.assertEqual(stated(check), outcome)
                     self.assertEqual(RULES[rule_id](snapshot) is not None, outcome == FINDING)
 
+    def test_the_fourth_review(self):
+        external = {"N8N_RUNNERS_MODE": "external"}
+        worker = lambda env, replicas=2, **more: ("worker", replicas, container(command=["n8n", "worker"], env=env, **more))
+        webhook = lambda env, **more: ("webhook", 1, container(command=["n8n", "webhook"], env=env, **more))
+        on = lambda env, **more: ("main", 1, container(env=env, **more))
+        queue = {"EXECUTIONS_MODE": "queue"}
+        runners = lambda *deployments: Snapshot(kubernetes=kube(*deployments), n8n_version="2.1.0")
+        cases = [
+            # 1. The debug information against every container, for the mode and the database type.
+            ("workers in queue mode, the text in regular mode", TEXT(pasted.REGULAR, kubernetes=kube(worker(queue))), dict.fromkeys(("REL-001", "REL-002", "REL-006"), DISAGREE)),
+            ("the same next to a main container read in part", TEXT(pasted.REGULAR, kubernetes=kube(on({}, env_complete=False), worker(queue))),
+             dict.fromkeys(("REL-001", "REL-002", "REL-006"), DISAGREE)),
+            ("a webhook processor in queue mode, the text in regular mode", TEXT(pasted.REGULAR, kubernetes=kube(webhook(queue))), dict.fromkeys(("REL-001", "REL-006"), DISAGREE)),
+            ("workers on SQLite, the text in queue mode on Postgres", TEXT(kubernetes=kube(worker({**queue, "DB_TYPE": "sqlite"}))), {"REL-001": DISAGREE}),
+            ("workers and the text in queue mode on Postgres", TEXT(kubernetes=kube(worker(dict(QUEUE)))), {"REL-001": READ}),
+            # 2. A worker read in part may set the mode in what was not read.
+            ("a worker read in part that shows no mode, next to an env file", Snapshot(env=dict(REGULAR), kubernetes=kube(on(dict(REGULAR)), worker({}, env_complete=False))),
+             {"SCAL-003": UNREADABLE, "REL-006": UNREADABLE}),
+            ("a worker read in full that does not set the mode", Snapshot(env=dict(REGULAR), kubernetes=kube(on(dict(REGULAR)), worker({}))), {"SCAL-003": NOT_APPLICABLE_, "REL-006": NOT_APPLICABLE_}),
+            # 3. SEC-002: a tag that starts with a version number is a version read, on a webhook processor too.
+            ("main on 2.x, a webhook processor on 1.x", runners(on(external, image="n8nio/n8n:2.1.0"), webhook({}, image="n8nio/n8n:1.80.0")), {"SEC-002": DISAGREE}),
+            ("the only container on the tag 1", runners(on(external, image="n8nio/n8n:1")), {"SEC-002": DISAGREE}),
+            ("the only container on the tag 1.80", runners(on(external, image="n8nio/n8n:1.80")), {"SEC-002": DISAGREE}),
+            ("the only container on the tag 2, no other version", Snapshot(kubernetes=kube(on(external, image="n8nio/n8n:2"))), {"SEC-002": READ}),
+            ("a tag that is a date or a build number names no version", Snapshot(kubernetes=kube(on(external, image="n8nio/n8n:20261105"))), {"SEC-002": NOT_STATED}),
+            ("a tag that starts with a digit and is a word names no version", runners(on(external, image="n8nio/n8n:1a2b3c")), {"SEC-002": READ}),
+        ]
+        for label, snapshot, expected in cases:
+            for rule_id, outcome in expected.items():
+                with self.subTest(case=label, rule=rule_id):
+                    (check,) = engine.assess(snapshot, [RULES[rule_id]])
+                    self.assertEqual(stated(check), outcome)
+                    self.assertEqual(RULES[rule_id](snapshot) is not None, outcome == FINDING)
+
     def test_what_makes_a_rule_not_apply_is_carried_to_the_profile(self):
         by_mode = lambda snapshot, rule_id: engine.assess(snapshot, [RULES[rule_id]])[0].by_mode
         self.assertTrue(by_mode(Snapshot(env={}), "REL-002"))  # no Redis, and the mode is regular

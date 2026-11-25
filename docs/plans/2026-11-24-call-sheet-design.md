@@ -361,6 +361,26 @@ Decided by the owner on 2026-11-25.
 
 Findings, scores and the health report are unchanged by these as well.
 
+### After the fourth review
+
+Decided by the owner on 2026-11-25, as a last small round.
+
+- **The debug information is compared with every n8n container** for the execution mode
+  and the database type, not with the main ones only.
+- **A worker or a webhook processor read in part cannot be told for the mode**
+  (`value_unreadable` next to an env file). It says nothing about the mode only when
+  its environment was read in full and does not set it.
+- **SEC-002 reads a version from any image tag that starts with a version number**
+  (`1`, `1.80`), and from the webhook image too.
+- **Not changed, and a known limit:** in Kubernetes alone, a main container in regular
+  mode next to workers that do not set `EXECUTIONS_MODE` is not a disagreement. A worker
+  that leaves the variable out says nothing about the mode; read as "regular", every
+  cluster with a main in queue mode and such workers would disagree with itself. Nobody
+  checked what n8n makes of a worker without `EXECUTIONS_MODE`. The limits are listed
+  in `docs/rules.md`, "Known limits".
+
+Findings, scores and the health report are unchanged by these as well.
+
 ## Left to the builder
 
 - How rules state their outcome, and the internal names.

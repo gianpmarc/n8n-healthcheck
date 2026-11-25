@@ -60,7 +60,7 @@ DEFAULT = {
     "EXECUTIONS_DATA_SAVE_ON_PROGRESS": "false",
 }
 UNSET = "<unset>"
-IMAGES = ["n8nio/n8n:1.80.0", "n8nio/n8n:2.1.0", "n8nio/n8n:2.1.0", "n8nio/n8n:latest", "n8nio/n8n@sha256:abc", "registry.example/team/n8n:prod", "redis:7"]
+IMAGES = ["n8nio/n8n:1.80.0", "n8nio/n8n:2.1.0", "n8nio/n8n:2.1.0", "n8nio/n8n:2.1.0", "n8nio/n8n:1", "n8nio/n8n:1.80", "n8nio/n8n:latest", "n8nio/n8n@sha256:abc", "registry.example/team/n8n:prod", "redis:7"]  # fmt: skip
 COMMANDS = [[], [], ["n8n", "worker"], ["n8n", "worker", "--concurrency=3"], ["sh", "-c", "n8n worker --concurrency 12"], ["n8n", "webhook"]]
 VERSIONS = [None, "1.80.0", "2.1.0", "v2.1.0"]
 
@@ -199,6 +199,10 @@ def same(one: str, other: str) -> bool:
     return flags.get(one, one) == flags.get(other, other)
 
 
+NO_TEXT = {"pruning": None, "insecure": {"secure_cookie": False, "file_access_blocked": False}, "concurrency_limit": None, "execution_mode": None,
+           "database": None, "multi_main": None, "save_progress": None, "binary_mode": None}  # fmt: skip
+
+
 def text_says(section: dict) -> dict:
     """What a debug information states, as the variables are written."""
     pruning, insecure, limit = section["pruning"], section["insecure"], section["concurrency_limit"]
@@ -224,11 +228,14 @@ READS_THE_DATABASE = {"SCAL-001", "REL-001", "SEC-002"}
 
 
 def one_for_the_instance(snapshot: Snapshot, name: str) -> str:
-    """Why `name` is not stated one way by the env file and every n8n container, whatever its role; "" when it is."""
+    """Why `name` is not stated one way by the env file, the debug information and every n8n container, whatever its role; "" when it is."""
     stated = [("env file", says(snapshot.env, name))] if snapshot.env is not None else []
+    if name in text_says(snapshot.debug_info or NO_TEXT):
+        stated.append(("debug information", text_says(snapshot.debug_info)[name]))
     for role, env, complete, _container, _replicas in containers(snapshot):
-        # A worker or a webhook processor that does not set the mode says nothing about it.
-        if name == "EXECUTIONS_MODE" and role != "main" and name not in env and name + "_FILE" not in env:
+        # A worker or a webhook processor that does not set the mode says nothing about it,
+        # when all of its environment was read: read in part, it may set it out of sight.
+        if name == "EXECUTIONS_MODE" and role != "main" and complete and name not in env and name + "_FILE" not in env:
             continue
         stated.append((f"{role} container", says(env, name, complete)))
     known = [(who, value) for who, value in stated if value is not None]
@@ -242,6 +249,17 @@ def one_for_the_instance(snapshot: Snapshot, name: str) -> str:
 
 def major(version) -> int:
     return int(version.lstrip("v").split(".")[0])
+
+
+def versions_read(snapshot: Snapshot) -> dict:
+    """Every n8n version read in the run, by where it was read: a tag that starts with a number is one, on any n8n container."""
+    section = snapshot.debug_info or {}
+    tags = [(container["image"].rsplit(":", 1) + [""])[1] for *_rest, container, _replicas in containers(snapshot) if "@" not in container["image"]]
+    return {
+        "image tag": [tag for tag in tags if tag[:1].isdigit()],
+        "listed instance": list((section.get("cluster") or {}).get("versions") or []),
+        "instance": [version for version in (snapshot.n8n_version, section.get("n8n_version")) if version],
+    }
 
 
 def against_a_source(snapshot: Snapshot, check) -> str:
@@ -280,7 +298,8 @@ def against_a_source(snapshot: Snapshot, check) -> str:
             return "the env file says metrics are on, the URL answered 404"
     if info.rule_id == "MAINT-003":
         tags = [(container["image"].rsplit(":", 1) + [""])[1] for _role, _env, _complete, container, _replicas in containers(snapshot) if "@" not in container["image"]]
-        versions = {tag for tag in tags if tag[:1].isdigit()} | set(cluster.get("versions") or [])
+        # A tag that names a part of a version (1, 1.80) cannot be said to differ from a release.
+        versions = {tag for tag in tags if tag[:1].isdigit() and tag.count(".") == 2} | set(cluster.get("versions") or [])
         versions |= {version for version in (snapshot.n8n_version, section.get("n8n_version")) if version}
         versions = {version.lstrip("v") for version in versions}  # v2.1.0 is the release 2.1.0
         if len(versions) > 1:
@@ -315,9 +334,7 @@ def against_a_source(snapshot: Snapshot, check) -> str:
         else:
             judged = mains
         if any(says(env, "N8N_RUNNERS_ENABLED") not in ("true", "1") for env in judged):
-            tags = [(container["image"].rsplit(":", 1) + [""])[1] for role, _env, _complete, container, _replicas in containers(snapshot) if role != "webhook" and "@" not in container["image"]]
-            read = [tag for tag in tags if tag[:1].isdigit()] + list(cluster.get("versions") or [])
-            read += [version for version in (snapshot.n8n_version, section.get("n8n_version")) if version]
+            read = [version for versions in versions_read(snapshot).values() for version in versions]
             if not read or any(major(version) < 2 for version in read):
                 return f"N8N_RUNNERS_ENABLED is not set to true everywhere, and the versions read are {sorted(read)}"
     return ""
@@ -390,10 +407,13 @@ class SourcesPropertyTest(unittest.TestCase):
         self.assertNotEqual(generate(seed=1, count=20), generate(seed=2, count=20))
 
     def test_no_check_passes_or_does_not_apply_against_a_source_of_the_same_run(self):
-        decided, turned = set(), set()
+        decided, turned, only_1x_through = set(), set(), set()
         for number, (snapshot, (checks, _made)) in enumerate(zip(self.snapshots, self.assessed)):
             for check in checks:
                 why = against_a_source(snapshot, check)
+                if why.startswith("N8N_RUNNERS_ENABLED"):
+                    old = [where for where, versions in versions_read(snapshot).items() if any(major(version) < 2 for version in versions)]
+                    only_1x_through.update(old if len(old) == 1 else [])
                 if check.outcome in ("passed", "not_applicable"):
                     self.assertEqual(why, "", f"snapshot {number}, {check.info.rule_id} is {check.outcome}")
                     decided.add((check.info.rule_id, check.outcome))
@@ -404,6 +424,8 @@ class SourcesPropertyTest(unittest.TestCase):
         self.assertLessEqual(settings_rules, {rule_id for rule_id, outcome in decided if outcome == "passed"} | {"SCAL-001"})
         self.assertIn(("SCAL-001", "not_applicable"), decided)
         self.assertLessEqual(settings_rules | {"REL-002", "REL-003", "REL-004", "MAINT-003"}, turned)
+        # SEC-002 was held back by a 1.x that each kind of source was alone to state.
+        self.assertEqual(only_1x_through, {"image tag", "listed instance", "instance"})
 
     def test_an_entry_names_every_setting_it_depended_on(self):
         depended = set()

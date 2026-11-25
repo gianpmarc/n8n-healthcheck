@@ -89,13 +89,18 @@ The comparisons:
   on another `DB_TYPE` than main, are one instance stated in two ways, and the reason
   written is `sources_disagree` there too. For any other variable two containers are two
   processes, each with its own value, and are not compared. One exception: a worker or a
-  webhook processor that does **not set** `EXECUTIONS_MODE` says nothing about the mode.
-  Such a process runs in queue mode only, by its start command, and what n8n makes of
-  the missing variable there was not checked: it is not read as "regular". Without an
-  env file, a container that cannot be told is compared with nothing.
+  webhook processor that does **not set** `EXECUTIONS_MODE`, in an environment read in
+  full, says nothing about the mode. Such a process runs in queue mode only, by its start
+  command, and what n8n makes of the missing variable there was not checked: it is not
+  read as "regular". Read in part, the same container may set the mode in what was not
+  read: it cannot be told, as for any other variable. Without an env file, a container
+  that cannot be told is compared with nothing.
 - **The debug information and a probe** (the env file, or a main container), for a
   variable the rule reads on the main process: the text reports effective values of that
-  process. The binary data mode is compared as well. The two security settings are in the
+  process. For the execution mode and the database type, which are one for the instance,
+  the text is compared with every n8n container (main, worker, webhook) as well: workers
+  set to queue mode next to a text in regular mode disagree, also when no main container
+  was read. The binary data mode is compared as well. The two security settings are in the
   text only when they are insecure. A variable that cannot be told, or is not set and has
   no default, is compared with nothing here: the text then fills what the probe left open.
 
@@ -111,24 +116,51 @@ containers variable by variable for a check to pass. A container that gets part 
 environment from a Secret (`envFrom`) leaves every check that reads a variable it does not
 show as `value_unreadable`.
 
+### Known limits
+
+- **Kubernetes alone, workers that do not set the mode.** A main container in regular
+  mode next to worker Deployments whose containers do not set `EXECUTIONS_MODE` is not a
+  disagreement: SCAL-002 passes on two worker replicas, SCAL-003, REL-001 and REL-006
+  "do not apply", PERF-002 passes by default. The reason: a worker that leaves the
+  variable out says nothing about the mode, and read as "regular" every cluster with a
+  main in queue mode and workers that leave it out would disagree with itself. Nobody
+  checked what n8n makes of a worker without `EXECUTIONS_MODE`.
+- **The same choice next to an env file.** An env file and a main container in queue
+  mode, with workers that set `DB_TYPE` but not the mode: REL-001 and SCAL-002 pass.
+- **Kubernetes alone, a container that cannot be told.** Main in queue mode on
+  `postgresdb`, workers whose `DB_TYPE` is in a Secret or whose environment was read in
+  part: REL-001 passes with its sentence about "every process". Without an env file there
+  is nothing that says how every process is set, so such a container is compared with
+  nothing; next to an env file the same containers give `value_unreadable`.
+- **Several main containers that differ** are read by no rule, as in 0.5.0: the checks
+  that read the main process are `not_stated`.
+- **Image tags.** SEC-002 takes a version from a tag that starts with a version number
+  (`2.1.0`, `1.80`, `1`, `v2-debian`). A number of four digits or more (a date, a build
+  number) and a word that starts with a digit name no version. MAINT-003 compares full
+  x.y.z tags only: a tag `1` cannot be said to differ from `1.80.0`.
+
 ### What the property test covers
 
 `tests/test_sources_property.py` asserts the above, and what follows about `rests_on`, on
 snapshots made by a seeded generator and not on listed cases. It generates an env file,
 Kubernetes Deployments of the three roles (variables set, not set, in a Secret, given by
-`_FILE`, environments read in part, six images on n8n 1.x, 2.x and without a version,
+`_FILE`, environments read in part, images on n8n 1.x and 2.x, on the tags `1` and `1.80`, and without a version,
 replicas, the `--concurrency` flag), a debug information (with and without a cluster
 section), the answers of the URL, the n8n version, Redis and Postgres; half of the
 snapshots repeat one environment across their sources so that sources also agree.
 
 Its oracle reads the snapshot with its own table of defaults and none of the code it
 checks. Which rules read the mode and the database type is a list written by hand in
-the test, and for those the oracle asks that the env file and every n8n container state
-them one way: it does not take from the rules which containers a variable is compared
-on. It also asks that SEC-002 does not pass on a process that leaves
-`N8N_RUNNERS_ENABLED` unset when any version read in the run is 1.x or none was read,
-and that SCAL-004 does not pass on the limit of the env file alone against another
-limit in the debug information.
+the test, and for those the oracle asks that the env file, the debug information and
+every n8n container state them one way: it does not take from the rules which containers
+a variable is compared on. A worker or a webhook processor is left out for the mode only
+when it does not set it in an environment read in full. It also asks that SEC-002 does
+not pass on a process that leaves `N8N_RUNNERS_ENABLED` unset when any version read in
+the run is 1.x or none was read, a version being also any image tag that starts with a
+number, on any n8n container; the test fails when no snapshot has a 1.x stated by an
+image tag alone, by a listed instance alone, and by `/metrics` or the text alone. And it
+asks that SCAL-004 does not pass on the limit of the env file alone against another limit
+in the debug information.
 
 It does not cover:
 
@@ -137,8 +169,12 @@ It does not cover:
   value in both is not seen;
 - for a variable other than the mode and the database type, a comparison the oracle
   defines as the code does (the roles the rule declares);
-- values outside its lists: a version written `2.1.0-exp.0`, a `--concurrency` flag in
-  other forms, `N8N_RUNNERS_ENABLED` set to a word;
+- values outside its lists: a version written `2.1.0-exp.0`, a tag that is a date or a
+  word that starts with a digit, a `--concurrency` flag in other forms,
+  `N8N_RUNNERS_ENABLED` set to a word;
+- the choices under "Known limits", which the oracle holds as the code does: without an
+  env file a container that cannot be told is compared with nothing, and SCAL-004 is
+  compared with the text only when Kubernetes shows no worker;
 - several main containers that differ: no rule reads them, as in 0.5.0, and that
   dependence on every variable is not named by the entries;
 - a Deployment with two n8n containers, the `source_failed` reason, usage numbers, and
@@ -307,7 +343,7 @@ the file to name.
 - **Passed when:** Queue mode, with a database type read as `postgresdb`, `mysqldb` or `mariadb`.
 - **Passed text:** Queue mode runs on a database that every process can share, not on SQLite.
 - **Not applicable when:** Regular mode.
-- **Not assessed when:** None of the three sources was given; the mode or the database type is in a Secret or a file, was read in part, or is a word n8n does not know.
+- **Not assessed when:** None of the three sources was given; the mode or the database type is in a Secret or a file, was read in part, or is a word n8n does not know. Sources disagree: the env file, the debug information or an n8n container of any role states another mode or another database type.
 - **Rests on:** `executions.mode`, `database.engine`, `EXECUTIONS_MODE` (every scope), `DB_TYPE` (every scope)
 
 **Finding**
@@ -611,7 +647,7 @@ the file to name.
 ### SEC-002
 
 - **Subject** (written when the rule does not apply or could not decide): Task runners for the Code node
-- **Reads:** `N8N_RUNNERS_MODE` and `N8N_RUNNERS_ENABLED` of every process that runs Code nodes: the env file; else, in Kubernetes, the main container (unless it offloads manual executions) and every worker container. When `N8N_RUNNERS_ENABLED` is not set, every n8n version read in the run: from `/metrics`, from the debug information and the instances it lists, and from the image tag of each main and worker container. `DB_TYPE` and the mode for the severity of the finding.
+- **Reads:** `N8N_RUNNERS_MODE` and `N8N_RUNNERS_ENABLED` of every process that runs Code nodes: the env file; else, in Kubernetes, the main container (unless it offloads manual executions) and every worker container. When `N8N_RUNNERS_ENABLED` is not set, every n8n version read in the run: from `/metrics`, from the debug information and the instances it lists, and from the image tag of each n8n container, whatever its role, when the tag starts with a version number, whole or in part (`2.1.0`, `1.80`, `1`). `DB_TYPE` and the mode for the severity of the finding.
 - **Passed when:** `N8N_RUNNERS_MODE` read as `external` on every process judged, and `N8N_RUNNERS_ENABLED` there either read as true, or not set while every n8n version read is 2.x or later (the first source that answers does not decide for the others: the process judged may be another one than the one that reported its version). Never by default: the default is `internal`. The pass says what the variables are, not that the runners run. The rule's own remedy says that n8n 1.x also needs `N8N_RUNNERS_ENABLED=true`, which is why a variable that is not set does not pass on 1.x, nor when the version is not known. Nobody checked n8n itself for its default on 1.x, nor whether n8n 2.x still reads the variable: `false` never passes, on any version.
 - **Passed text:** N8N_RUNNERS_MODE is external on every process that was read and runs Code nodes, and N8N_RUNNERS_ENABLED is not set to false there: it is set to true, or it is not set and every n8n version read is 2.x or later.
 - **Not applicable when:** Never.

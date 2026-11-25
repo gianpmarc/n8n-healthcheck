@@ -13,6 +13,9 @@ from ..models import REDACTED, Outcome, RuleInfo, Snapshot
 
 # Leading x.y.z of an image tag: "2.40.1", "v2.40.1" and "2.40.1-build7" are one release.
 _VERSION = re.compile(r"v?(\d+\.\d+\.\d+)")
+# An image tag that starts with a version number, whole or in part: "1", "1.80", "v2-debian".
+# A longer number is a date or a build number, and a word that starts with a digit is a word.
+_TAG_MAJOR = re.compile(r"v?(\d{1,3})(?:\.\d+\.\d+|(?:\.\d+)?(?![\w.]))")
 
 
 # Value of a Kubernetes container variable that is set but could not be read (a Secret).
@@ -251,7 +254,7 @@ def against_sources(snapshot: Snapshot, names: tuple, scopes: tuple) -> Optional
       with its own value, and are not compared.
     - The debug information reports the effective values of the main process: it is
       compared with the env file and with each main container, for a variable the rule
-      reads on main.
+      reads on main; and with every container for a variable that is one for the instance.
 
     SOURCES_DISAGREE when two of them state different things. UNREADABLE when none does
     and a container next to an env file cannot be told for a variable: the file says how
@@ -270,8 +273,9 @@ def against_sources(snapshot: Snapshot, names: tuple, scopes: tuple) -> Optional
             for env, complete, role in containers
             # A worker or a webhook processor runs in queue mode only, by its start command:
             # what the variable gives there when it is not set is n8n's business, and is
-            # not taken as "regular". Only a mode that is set on them is a statement.
-            if role in roles and not (name == "EXECUTIONS_MODE" and role != "main" and name not in env and name + "_FILE" not in env)
+            # not taken as "regular". Only a mode that is set on them is a statement. Read
+            # in part, the mode may be set in what was not read: that one cannot be told.
+            if role in roles and not (name == "EXECUTIONS_MODE" and role != "main" and complete and name not in env and name + "_FILE" not in env)
         ]
         file_says = told(snapshot.env, name) if snapshot.env is not None else None
         if file_says is not None:
@@ -286,8 +290,8 @@ def against_sources(snapshot: Snapshot, names: tuple, scopes: tuple) -> Optional
         # variable on the workers only.
         if name not in text or "main" not in roles:
             continue
-        mains = [says for says, role in stated_there if role == "main"]
-        for says in ([told(snapshot.env, name)] if snapshot.env is not None else []) + mains:
+        there = [says for says, role in stated_there if role == "main" or name in INSTANCE_WIDE]
+        for says in ([told(snapshot.env, name)] if snapshot.env is not None else []) + there:
             # Not set and without a default: the effective value the text reports cannot contradict it.
             if says not in (None, NOT_SET) and not _same(says, text[name]):
                 return SOURCES_DISAGREE
@@ -298,14 +302,16 @@ def majors_read(snapshot: Snapshot) -> set:
     """The major version of every n8n version read in the run.
 
     From /metrics, from the debug information and the instances it lists, and from the
-    image tag of each main and worker container in Kubernetes. A tag or a text that
-    names no version (latest, a digest, a word) is not a version read.
+    image tag of each n8n container in Kubernetes, whatever its role. A tag counts when
+    it starts with a version number, also in part (1, 1.80). A tag or a text that names
+    no version (latest, a digest, a word, a date) is not a version read.
     """
-    versions = set(versions_stated(snapshot))
-    for _deployment, container, role in n8n_containers(snapshot.kubernetes or {}):
-        if role != "webhook" and image_version(container.get("image")) is not None:
-            versions.add(image_version(container.get("image")))
-    return {int(version.split(".")[0]) for version in versions if _VERSION.fullmatch(version)}
+    majors = {int(version.split(".")[0]) for version in versions_stated(snapshot) if _VERSION.fullmatch(version)}
+    for _deployment, container, _role in n8n_containers(snapshot.kubernetes or {}):
+        match = _TAG_MAJOR.match(image_tag(container.get("image")) or "")
+        if match:
+            majors.add(int(match.group(1)))
+    return majors
 
 
 def versions_stated(snapshot: Snapshot) -> set:
