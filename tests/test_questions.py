@@ -429,7 +429,9 @@ class SheetTest(unittest.TestCase):
         self.assertIn("(`hosting.model`)", before)
 
 
-SOURCES = ["--url", "https://n8n.example.com", "--env-file", "n8n.env"]
+# --debug-info is required with --save-profile since 0.7.0. collect() is replaced in these tests, so the text is not read:
+# the snapshot, and with it the profile, is the one each test gives.
+SOURCES = ["--url", "https://n8n.example.com", "--env-file", "n8n.env", "--debug-info", "debug.txt"]
 COLLECTED = Snapshot(health={"healthz": True, "readiness": True, "metrics_disabled": True}, env={"EXECUTIONS_MODE": "queue"})
 
 
@@ -446,7 +448,7 @@ class CliTest(unittest.TestCase):
         collect = {"return_value": snapshot} if snapshot else {"side_effect": AssertionError("must not collect")}
         with mock.patch("n8n_healthcheck.rules.ALL_RULES", list(rules)):
             with mock.patch("n8n_healthcheck.collectors.collect", **collect):
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch("n8n_healthcheck.cli.read_debug_info", return_value={}):
                     try:
                         code = cli.main(argv)
                     except SystemExit as exit_:  # a usage error
@@ -492,7 +494,7 @@ class CliTest(unittest.TestCase):
 
     def test_an_answer_for_a_measured_fact_is_dropped_with_one_line(self):
         snapshot = Snapshot(kubernetes=base.kube(("m", 1, base.container())))
-        argv = ["--kube-namespace", "n8n", "--save-profile", self.path, "--answer", "orchestrator=ecs", "--answer", "hosting.model=hybrid"]
+        argv = ["--kube-namespace", "n8n", "--debug-info", "debug.txt", "--save-profile", self.path, "--answer", "orchestrator=ecs", "--answer", "hosting.model=hybrid"]
         plain_code = self.run_cli(argv[:2], snapshot, [base.warning_rule])[0]
         code, _, err = self.run_cli(argv, snapshot, [base.warning_rule])
         self.assertEqual(code, plain_code)  # not an error

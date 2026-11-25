@@ -967,6 +967,11 @@ class RunTest(Base):
         self.key_file = self.path("key.txt")
         with open(self.key_file, "w", encoding="utf-8") as handle:
             handle.write(KEY + "\n")
+        # Since 0.7.0 --save-profile needs --debug-info: the runs that save a profile give this one,
+        # without the two insecure settings, so that these runs still end with no warning (exit code 0).
+        self.debug_file = self.path("debug.txt")
+        with open(self.debug_file, "w", encoding="utf-8") as handle:
+            handle.write(pasted.FULL.replace(pasted.SECURITY, ""))
 
     def path(self, name):
         return os.path.join(self.dir, name)
@@ -987,7 +992,7 @@ class RunTest(Base):
 
     def test_the_flag_reads_the_key_from_a_file_and_the_report_has_the_section(self):
         fake = self.leaky(insights=(200, summary(27, 5)))
-        code, out, err = self.run_cli(["--url", fake.url, "--api-key-file", self.key_file, "--save-snapshot", self.path("s.json"), "--save-profile", self.path("p.json")])
+        code, out, err = self.run_cli(["--url", fake.url, "--api-key-file", self.key_file, "--save-snapshot", self.path("s.json"), "--debug-info", self.debug_file, "--save-profile", self.path("p.json")])
         self.assertEqual((code, err), (0, ""))
         self.assertIn("## Usage\n", out)
         self.assertIn("- **Executions per day:** 3.86\n", out)
@@ -1081,7 +1086,7 @@ class RunTest(Base):
     def test_a_collector_that_breaks_never_shows_the_key(self):
         fake = self.fake()
         with mock.patch.object(api, "_executions", side_effect=RuntimeError(f"boom {KEY}")):
-            code, out, err = self.run_cli(["--url", fake.url, "--api-key-file", self.key_file, "--save-profile", self.path("p.json")])
+            code, out, err = self.run_cli(["--url", fake.url, "--api-key-file", self.key_file, "--debug-info", self.debug_file, "--save-profile", self.path("p.json")])
         self.assertEqual(code, 0)
         self.assertIn("api_key: not collected (boom <redacted>)", err)
         self.assertNotIn(MARK, err + out)
@@ -1107,7 +1112,7 @@ class RunTest(Base):
         for config in variants:
             with self.subTest(config=config):
                 fake = self.leaky(**config)
-                argv = ["--url", fake.url, "--api-key-file", self.key_file, "--save-snapshot", self.path("s.json"), "--save-profile", self.path("p.json"), "-o", self.path("r.md")]
+                argv = ["--url", fake.url, "--api-key-file", self.key_file, "--save-snapshot", self.path("s.json"), "--debug-info", self.debug_file, "--save-profile", self.path("p.json"), "-o", self.path("r.md")]
                 code, out, err = self.run_cli(argv)
                 self.assertEqual(code, 0)
                 self.assertGreater(len(fake.api_paths()), 0)
