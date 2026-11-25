@@ -367,6 +367,12 @@ class PageSourceTest(unittest.TestCase):
         self.assertIn('id="view-report"', between_ids("step-4", "step-5"))
         self.assertIn('id="share-form"', between_ids("step-5", "step-6"))
         self.assertIn('id="profile-download"', between_ids("step-6", "view-profile"))
+        # Step 3: one line under each of the five sources for what waits for it; the key adds numbers and no check.
+        self.assertEqual(re.findall(r'<p class="source__gain" id="gain-(\w+)"></p>', between_ids("step-3", "step-4")), ["url", "env", "postgres", "redis", "kubernetes"])
+        self.assertIn("Adds four usage numbers and no check:", between_ids("step-3", "step-4"))
+        # Step 4 says where the report stays; step 2 says what happens to the ids of the text.
+        self.assertIn("The report stays with you.</strong> It quotes raw values of your instance as evidence, unlike the file you share", between_ids("step-4", "step-5"))
+        self.assertIn("The instance ids, the host ids and the browser's user agent in the text were read and discarded", between_ids("step-2", "step-3"))
         # "Open a profile" is a secondary entry of the first screen.
         self.assertIn('id="open-block"', between_ids("step-1", "step-2"))
 
