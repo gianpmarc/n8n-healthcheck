@@ -7,13 +7,14 @@ from ..models import Finding, Outcome, Snapshot, Variant
 from ._helpers import (
     NOT_STATED,
     PASSED,
+    SOURCES_DISAGREE,
     UNREADABLE,
     effective_env,
     env_flag,
     flag_is,
     is_queue_mode,
     looks_like_production,
-    n8n_major,
+    majors_read,
     no_environment,
     rule,
     shown,
@@ -80,14 +81,17 @@ RUNNERS_NOT_EXTERNAL = Variant(
 )
 
 
-def _external_verified(env: dict, major) -> Outcome:
+def _external_verified(env: dict, majors: set) -> Outcome:
     """The outcome for one process whose runner mode raised no finding.
 
     External mode says where the runners are, not that they are on. The rule's own remedy
     says that n8n 1.x also needs N8N_RUNNERS_ENABLED=true, so a variable that is not set
-    passes only when the version read (`major`) is 2 or later: with 1.x, or a version
-    that is not known, the rule cannot say. Nobody checked n8n itself for the default on
-    1.x, nor whether n8n 2.x still reads the variable: `false` never passes, on any version.
+    passes only when every version read in the run (`majors`, see majors_read()) is 2 or
+    later: the first source that answers does not decide for the others, and the process
+    judged may be another one than the one that reported its version. With 1.x only, or
+    no version, the rule cannot say; with versions on both sides, the sources disagree.
+    Nobody checked n8n itself for the default on 1.x, nor whether n8n 2.x still reads the
+    variable: `false` never passes, on any version.
     """
     enabled = "N8N_RUNNERS_ENABLED"
     why = undecided(env, "N8N_RUNNERS_MODE") or undecided(env, enabled)
@@ -95,7 +99,9 @@ def _external_verified(env: dict, major) -> Outcome:
         return why
     if enabled in env:
         return PASSED if env_flag(env, enabled) is True else NOT_STATED
-    return PASSED if major is not None and major >= 2 else NOT_STATED
+    if not majors or max(majors) < 2:
+        return NOT_STATED
+    return PASSED if min(majors) >= 2 else SOURCES_DISAGREE
 
 
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/set-up-task-runners
@@ -106,7 +112,7 @@ def _external_verified(env: dict, major) -> Outcome:
     passed=(
         "N8N_RUNNERS_MODE is external on every process that was read and runs Code nodes, and "
         "N8N_RUNNERS_ENABLED is not set to false there: it is set to true, or it is not set and "
-        "the n8n version read is 2.x or later."
+        "every n8n version read is 2.x or later."
     ),
     variants=(RUNNERS_NOT_EXTERNAL,),
     facts=("executions.mode", "n8n.version"),
@@ -139,11 +145,11 @@ def task_runners_not_external(snapshot: Snapshot) -> Finding | Outcome:
     ]
     if not internal:
         # External is not the default: it passes only where it was read, on every process judged.
-        major = n8n_major(snapshot)
-        outcomes = [_external_verified(each, major) for each in judged] + ([main_unknown] if main_unknown else [])
+        majors = majors_read(snapshot)
+        outcomes = [_external_verified(each, majors) for each in judged] + ([main_unknown] if main_unknown else [])
         if not judged:
             return main_unknown or NOT_STATED  # no worker was found, and main does not run Code nodes
-        for outcome in (UNREADABLE, NOT_STATED):
+        for outcome in (UNREADABLE, NOT_STATED, SOURCES_DISAGREE):
             if outcome in outcomes:
                 return outcome
         return undecided(env, "EXECUTIONS_MODE") or PASSED

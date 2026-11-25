@@ -342,6 +342,25 @@ sources set the variable; these close it.
 
 Findings, scores and the health report are unchanged by these too.
 
+### After the third review
+
+Decided by the owner on 2026-11-25.
+
+- **The execution mode and the database type are one for the instance.** They are
+  compared between the env file and every n8n container, whatever its role, and between
+  the containers of Kubernetes themselves when no env file was given. A worker or a
+  webhook processor that does not set the mode says nothing about it. REL-001 keeps its
+  sentence about "every process" and reads `DB_TYPE` on every container before saying it.
+- **SEC-002 passes on the version only when every version read is 2.x or later**:
+  `/metrics`, the debug information and the instances it lists, and the image tag of each
+  main and worker container. Versions on both sides of 2.0 are `sources_disagree`.
+- **SCAL-004 is compared with the limit the debug information states** when the limit of
+  the env file is all that was read for the workers.
+- **The oracle of the property test** defines the comparison of the mode and of the
+  database type by itself, and holds the two points above.
+
+Findings, scores and the health report are unchanged by these as well.
+
 ## Left to the builder
 
 - How rules state their outcome, and the internal names.

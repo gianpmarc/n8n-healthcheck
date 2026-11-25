@@ -382,7 +382,9 @@ CASES = {
         ("external, runners enabled in a Secret", Snapshot(kubernetes=main({"N8N_RUNNERS_MODE": "external", "N8N_RUNNERS_ENABLED": SECRET})), UNREADABLE),
         ("external in an env file, internal on a worker of Kubernetes", Snapshot(env={**QUEUE, "N8N_RUNNERS_MODE": "external"}, kubernetes=with_workers(QUEUE, {"N8N_RUNNERS_MODE": "internal"})), DISAGREE),
         ("external on main, internal on a worker", Snapshot(kubernetes=with_workers({**QUEUE, "N8N_RUNNERS_MODE": "external"}, {})), FINDING),
-        ("external on main and on every worker", Snapshot(kubernetes=with_workers({**QUEUE, "N8N_RUNNERS_MODE": "external"}, {"N8N_RUNNERS_MODE": "external"})), READ),
+        ("external on main and on every worker", Snapshot(kubernetes=with_workers({**QUEUE, "N8N_RUNNERS_MODE": "external"}, {**QUEUE, "N8N_RUNNERS_MODE": "external"})), READ),
+        # The database is one for the instance: a worker that leaves DB_TYPE to its default is on SQLite.
+        ("external on main and on every worker, a worker on another database", Snapshot(kubernetes=with_workers({**QUEUE, "N8N_RUNNERS_MODE": "external"}, {"N8N_RUNNERS_MODE": "external"})), DISAGREE),
         ("in a Secret", Snapshot(kubernetes=main({"N8N_RUNNERS_MODE": SECRET})), UNREADABLE),
         ("the mode in a Secret", Snapshot(kubernetes=main({"EXECUTIONS_MODE": SECRET, "N8N_RUNNERS_MODE": "external"})), UNREADABLE),
         ("offloading in a Secret, workers external", Snapshot(kubernetes=with_workers({**QUEUE, "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": SECRET}, {"N8N_RUNNERS_MODE": "external"})), UNREADABLE),
@@ -560,7 +562,7 @@ class ReviewTest(unittest.TestCase):
         self.assertIn("is not checked", said["PERF-003"])
         # SEC-002 passes on the two variables it read, on the processes it read.
         self.assertIn("N8N_RUNNERS_ENABLED is not set to false", said["SEC-002"])
-        self.assertIn("it is not set and the n8n version read is 2.x or later", said["SEC-002"])
+        self.assertIn("it is not set and every n8n version read is 2.x or later", said["SEC-002"])
         self.assertNotIn("enabled", said["SEC-002"].replace("N8N_RUNNERS_ENABLED", ""))
         self.assertIn("that was read", said["SEC-002"])
         for rule_id, stronger in (
@@ -624,7 +626,17 @@ class ReviewTest(unittest.TestCase):
             # The execution mode is always read on main as well.
             (Snapshot(env={}, kubernetes=main(dict(QUEUE))), ("EXECUTIONS_MODE",), ("instance", "worker"), DIFFER),
             (Snapshot(env={}, kubernetes=main({limit: "2"})), (limit,), ("instance", "worker"), None),
-            # Two containers are two processes, not two sources.
+            # The mode and the database are one for the instance: every container, whatever the roles the rule judges.
+            (Snapshot(env={}, kubernetes=with_workers({}, dict(QUEUE))), ("EXECUTIONS_MODE",), ("instance", "main"), DIFFER),
+            (Snapshot(env=dict(QUEUE), kubernetes=with_workers(QUEUE, {"EXECUTIONS_MODE": "queue"})), ("DB_TYPE",), ("instance", "main"), DIFFER),  # the worker is on SQLite by default
+            (Snapshot(env=dict(QUEUE), kubernetes=with_workers(QUEUE, {"DB_TYPE": "postgresdb"})), ("EXECUTIONS_MODE", "DB_TYPE"), ("instance", "main"), None),  # a worker that does not set the mode says nothing about it
+            (Snapshot(env=dict(QUEUE), kubernetes=with_workers(QUEUE, {"EXECUTIONS_MODE": SECRET})), ("EXECUTIONS_MODE",), ("instance", "main"), UNTOLD),
+            # ... and between the containers of Kubernetes themselves, without an env file.
+            (Snapshot(kubernetes=with_workers({}, {"EXECUTIONS_MODE": "queue"})), ("EXECUTIONS_MODE",), ("instance", "main"), DIFFER),
+            (Snapshot(kubernetes=with_workers(QUEUE, {"EXECUTIONS_MODE": "queue"})), ("DB_TYPE",), ("instance", "main"), DIFFER),
+            (Snapshot(kubernetes=with_workers(QUEUE, {"DB_TYPE": "postgresdb"})), ("EXECUTIONS_MODE", "DB_TYPE"), ("instance", "main"), None),
+            (Snapshot(kubernetes=with_workers(QUEUE, {"EXECUTIONS_MODE": SECRET, "DB_TYPE": SECRET})), ("EXECUTIONS_MODE", "DB_TYPE"), ("instance", "main"), None),  # no file that says how every process is set
+            # For any other variable two containers are two processes, not two sources.
             (Snapshot(kubernetes=with_workers({limit: "10"}, {limit: "2"})), (limit,), both, None),
             (Snapshot(kubernetes=main({}, env_complete=False)), (limit,), both, None),
             # The text states effective values of the main process.
@@ -650,6 +662,50 @@ class ReviewTest(unittest.TestCase):
         for number, (snapshot, names, scopes, expected) in enumerate(cases):
             with self.subTest(case=number):
                 self.assertIs(against_sources(snapshot, names, scopes), expected)
+
+    def test_the_third_review(self):
+        limit = "N8N_CONCURRENCY_PRODUCTION_LIMIT"
+        external = {"N8N_RUNNERS_MODE": "external"}
+        worker = lambda env, replicas=1, **more: ("worker", replicas, container(command=["n8n", "worker"], env=env, **more))
+        on = lambda env, **more: ("main", 1, container(env=env, **more))
+        regular_file = lambda *others: Snapshot(env=dict(REGULAR), kubernetes=kube(on(dict(REGULAR)), *others))
+        queue_rules = ("SCAL-003", "REL-001", "REL-002", "REL-003", "REL-004", "REL-006")
+        cases = [
+            # 1. SEC-002 leans on the version: every version read, not the first that answers.
+            ("the only container on 1.x, /metrics on 2.x", Snapshot(kubernetes=kube(on(external, image="n8nio/n8n:1.80.0")), n8n_version="2.1.0"), {"SEC-002": DISAGREE}),
+            ("/metrics on 2.x, the text on 1.x", TEXT(("n8nVersion: 3.3.0", "n8nVersion: 1.80.0"), env={**QUEUE, **external}, n8n_version="2.1.0"), {"SEC-002": DISAGREE}),
+            ("main on 2.x, the workers on 1.x", Snapshot(kubernetes=kube(on({**QUEUE, **external}, image="n8nio/n8n:2.1.0"), worker({**QUEUE, **external}, 2, image="n8nio/n8n:1.80.0"))), {"SEC-002": DISAGREE}),
+            ("the text on 3.x, an instance it lists on 1.x", text_listing("3.3.0", "1.80.0", env={**QUEUE, **external}), {"SEC-002": DISAGREE}),
+            ("every version read on 1.x", Snapshot(kubernetes=kube(on(external, image="n8nio/n8n:1.80.0")), n8n_version="1.79.2"), {"SEC-002": NOT_STATED}),
+            ("every version read on 2.x or later", Snapshot(kubernetes=kube(on(external, image="n8nio/n8n:v2.1.0-exp.0")), n8n_version="3.0.1"), {"SEC-002": READ}),
+            ("an image that names no version, /metrics on 2.x", Snapshot(kubernetes=kube(on(external, image="n8nio/n8n:latest")), n8n_version="2.1.0"), {"SEC-002": READ}),
+            ("the only container on 1.x, runners enabled", Snapshot(kubernetes=kube(on({**external, "N8N_RUNNERS_ENABLED": "true"}, image="n8nio/n8n:1.80.0")), n8n_version="2.1.0"), {"SEC-002": READ}),
+            # 2. The mode and the database are one for the instance: the env file against every container.
+            ("a worker in queue mode, the env file in regular mode", regular_file(worker(dict(QUEUE))), dict.fromkeys(("SCAL-001", *queue_rules), DISAGREE)),
+            ("a webhook processor in queue mode, the env file in regular mode", regular_file(("webhook", 1, container(command=["n8n", "webhook"], env={"EXECUTIONS_MODE": "queue"}))),
+             dict.fromkeys(("SCAL-001", "SCAL-002", "SCAL-004", "PERF-002", *queue_rules), DISAGREE)),
+            ("workers on SQLite, the env file and main on Postgres", Snapshot(env=dict(QUEUE), kubernetes=kube(on(dict(QUEUE)), worker({"EXECUTIONS_MODE": "queue", "DB_TYPE": "sqlite"}, 2))), {"REL-001": DISAGREE}),
+            ("a worker whose mode is in a Secret, next to an env file", regular_file(worker({"EXECUTIONS_MODE": SECRET})), {"SCAL-003": UNREADABLE, "REL-002": UNREADABLE}),
+            ("a worker that does not set the mode says nothing about it", Snapshot(env=dict(QUEUE), kubernetes=kube(on(dict(QUEUE)), worker(dict(PRODUCTION), 2))), {"REL-001": READ, "SCAL-002": READ}),
+            # 3. SCAL-004 on the limit of the env file alone, against the limit of the text.
+            ("a limit of 10 in the env file, of 3 in the text", TEXT(("concurrency: -1", "concurrency: 3"), env={**QUEUE, limit: "10"}), {"SCAL-004": DISAGREE}),
+            ("a limit of 10 in the env file and in the text", TEXT(("concurrency: -1", "concurrency: 10"), env={**QUEUE, limit: "10"}), {"SCAL-004": READ}),
+            ("a limit of 10 in the env file and on the workers, of 3 in the text", TEXT(("concurrency: -1", "concurrency: 3"), env={**QUEUE, limit: "10"}, kubernetes=kube(worker({**QUEUE, limit: "10"}))), {"SCAL-004": READ}),
+            # 4. The same within Kubernetes alone.
+            ("main in regular mode, workers in queue mode", Snapshot(kubernetes=kube(on({}), worker({"EXECUTIONS_MODE": "queue"}, 2))),
+             dict.fromkeys(("SCAL-002", "SCAL-003", "REL-001", "REL-002", "REL-006", "PERF-002"), DISAGREE)),
+            ("main on Postgres, workers on SQLite", Snapshot(kubernetes=kube(on(dict(QUEUE)), worker({"EXECUTIONS_MODE": "queue", "DB_TYPE": "sqlite"}, 2))), {"REL-001": DISAGREE}),
+            ("main and workers in queue mode on Postgres", Snapshot(kubernetes=kube(on(dict(QUEUE)), worker(dict(QUEUE), 2))), {"REL-001": READ, "SCAL-002": READ}),
+            # A finding of 0.5.0 stays, whatever another container says.
+            ("one worker replica in queue mode, main in regular mode", Snapshot(kubernetes=kube(on({}), worker({"EXECUTIONS_MODE": "queue"}))), {"SCAL-002": FINDING}),
+            ("queue mode on SQLite on main, workers on Postgres", Snapshot(kubernetes=kube(on({"EXECUTIONS_MODE": "queue"}), worker(dict(QUEUE)))), {"REL-001": FINDING}),
+        ]
+        for label, snapshot, expected in cases:
+            for rule_id, outcome in expected.items():
+                with self.subTest(case=label, rule=rule_id):
+                    (check,) = engine.assess(snapshot, [RULES[rule_id]])
+                    self.assertEqual(stated(check), outcome)
+                    self.assertEqual(RULES[rule_id](snapshot) is not None, outcome == FINDING)
 
     def test_what_makes_a_rule_not_apply_is_carried_to_the_profile(self):
         by_mode = lambda snapshot, rule_id: engine.assess(snapshot, [RULES[rule_id]])[0].by_mode

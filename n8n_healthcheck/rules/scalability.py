@@ -16,6 +16,7 @@ from ._helpers import (
     command_words,
     concurrency_flag,
     container_env,
+    debug_info_env,
     effective_env,
     env_flag,
     env_int,
@@ -333,13 +334,12 @@ def low_worker_concurrency(snapshot: Snapshot) -> Finding | Outcome:
             if low is not None:
                 observed.append(low)
     if not observed:
-        # The env file gives every worker a limit, and a worker container of Kubernetes,
-        # which is not read then, is set below the minimum by itself.
-        if limit is not None and limit >= 1 and any(
-            _low_concurrency(deployment, container, container_env(deployment, container))
-            for deployment, container, role in n8n_containers(snapshot.kubernetes or {})
-            if role == "worker"
-        ):
+        # The limit of the env file is all that was read for the workers (Kubernetes
+        # shows none, whose own limit the file would be compared with), and the debug
+        # information states another limit for the same variable.
+        text_limit = debug_info_env(debug_info.of(snapshot) or {}).get(CONCURRENCY_LIMIT)
+        workers = [role for _, _, role in n8n_containers(snapshot.kubernetes or {}) if role == "worker"]
+        if limit is not None and limit >= 1 and not workers and text_limit is not None and not _same(limit, text_limit):
             return SOURCES_DISAGREE
         if env is not None:
             # The file describes every process: its mode and its limit come first.

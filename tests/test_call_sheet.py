@@ -104,7 +104,12 @@ class ChecksTest(unittest.TestCase):
             {
                 "rule_id": "REL-001", "area": "reliability", "outcome": "passed", "basis": "read",
                 "text": "Queue mode runs on a database that every process can share, not on SQLite.",
-                "rests_on": ["executions.mode", "database.engine", "setting:instance:EXECUTIONS_MODE", "setting:main:EXECUTIONS_MODE", "setting:instance:DB_TYPE", "setting:main:DB_TYPE"],
+                # The mode and the database are one for the instance: every container was compared.
+                "rests_on": [
+                    "executions.mode", "database.engine",
+                    "setting:instance:EXECUTIONS_MODE", "setting:main:EXECUTIONS_MODE", "setting:worker:EXECUTIONS_MODE", "setting:webhook:EXECUTIONS_MODE",
+                    "setting:instance:DB_TYPE", "setting:main:DB_TYPE", "setting:worker:DB_TYPE", "setting:webhook:DB_TYPE",
+                ],
             },
         )  # fmt: skip
         self.assertEqual(got["PERF-001"]["basis"], "default")
@@ -113,8 +118,10 @@ class ChecksTest(unittest.TestCase):
             {"rule_id": "SCAL-001", "area": "scalability", "outcome": "not_applicable",
              # What made it not apply: the mode, and what the rule read on the way.
              "rests_on": [
-                 "executions.mode", "database.engine", "setting:instance:EXECUTIONS_MODE", "setting:main:EXECUTIONS_MODE", "setting:instance:DB_TYPE",
-                 "setting:main:DB_TYPE", "setting:instance:N8N_CONCURRENCY_PRODUCTION_LIMIT", "setting:main:N8N_CONCURRENCY_PRODUCTION_LIMIT",
+                 "executions.mode", "database.engine",
+                 "setting:instance:EXECUTIONS_MODE", "setting:main:EXECUTIONS_MODE", "setting:worker:EXECUTIONS_MODE", "setting:webhook:EXECUTIONS_MODE",
+                 "setting:instance:DB_TYPE", "setting:main:DB_TYPE", "setting:worker:DB_TYPE", "setting:webhook:DB_TYPE",
+                 "setting:instance:N8N_CONCURRENCY_PRODUCTION_LIMIT", "setting:main:N8N_CONCURRENCY_PRODUCTION_LIMIT",
              ],
              "text": "Limit on concurrent production executions in regular mode"},
         )  # fmt: skip
@@ -193,7 +200,7 @@ class ChecksTest(unittest.TestCase):
         in_kubernetes = Snapshot(
             kubernetes=kube(
                 ("main", 1, container(env={**QUEUE, "N8N_RUNNERS_MODE": "external"})),
-                ("worker", 2, container(command=["worker"], env={"N8N_RUNNERS_MODE": "external"})),
+                ("worker", 2, container(command=["worker"], env={**QUEUE, "N8N_RUNNERS_MODE": "external"})),
             )
         )
         got = entries(built(in_kubernetes))
@@ -201,7 +208,10 @@ class ChecksTest(unittest.TestCase):
         self.assertEqual(
             got["SEC-002"]["rests_on"],
             # The version: external passes without N8N_RUNNERS_ENABLED only on n8n 2.x or later. DB_TYPE: the severity of the finding.
-            ["executions.mode", "n8n.version", "setting:main:N8N_RUNNERS_MODE", "setting:worker:N8N_RUNNERS_MODE", "setting:main:EXECUTIONS_MODE", "setting:main:DB_TYPE"],
+            [
+                "executions.mode", "n8n.version", "setting:main:N8N_RUNNERS_MODE", "setting:worker:N8N_RUNNERS_MODE",
+                "setting:main:EXECUTIONS_MODE", "setting:worker:EXECUTIONS_MODE", "setting:main:DB_TYPE", "setting:worker:DB_TYPE",
+            ],  # fmt: skip
         )
         # A rule that judges the webhook containers too names no fact about main and worker only.
         self.assertEqual((got["REL-007"]["outcome"], got["REL-007"]["rests_on"]), ("passed", []))
@@ -236,6 +246,10 @@ class ChecksTest(unittest.TestCase):
         # Without an env file nothing changes: the roles the rule judges, and main for the mode.
         alone = entries(built(Snapshot(kubernetes=kube(("main", 1, container(env=dict(QUEUE))), ("worker", 2, container(command=["worker"], env={limit: "10"})))), failed=()))
         self.assertEqual(alone["SCAL-004"]["rests_on"], ["worker.concurrency", "executions.mode", "setting:main:EXECUTIONS_MODE", f"setting:worker:{limit}"])
+        # A webhook processor that states the mode is named by the checks that read the mode, whatever role they judge.
+        beside = Snapshot(env={"EXECUTIONS_MODE": "regular"}, kubernetes=kube(("webhook", 1, container(command=["n8n", "webhook"], env={"EXECUTIONS_MODE": "queue"}))))
+        named = profile.rested_on_withheld(built(beside, failed=(), withhold=("setting:webhook:EXECUTIONS_MODE",)))["setting:webhook:EXECUTIONS_MODE"]
+        self.assertLessEqual({"SCAL-001", "SCAL-003", "REL-001", "REL-002", "REL-006", "PERF-002"}, set(named))
 
     def test_a_check_that_lacks_a_source_names_what_it_read_on_the_way(self):
         # Redis was not given: on an instance in regular mode the check would not apply, so the entry says the mode is not regular.

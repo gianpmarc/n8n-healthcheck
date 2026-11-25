@@ -222,21 +222,36 @@ def told(env: dict, name: str, complete: bool = True) -> Optional[str]:
     return DEFAULTS.get(name, NOT_SET)
 
 
+# The variables that are one for the instance: every process is in the same execution
+# mode and on the same database, whatever its role. They are compared across every n8n
+# container, also for a rule that judges one role only.
+INSTANCE_WIDE = ("EXECUTIONS_MODE", "DB_TYPE")
+ROLES = ("main", "worker", "webhook")
+
+
 def compared_scopes(name: str, scopes: tuple) -> tuple:
-    """The scopes where a rule's variable is read: its own, and for the execution mode always main."""
-    return scopes + (("main",) if name == "EXECUTIONS_MODE" and "main" not in scopes else ())
+    """The scopes where a rule's variable is read: its own, and every role for a variable that is one for the instance."""
+    if name not in INSTANCE_WIDE:
+        return scopes
+    return scopes + tuple(role for role in ROLES if role not in scopes)
 
 
 def against_sources(snapshot: Snapshot, names: tuple, scopes: tuple) -> Optional[Outcome]:
     """Why a rule cannot pass, or not apply, on `names` given every source of the run; None when it can.
 
-    Two comparisons, each between sources that describe the same process, on what each
-    states (see told()): a variable that is not set states its n8n default. The env file
-    describes every process: it is compared with each Kubernetes container of the roles
-    in `scopes`. The debug information reports the effective values of the main process:
-    it is compared with the env file and with each main container, for a variable the
-    rule reads on main. Two containers are two
-    processes, not two sources, and are not compared with each other.
+    Three comparisons, each between sources that describe the same thing, on what each
+    states (see told()): a variable that is not set states its n8n default.
+
+    - The env file describes every process: it is compared with each Kubernetes
+      container of the roles in `scopes`, and of every role for a variable that is one
+      for the instance (INSTANCE_WIDE).
+    - Such a variable is also compared between the containers of Kubernetes themselves:
+      a main container in regular mode next to a worker in queue mode is one instance
+      stated in two ways. For any other variable two containers are two processes, each
+      with its own value, and are not compared.
+    - The debug information reports the effective values of the main process: it is
+      compared with the env file and with each main container, for a variable the rule
+      reads on main.
 
     SOURCES_DISAGREE when two of them state different things. UNREADABLE when none does
     and a container next to an env file cannot be told for a variable: the file says how
@@ -250,36 +265,47 @@ def against_sources(snapshot: Snapshot, names: tuple, scopes: tuple) -> Optional
     untold = False
     for name in names:
         roles = compared_scopes(name, scopes)
+        stated_there = [
+            (told(env, name, complete), role)
+            for env, complete, role in containers
+            # A worker or a webhook processor runs in queue mode only, by its start command:
+            # what the variable gives there when it is not set is n8n's business, and is
+            # not taken as "regular". Only a mode that is set on them is a statement.
+            if role in roles and not (name == "EXECUTIONS_MODE" and role != "main" and name not in env and name + "_FILE" not in env)
+        ]
         file_says = told(snapshot.env, name) if snapshot.env is not None else None
         if file_says is not None:
-            for env, complete, role in containers:
-                if role not in roles:
-                    continue
-                says = told(env, name, complete)
-                if says is None:
-                    untold = True
-                elif not _same(says, file_says):
-                    return SOURCES_DISAGREE
+            if any(says is not None and not _same(says, file_says) for says, _role in stated_there):
+                return SOURCES_DISAGREE
+            untold = untold or any(says is None for says, _role in stated_there)
+        if name in INSTANCE_WIDE:
+            known = [says for says, _role in stated_there if says is not None]
+            if any(not _same(says, known[0]) for says in known):
+                return SOURCES_DISAGREE
         # The text describes the main process: it says nothing to a rule that reads the
         # variable on the workers only.
         if name not in text or "main" not in roles:
             continue
-        mains = [(env, complete) for env, complete, role in containers if role == "main"]
-        for env, complete in ([(snapshot.env, True)] if snapshot.env is not None else []) + mains:
-            says = told(env, name, complete)
+        mains = [says for says, role in stated_there if role == "main"]
+        for says in ([told(snapshot.env, name)] if snapshot.env is not None else []) + mains:
             # Not set and without a default: the effective value the text reports cannot contradict it.
             if says not in (None, NOT_SET) and not _same(says, text[name]):
                 return SOURCES_DISAGREE
     return UNREADABLE if untold else None
 
 
-def n8n_major(snapshot: Snapshot) -> Optional[int]:
-    """The major version of n8n, read as the fact `n8n.version` of the profile reads it; None when it is not known."""
-    from .. import profile  # here, not at the top: profile imports this module
+def majors_read(snapshot: Snapshot) -> set:
+    """The major version of every n8n version read in the run.
 
-    value = dict(profile.CATALOGUE)["n8n.version"](snapshot, ())["value"]
-    match = re.match(r"\d+", value) if isinstance(value, str) else None
-    return int(match.group()) if match else None
+    From /metrics, from the debug information and the instances it lists, and from the
+    image tag of each main and worker container in Kubernetes. A tag or a text that
+    names no version (latest, a digest, a word) is not a version read.
+    """
+    versions = set(versions_stated(snapshot))
+    for _deployment, container, role in n8n_containers(snapshot.kubernetes or {}):
+        if role != "webhook" and image_version(container.get("image")) is not None:
+            versions.add(image_version(container.get("image")))
+    return {int(version.split(".")[0]) for version in versions if _VERSION.fullmatch(version)}
 
 
 def versions_stated(snapshot: Snapshot) -> set:

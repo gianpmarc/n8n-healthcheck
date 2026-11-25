@@ -62,7 +62,7 @@ DEFAULT = {
 UNSET = "<unset>"
 IMAGES = ["n8nio/n8n:1.80.0", "n8nio/n8n:2.1.0", "n8nio/n8n:2.1.0", "n8nio/n8n:latest", "n8nio/n8n@sha256:abc", "registry.example/team/n8n:prod", "redis:7"]
 COMMANDS = [[], [], ["n8n", "worker"], ["n8n", "worker", "--concurrency=3"], ["sh", "-c", "n8n worker --concurrency 12"], ["n8n", "webhook"]]
-VERSIONS = [None, "1.80.0", "2.1.0", "2.1.0"]
+VERSIONS = [None, "1.80.0", "2.1.0", "v2.1.0"]
 
 
 def generate(seed: int = SEED, count: int = COUNT) -> list:
@@ -122,7 +122,7 @@ def generate(seed: int = SEED, count: int = COUNT) -> list:
         }
         return {
             "generated_on": rng.choice([None, "2026-11-01"]),
-            "n8n_version": rng.choice(VERSIONS[1:]),
+            "n8n_version": rng.choice(VERSIONS[1:3]),  # a text keeps a plain x.y.z only (debug_info.checked())
             "node_version": None,
             "platform": None,
             "database": stated("DB_TYPE", word(("sqlite", "postgresdb", "mysqldb")), [None, "sqlite", "postgresdb"]),
@@ -216,17 +216,51 @@ def text_says(section: dict) -> dict:
     return {name: str(value).lower() for name, value in values.items() if value is not None}
 
 
+# Which rules read a variable that is one for the instance. Written by hand from
+# docs/rules.md, not taken from what the rules declare: the oracle must not learn from the
+# code which containers a variable is compared on.
+READS_THE_MODE = {"SCAL-001", "SCAL-002", "SCAL-003", "SCAL-004", "REL-001", "REL-006", "PERF-002", "PERF-003", "MAINT-001", "SEC-002"}
+READS_THE_DATABASE = {"SCAL-001", "REL-001", "SEC-002"}
+
+
+def one_for_the_instance(snapshot: Snapshot, name: str) -> str:
+    """Why `name` is not stated one way by the env file and every n8n container, whatever its role; "" when it is."""
+    stated = [("env file", says(snapshot.env, name))] if snapshot.env is not None else []
+    for role, env, complete, _container, _replicas in containers(snapshot):
+        # A worker or a webhook processor that does not set the mode says nothing about it.
+        if name == "EXECUTIONS_MODE" and role != "main" and name not in env and name + "_FILE" not in env:
+            continue
+        stated.append((f"{role} container", says(env, name, complete)))
+    known = [(who, value) for who, value in stated if value is not None]
+    for who, value in known[1:]:
+        if not same(value, known[0][1]):
+            return f"{name}: {known[0][0]} {known[0][1]!r}, {who} {value!r}"
+    if snapshot.env is not None and says(snapshot.env, name) is not None and len(known) < len(stated):
+        return f"{name}: the env file states it, a container cannot be told"
+    return ""
+
+
+def major(version) -> int:
+    return int(version.lstrip("v").split(".")[0])
+
+
 def against_a_source(snapshot: Snapshot, check) -> str:
     """Why this check may not be `passed` or `not_applicable`: two sources that differ, named; "" when none does."""
     info = check.info
+    for name, readers in (("EXECUTIONS_MODE", READS_THE_MODE), ("DB_TYPE", READS_THE_DATABASE)):
+        if info.rule_id in readers or (name == "EXECUTIONS_MODE" and check.by_mode):
+            why = one_for_the_instance(snapshot, name)
+            if why:
+                return why
     names = set(info.settings) | ({"EXECUTIONS_MODE"} if check.by_mode else set())
     stated_in_text = text_says(snapshot.debug_info) if snapshot.debug_info is not None else {}
     for name in sorted(names):
-        roles = set(info.scopes) | ({"main"} if name == "EXECUTIONS_MODE" else set())
+        one = name in ("EXECUTIONS_MODE", "DB_TYPE")
+        roles = set(info.scopes) | ({"main"} if one else set())
         file = says(snapshot.env, name) if snapshot.env is not None else None
         for role, env, complete, _container, _replicas in containers(snapshot):
             there = says(env, name, complete)
-            if file is not None and role in roles:
+            if file is not None and role in roles and not one:
                 if there is None:
                     return f"{name}: the env file states it, a {role} container cannot be told"
                 if not same(file, there):
@@ -248,6 +282,7 @@ def against_a_source(snapshot: Snapshot, check) -> str:
         tags = [(container["image"].rsplit(":", 1) + [""])[1] for _role, _env, _complete, container, _replicas in containers(snapshot) if "@" not in container["image"]]
         versions = {tag for tag in tags if tag[:1].isdigit()} | set(cluster.get("versions") or [])
         versions |= {version for version in (snapshot.n8n_version, section.get("n8n_version")) if version}
+        versions = {version.lstrip("v") for version in versions}  # v2.1.0 is the release 2.1.0
         if len(versions) > 1:
             return f"versions {sorted(versions)}"
     if info.rule_id == "SCAL-002" and sum(replicas for *_rest, replicas in workers) >= 2:
@@ -264,6 +299,27 @@ def against_a_source(snapshot: Snapshot, check) -> str:
             flag = words[words.index("--concurrency") + 1] if "--concurrency" in words else ""
             if (own or "").isdigit() and 1 <= int(own) < 5 or (own == "-1" and flag.isdigit() and int(flag) < 5):
                 return "the env file gives every worker a limit, a worker is set below 5 by itself"
+        # The limit of the file is all that was read for the workers, and the text states another one.
+        text_limit = {"unlimited": "-1", None: None}.get(section.get("concurrency_limit"), str(section.get("concurrency_limit")))
+        if not workers and says(snapshot.env, "EXECUTIONS_MODE") == "queue" and text_limit is not None and int(says(snapshot.env, "N8N_CONCURRENCY_PRODUCTION_LIMIT")) != int(text_limit):
+            return "the env file gives the workers a limit, the debug information states another one"
+    if info.rule_id == "SEC-002":
+        # A pass that leans on the version: a process judged does not set N8N_RUNNERS_ENABLED to true.
+        everyone = [(role, env) for role, env, *_rest in containers(snapshot) if role != "webhook"]
+        mains = [env for role, env in everyone if role == "main"]
+        offloads = bool(mains) and says(mains[0], "EXECUTIONS_MODE") == "queue" and says(mains[0], "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS") in ("true", "1")
+        if snapshot.env is not None:
+            judged = [snapshot.env]
+        elif mains and says(mains[0], "EXECUTIONS_MODE") == "queue":
+            judged = [env for role, env in everyone if role == "worker" or not offloads]
+        else:
+            judged = mains
+        if any(says(env, "N8N_RUNNERS_ENABLED") not in ("true", "1") for env in judged):
+            tags = [(container["image"].rsplit(":", 1) + [""])[1] for role, _env, _complete, container, _replicas in containers(snapshot) if role != "webhook" and "@" not in container["image"]]
+            read = [tag for tag in tags if tag[:1].isdigit()] + list(cluster.get("versions") or [])
+            read += [version for version in (snapshot.n8n_version, section.get("n8n_version")) if version]
+            if not read or any(major(version) < 2 for version in read):
+                return f"N8N_RUNNERS_ENABLED is not set to true everywhere, and the versions read are {sorted(read)}"
     return ""
 
 
