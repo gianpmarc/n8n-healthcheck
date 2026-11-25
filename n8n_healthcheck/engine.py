@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
-from .models import AREAS, SEVERITIES, Finding, Rule, Snapshot
+from .models import (
+    AREAS,
+    BASES,
+    NOT_ASSESSED_REASONS,
+    OUTCOMES,
+    SEVERITIES,
+    SOURCE_IDS,
+    Check,
+    Finding,
+    Outcome,
+    Rule,
+    Snapshot,
+)
 
 # Points subtracted from an area's score for each finding of that severity.
 PENALTY = {"critical": 40, "warning": 15, "info": 5}
@@ -12,25 +24,41 @@ PENALTY = {"critical": 40, "warning": 15, "info": 5}
 SKIPPED_RULE_ID = "ENGINE-SKIPPED"
 
 
-def run(snapshot: Snapshot, rules: list[Rule]) -> list[Finding]:
-    """Call every rule and return its findings, most severe first.
+def assess(snapshot: Snapshot, rules: list[Rule]) -> list[Check]:
+    """Call every rule and return what each one states, in rule order.
 
-    A rule that raises, or returns something that is not a valid Finding,
-    does not stop the run: it is recorded as an info Finding with rule_id
-    SKIPPED_RULE_ID so the reader knows the check did not happen.
+    A rule that raises, or returns something that is neither a valid Finding nor a valid
+    Outcome, does not stop the run: its Check is `not_assessed` for the reason
+    `rule_error`, and carries an info Finding with rule_id SKIPPED_RULE_ID so the reader
+    of the report knows the check did not happen. A declared rule (rules/_helpers.py,
+    rule()) is asked through its `assess`, and must state an outcome; a bare callable may
+    still return None, which is left out by run().
     """
-    findings = []
+    checks = []
     for rule in rules:
+        info = getattr(rule, "info", None)
         try:
-            finding = rule(snapshot)
-            if finding is not None:
-                if not isinstance(finding, Finding):
-                    raise TypeError(f"returned {type(finding).__name__}, not a Finding")
-                if finding.severity not in SEVERITIES or finding.area not in AREAS:
-                    raise ValueError(f"unknown severity {finding.severity!r} or area {finding.area!r}")
+            result = getattr(rule, "assess", rule)(snapshot)
+            if isinstance(result, Outcome):
+                if (
+                    result.outcome not in OUTCOMES[1:]
+                    or (result.outcome == "passed") != (result.basis in BASES)
+                    or (result.outcome == "not_assessed") != (result.reason in NOT_ASSESSED_REASONS[:-1])
+                    or not all(need in SOURCE_IDS for need in result.needs)
+                ):
+                    raise ValueError("returned an Outcome that is not valid")
+                check = Check(info, result.outcome, None, result.basis, result.reason, tuple(result.needs), result.by_mode)
+            elif result is None and info is None:
+                check = Check(None, "not_applicable")
+            else:
+                if not isinstance(result, Finding):
+                    raise TypeError(f"returned {type(result).__name__}, not a Finding")
+                if result.severity not in SEVERITIES or result.area not in AREAS:
+                    raise ValueError(f"unknown severity {result.severity!r} or area {result.area!r}")
+                check = Check(info, "finding", result)
         except Exception as exc:
             name = getattr(rule, "__name__", repr(rule))
-            finding = Finding(
+            placeholder = Finding(
                 rule_id=SKIPPED_RULE_ID,
                 area="maintainability",
                 severity="info",
@@ -39,10 +67,21 @@ def run(snapshot: Snapshot, rules: list[Rule]) -> list[Finding]:
                 impact="This check was skipped, so the risk it covers was not assessed.",
                 recommendation="Report this as a bug in n8n-healthcheck.",
             )
-        if finding is not None:
-            findings.append(finding)
+            check = Check(info, "not_assessed", placeholder, reason="rule_error")
+        checks.append(check)
+    return checks
+
+
+def findings_of(checks: list[Check]) -> list[Finding]:
+    """The findings of assess(), most severe first, with the placeholder of each rule that raised."""
+    findings = [check.finding for check in checks if check.finding is not None]
     # sorted() is stable: within a severity, findings keep rule order.
     return sorted(findings, key=lambda f: SEVERITIES.index(f.severity))
+
+
+def run(snapshot: Snapshot, rules: list[Rule]) -> list[Finding]:
+    """Call every rule and return its findings, most severe first: findings_of(assess())."""
+    return findings_of(assess(snapshot, rules))
 
 
 def score(findings: list[Finding]) -> dict[str, int]:

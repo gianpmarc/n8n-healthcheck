@@ -68,12 +68,20 @@ PROFILE_FLAGS = ("save_profile", "reason", "reference", "withhold", "show_profil
 QUESTION_FLAGS = ("answer", "list_questions", "show_questions")
 # The flag added with the usage numbers gives way to all of them: `--a` stays --answer.
 API_FLAGS = ("api_key_file",)
+# The flag added with the call sheet gives way to all of them: `--show` stays ambiguous
+# between the two it was ambiguous between, and `--show-p` stays --show-profile.
+SHEET_FLAGS = ("show_sheet",)
 
 
 class _Parser(argparse.ArgumentParser):
     def _get_option_tuples(self, option_string):
         matches = super()._get_option_tuples(option_string)
-        for newer in (API_FLAGS, API_FLAGS + QUESTION_FLAGS, API_FLAGS + QUESTION_FLAGS + PROFILE_FLAGS):
+        for newer in (
+            SHEET_FLAGS,
+            SHEET_FLAGS + API_FLAGS,
+            SHEET_FLAGS + API_FLAGS + QUESTION_FLAGS,
+            SHEET_FLAGS + API_FLAGS + QUESTION_FLAGS + PROFILE_FLAGS,
+        ):
             older = [match for match in matches if match[0].dest not in newer]
             if len(matches) > 1 and len(older) == 1:
                 return older
@@ -96,8 +104,8 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         "(usage error, unreadable or unwritable file, a text that is not a debug information, "
         "a file that does not hold one API key, "
         "no requested source reachable, "
-        "every rule failed to run). --show-profile and --show-questions exit 0, or 3 when the file "
-        "is not a usable profile.",
+        "every rule failed to run). --show-profile, --show-questions and --show-sheet exit 0, or 3 "
+        "when the file is not a usable profile.",
     )
     parser.add_argument("--url", help="n8n base URL (health endpoints and /metrics)")
     parser.add_argument("--env-file", help="KEY=VALUE file with the n8n environment")
@@ -123,8 +131,8 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         "environment profile",
         "One JSON file of facts about the environment, to review and share. "
         "It never holds a secret, host, URL, IP address, path or name. Withholding a fact "
-        "does not remove the setting it was read from or a finding that mentions it: "
-        "withhold those too.",
+        "does not remove the setting it was read from or a check that rests on it: "
+        "withhold those too (the tool names such checks when it saves the file).",
     )
     group.add_argument("--save-profile", metavar="FILE", help="write the environment profile as JSON")
     group.add_argument("--reason", choices=profile.REASONS, help="why the profile was taken (default: baseline)")
@@ -134,9 +142,16 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         action="append",
         default=[],
         metavar="ID",
-        help="leave this entry out of the profile: a fact id, setting:<scope>:<NAME> or check (repeatable)",
+        help="leave this entry out of the profile: a fact id, setting:<scope>:<NAME>, "
+        "check:<RULE_ID> for one check, or check for the whole outcome (repeatable)",
     )
     group.add_argument("--show-profile", metavar="FILE", help="print a saved profile as Markdown, then exit")
+    group.add_argument(
+        "--show-sheet",
+        metavar="FILE",
+        help="print the call sheet of a saved profile as Markdown, then exit: what works well, "
+        "what does not, what to improve and what was not assessed",
+    )
     group = parser.add_argument_group(
         "profile questions",
         "Closed questions no probe can answer. Every one is optional. An answer is written "
@@ -154,7 +169,7 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         "--show-questions", metavar="FILE", help="print what a saved profile leaves open, as Markdown, then exit"
     )
     args = parser.parse_args(argv)
-    for flag in ("show_profile", "show_questions"):
+    for flag in ("show_profile", "show_questions", "show_sheet"):
         if getattr(args, flag) is not None:
             if [name for name, value in vars(args).items() if name not in (flag, "output") and value]:
                 parser.error(f"--{flag.replace('_', '-')} takes no other flag except -o")
@@ -180,7 +195,8 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         parser.error(f"--reference: {exc}")
     for item in args.withhold:
         # A setting id can only be checked once the environment has been read.
-        if item not in profile.FACT_IDS and item != "check" and not item.startswith("setting:"):
+        # Nor can the id of a check, which is one of the rules read at run time.
+        if item not in profile.FACT_IDS and item != "check" and not item.startswith(("setting:", "check:")):
             parser.error(f"--withhold: nothing in the profile has the id {item!r}")
     answers = {}
     for item in args.answer:
@@ -353,6 +369,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _show_profile(args.show_profile, args.output, profile.render_markdown)
     if args.show_questions is not None:
         return _show_profile(args.show_questions, args.output, profile.render_questions)
+    if args.show_sheet is not None:
+        return _show_profile(args.show_sheet, args.output, profile.render_sheet)
     if args.list_questions:
         sys.stdout.write(questions.render_list())
         return 0
@@ -413,13 +431,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Imported here so the rule set is read at run time, not at import time.
     from .rules import ALL_RULES
 
-    findings = engine.run(snapshot, ALL_RULES)
+    checks = engine.assess(snapshot, ALL_RULES)
+    findings = engine.findings_of(checks)
     markdown = report.render_markdown(snapshot, findings, failed=tuple(failed))
     if args.save_profile is not None:
         try:
             # Probes, then answers, then withholding: a declared fact can be withheld too.
             saved_profile = profile.build_profile(
-                snapshot, findings, tuple(failed), args.reason or "baseline", args.reference
+                snapshot, findings, tuple(failed), args.reason or "baseline", args.reference, checks=checks
             )
             saved_profile, dropped = profile.apply_answers(saved_profile, args.answer)
         except profile.ProfileError as exc:
@@ -430,6 +449,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             return _error(f"--withhold: {exc}")
         for fact_id in dropped:
             print(f"note: the answer to {fact_id} was dropped: the tool measured it", file=sys.stderr)
+        # Nothing is withheld automatically: the operator is told, and decides.
+        for item, rule_ids in profile.rested_on_withheld(saved_profile).items():
+            print(
+                f"note: {item} is withheld, and these checks in the profile rest on it: {', '.join(rule_ids)}. "
+                "To leave one out too: --withhold check:<RULE_ID>",
+                file=sys.stderr,
+            )
     try:
         if args.save_snapshot:
             with open(args.save_snapshot, "w", encoding="utf-8") as fh:

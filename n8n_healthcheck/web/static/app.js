@@ -801,7 +801,24 @@
       run: { reason, reference: stripReference(reference) },
       facts: profile.facts.map((fact) => (ids.has(fact.id) ? { ...fact, ...WITHHELD_FACT } : fact)),
       settings: profile.settings.map((setting) => (ids.has(settingKey(setting)) ? { ...setting, ...WITHHELD_SETTING } : setting)),
-      check: ids.has("check") ? WITHHELD_CHECK : profile.check,
+      check: ids.has("check") ? WITHHELD_CHECK : withholdChecks(profile.check, ids),
+    };
+  }
+
+  /** The id one check is withheld by. */
+  const checkKey = (entry) => `check:${entry.rule_id}`;
+
+  /** `check` with the checks in `ids` blanked and their findings removed (profile.apply_withholding). */
+  function withholdChecks(check, ids) {
+    if (!Array.isArray(check.checks) || !check.checks.some((entry) => ids.has(checkKey(entry)))) return check;
+    const gone = new Set(check.checks.filter((entry) => ids.has(checkKey(entry))).map((entry) => entry.rule_id));
+    // The score of its area goes with a check, whatever the check had stated.
+    const areas = new Set(check.checks.filter((entry) => gone.has(entry.rule_id)).map((entry) => entry.area));
+    return {
+      ...check,
+      scores: check.scores.map((row) => (areas.has(row.area) ? { ...row, score: null, withheld: true } : row)),
+      findings: check.findings.filter((finding) => !gone.has(finding.rule_id)),
+      checks: check.checks.map((entry) => (gone.has(entry.rule_id) ? { rule_id: entry.rule_id, area: entry.area, outcome: "withheld", text: "" } : entry)),
     };
   }
 
@@ -875,8 +892,81 @@
         || !check.scores.every((row) => isObject(row) && isText(row.area) && (row.score === null || isWhole(row.score)))) return bad("“check.scores”");
       if (!Array.isArray(check.findings)
         || !check.findings.every((finding) => isObject(finding) && ["rule_id", "severity", "area", "title"].every((key) => isText(finding[key])))) return bad("“check.findings”");
+      // Added in tool version 0.6.0; a file written before has none. What an entry holds
+      // besides these four is read as it is found: see checkEntries().
+      if (has(check, "checks") && (!Array.isArray(check.checks)
+        || !check.checks.every((entry) => isObject(entry) && ["rule_id", "area", "outcome", "text"].every((key) => isText(entry[key]))))) return bad("“check.checks”");
     }
     return null;
+  }
+
+  // check.checks, as a reader finds them (profile.check_entries and what follows it).
+  const OUTCOME_LABELS = { finding: "finding", passed: "passed", not_applicable: "does not apply", not_assessed: "not assessed", withheld: "withheld" };
+  const BY_DEFAULT = "by n8n's default, not set explicitly";
+  const REASON_LABELS = {
+    source_missing: "no source that states it was given",
+    source_failed: "a source that states it was asked for and could not be collected",
+    not_stated: "a source was read and does not say",
+    value_unreadable: "a source holds the value, which could not be read",
+    sources_disagree: "two sources given in the run disagree on what it reads",
+    rule_error: "the rule failed to run",
+  };
+  const NOT_KNOWN = "not known to this version of n8n-healthcheck";
+  const NEED_LABELS = { url: "the n8n URL", env: "the env file", postgres: "Postgres", redis: "Redis", kubernetes: "Kubernetes", debug_info: "the debug information" };
+
+  /**
+   * The entries of check.checks, each made safe to show; null when the file has none.
+   * Text that is not text is empty, a list that is not a list of strings is empty, and an
+   * outcome or a reason this version does not know makes the entry `known: false`.
+   */
+  function checkEntries(profile) {
+    const check = profile.check;
+    if (check.withheld === true || !has(check, "checks")) return null;
+    const text = (value) => (typeof value === "string" ? value : "");
+    const strings = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === "string") : []);
+    return check.checks.map((entry) => {
+      const reason = text(entry.reason);
+      return {
+        rule_id: entry.rule_id,
+        area: entry.area,
+        outcome: entry.outcome,
+        text: entry.text,
+        known: has(OUTCOME_LABELS, entry.outcome) && (entry.outcome !== "not_assessed" || has(REASON_LABELS, reason)),
+        severity: text(entry.severity),
+        impact: text(entry.impact),
+        remedy: text(entry.remedy),
+        byDefault: entry.basis === "default",
+        reason,
+        needs: strings(entry.needs),
+        restsOn: strings(entry.rests_on),
+      };
+    });
+  }
+
+  /** True for the score of an area that was withheld with one of its checks: not "no data" (profile.score_withheld). */
+  const scoreWithheld = (row) => row.score === null && row.withheld === true;
+
+  /** "Redis", "Kubernetes or the debug information", "any one of the env file, Kubernetes or the debug information". */
+  function anyOf(needs, escape = (text) => text) {
+    const names = needs.map((need) => (has(NEED_LABELS, need) ? NEED_LABELS[need] : escape(need)));
+    return names.length < 3 ? names.join(" or ") : `any one of ${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
+  }
+
+  /** Map of the id of a withheld fact or setting to the rule ids of the checks in the file that rest on it. */
+  function restedOnWithheld(profile) {
+    const withheldIds = new Set([
+      ...profile.facts.filter((fact) => fact.provenance === "withheld").map((fact) => fact.id),
+      ...profile.settings.filter((setting) => setting.state === "withheld").map(settingKey),
+    ]);
+    const found = new Map();
+    for (const entry of checkEntries(profile) || []) {
+      for (const item of entry.restsOn) {
+        if (!withheldIds.has(item)) continue;
+        if (!found.has(item)) found.set(item, []);
+        if (!found.get(item).includes(entry.rule_id)) found.get(item).push(entry.rule_id);
+      }
+    }
+    return found;
   }
 
   /** A fact value in words, as `--show-profile` prints it. */
@@ -957,8 +1047,8 @@
     };
   }
 
-  /** The sheet as Markdown: the text `--show-questions` prints for the same file. */
-  function sheetMarkdown(profile, catalogue) {
+  /** The three parts of the question sheet as Markdown lines, under headings of the level given. */
+  function questionLines(profile, catalogue, heading) {
     const sheet = sheetOf(profile, catalogue);
     const allowed = (item) => (item.kind === "yes_no"
       ? "`yes` or `no`"
@@ -968,16 +1058,196 @@
       sheet.operator.map((item) => `- **${item.question}** (\`${item.id}\`): ${allowed(item)}`),
       sheet.conversation.map((item) => `- **${item.question}** ${item.why}`),
     ];
+    const lines = [];
+    SHEET.parts.forEach(([title, intro], index) => lines.push("", `${heading} ${title}`, "", intro, "", ...(items[index].length ? items[index] : [SHEET.none])));
+    if (sheet.leftOut.length) lines.push("", `${SHEET.leftOut}${sheet.leftOut.map(cell).join(", ")}.`);
+    return lines.slice(1);
+  }
+
+  /** The sheet as Markdown: the text `--show-questions` prints for the same file. */
+  function sheetMarkdown(profile, catalogue) {
     const lines = [
       `# ${SHEET.title}`,
       "",
       `- **Taken:** ${cell(profile.created_at)}`,
       `- **Reason:** ${profile.run.reason}`,
       `- **Reference:** ${cell(profile.run.reference) || "none"}`,
+      "",
+      ...questionLines(profile, catalogue, "##"),
     ];
-    SHEET.parts.forEach(([title, intro], index) => lines.push("", `## ${title}`, "", intro, "", ...(items[index].length ? items[index] : [SHEET.none])));
-    if (sheet.leftOut.length) lines.push("", `${SHEET.leftOut}${sheet.leftOut.map(cell).join(", ")}.`);
     return `${lines.join("\n")}\n`;
+  }
+
+  // The call sheet of a profile, as profile.render_sheet writes it: what works well, what
+  // does not, what to improve, what was not assessed. Only the sheet's own fixed text is
+  // written here; everything else is the file's.
+  const BRIEF = [
+    ["n8n.version", "n8n version"], ["executions.mode", "Execution mode"], ["main.replicas", "Main replicas"],
+    ["worker.replicas", "Worker replicas"], ["database.engine", "Database type"], ["usage.executions_per_day", "Executions per day"],
+    ["usage.failure_rate_percent", "Failure rate"], ["usage.active_workflows", "Active workflows"], ["usage.users", "Users"],
+  ];
+  const ESTIMATED = ["usage.executions_per_day", "usage.failure_rate_percent"];
+  const SEVERITY_ORDER = ["critical", "warning", "info"];
+  const SHEET_STALE_DAYS = 30;
+  const CALL = {
+    title: "n8n call sheet",
+    passedIntro: "Checks that read the values they need and found the good condition.",
+    noPassed: "No check passed.",
+    noFinding: "No finding.",
+    partial: "The check was partial: not every source was collected or not every rule ran.",
+    complete: "Every source was collected and every rule ran.",
+    notInProfile: "Rests on values that are not in the profile: they are in the report the operator keeps.",
+    noRemedy: "Nothing to improve was found.",
+    allAssessed: "Every check that applies was assessed.",
+    allApply: "No check was left out as not applying.",
+    checkWithheld: "The operator withheld the check outcome: what passed, the findings and what was not assessed are not in the file.",
+    noChecks: "This file was written by a version of n8n-healthcheck that does not record what passed, the impact and the remedy of a finding, what was not assessed or what does not apply.",
+    notStated: "A source was read and does not say",
+    unreadable: "The value could not be read (a Secret, a file, a redacted value or an incomplete environment)",
+    disagree: "Two sources given in the run disagree on what the check reads",
+    ruleError: "The rule failed to run, which is a bug in n8n-healthcheck",
+  };
+
+  /** Whole days from the day a profile was taken to `today` (a Date, read in UTC); null when the file's date is not one. */
+  function ageDays(createdAt, today) {
+    const match = /^([0-9]{4})-([0-9]{2})-([0-9]{2})/.exec([...createdAt].slice(0, 10).join(""));
+    if (!match) return null;
+    const [year, month, day] = match.slice(1).map(Number);
+    const taken = new Date(Date.UTC(year, month - 1, day));
+    taken.setUTCFullYear(year); // Date.UTC reads a year below 100 as 19xx
+    if (year < 1 || taken.getUTCMonth() !== month - 1 || taken.getUTCDate() !== day) return null;
+    return Math.round((Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()) - taken.getTime()) / 86400000);
+  }
+
+  /**
+   * The call sheet as data, for the page and for its Markdown: no text of it is escaped here.
+   * { age (days, or null when not old), brief: [{ label, value, note }], withheld, entries (null
+   * for a file without checks), passed: Map(area -> entries), findings, groups: Map(heading -> entries),
+   * notApplicable, withheldLine (what was withheld, in words), titles (the findings of a file without checks), partial }
+   */
+  function callSheetOf(profile, today, escape = (text) => text) {
+    const facts = new Map();
+    for (const fact of profile.facts) if (!facts.has(fact.id)) facts.set(fact.id, fact);
+    const settings = new Map();
+    for (const setting of profile.settings) if (!settings.has(settingKey(setting))) settings.set(settingKey(setting), setting);
+    const known = (fact) => fact !== undefined && (fact.provenance === "measured" || fact.provenance === "declared");
+
+    const age = ageDays(profile.created_at, today);
+    const estimate = facts.get("usage.estimate");
+    const brief = BRIEF.map(([id, label]) => {
+      const fact = facts.get(id);
+      // A fact the file does not hold (an older version wrote it) is unknown.
+      if (!known(fact)) return { label, value: fact !== undefined && fact.provenance === "withheld" ? "withheld" : "unknown", note: "" };
+      let value = escape(shown(fact.value)) + (id === "usage.failure_rate_percent" ? "%" : "");
+      let note = fact.provenance;
+      if (ESTIMATED.includes(id)) {
+        if (!known(estimate)) note += ", may be an estimate";
+        else if (estimate.value === true) value = `about ${value}`;
+      }
+      return { label, value, note };
+    });
+
+    const check = profile.check;
+    const entries = checkEntries(profile);
+    const sheet = { age: age !== null && age > SHEET_STALE_DAYS ? age : null, brief, withheld: check.withheld === true, entries, partial: check.partial === true };
+    if (sheet.withheld) return sheet;
+    if (entries === null) return { ...sheet, titles: check.findings };
+
+    const of = (outcome) => entries.filter((entry) => entry.known && entry.outcome === outcome);
+    const passed = new Map();
+    for (const entry of of("passed")) {
+      if (!passed.has(entry.area)) passed.set(entry.area, []);
+      passed.get(entry.area).push(entry);
+    }
+    const rank = (entry) => (SEVERITY_ORDER.includes(entry.severity) ? SEVERITY_ORDER.indexOf(entry.severity) : SEVERITY_ORDER.length);
+    // One id of rests_on and what the file holds for it, withheld or not as the operator chose.
+    const rested = (item) => {
+      const id = escape(item);
+      if (settings.has(item)) {
+        const setting = settings.get(item);
+        if (setting.state === "value") return { id, says: `= ${escape(setting.value) || "(empty)"}` };
+        return { id, says: setting.state === "withheld" ? "withheld" : "is set (value not written)" };
+      }
+      if (facts.has(item)) {
+        const fact = facts.get(item);
+        return { id, says: known(fact) ? `= ${escape(shown(fact.value))}` : fact.provenance };
+      }
+      return { id, says: "is not in the file" };
+    };
+    const findings = of("finding").sort((a, b) => rank(a) - rank(b)) // stable: rule order within a severity
+      .map((entry) => ({ ...entry, rested: entry.restsOn.map(rested) }));
+
+    const groups = new Map(); // heading -> entries, in the order the sheet prints them
+    const add = (heading, entry) => {
+      if (!groups.has(heading)) groups.set(heading, []);
+      groups.get(heading).push(entry);
+    };
+    const notAssessed = of("not_assessed");
+    for (const [reason, heading] of [["source_missing", "With "], ["source_failed", "Asked for and not collected: "]]) {
+      for (const entry of notAssessed) if (entry.reason === reason) add(heading + (anyOf(entry.needs, escape) || "a source that states it"), entry);
+    }
+    for (const [reason, heading] of [["not_stated", CALL.notStated], ["value_unreadable", CALL.unreadable], ["sources_disagree", CALL.disagree], ["rule_error", CALL.ruleError]]) {
+      for (const entry of notAssessed) if (entry.reason === reason) add(heading, entry);
+    }
+    for (const entry of entries) if (!entry.known) add(NOT_KNOWN.charAt(0).toUpperCase() + NOT_KNOWN.slice(1), entry);
+    const said = of("withheld").length ? [`Checks withheld by the operator: ${of("withheld").length}.`] : [];
+    const areas = check.scores.filter(scoreWithheld).map((row) => escape(row.area));
+    // Whatever the check had stated: the score would tell whether it was a finding.
+    if (areas.length) said.push(`The score of its area is withheld with a check: ${areas.join(", ")}.`);
+    return { ...sheet, passed, findings, groups, notApplicable: of("not_applicable"), withheldLine: said.join(" ") };
+  }
+
+  /** The call sheet as Markdown: the text `--show-sheet` prints for the same file on the same day. */
+  function callSheetMarkdown(profile, catalogue, today) {
+    const sheet = callSheetOf(profile, today, cell);
+    const item = (entry) => `${cell(entry.rule_id)} ${cell(entry.text)}`;
+    const upper = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+    const lines = [
+      `# ${CALL.title}`,
+      "",
+      "## Run",
+      "",
+      `- **Taken:** ${cell(profile.created_at)}`,
+      `- **Reason:** ${profile.run.reason}`,
+      `- **Reference:** ${cell(profile.run.reference) || "none"}`,
+      `- **Written by:** n8n-healthcheck ${cell(profile.tool_version)}`,
+      `- **Sources:** ${Object.entries(profile.sources).map(([name, state]) => `${cell(name)} ${state.replace("_", " ")}`).join("; ")}`,
+    ];
+    if (sheet.age !== null) lines.push("", `This profile was taken ${sheet.age} days ago: the environment may have changed since.`);
+    lines.push("", "## The environment in brief", "");
+    for (const row of sheet.brief) lines.push(`- **${row.label}:** ${row.value}${row.note ? ` (${row.note})` : ""}`);
+
+    if (sheet.withheld) {
+      lines.push("", "## Check outcome", "", CALL.checkWithheld);
+    } else if (sheet.entries === null) {
+      lines.push("", "## What does not", "");
+      sheet.titles.forEach((finding, index) => lines.push(`${index + 1}. **${cell(finding.rule_id)}** (${cell(finding.severity)}, ${cell(finding.area)}): ${cell(finding.title)}`));
+      if (!sheet.titles.length) lines.push(`${CALL.noFinding} ${sheet.partial ? CALL.partial : CALL.complete}`);
+      lines.push("", CALL.noChecks);
+    } else {
+      lines.push("", "## What works well", "", CALL.passedIntro, "");
+      for (const [area, entries] of sheet.passed) {
+        lines.push(`### ${upper(cell(area))}`, "", ...entries.map((entry) => `- ${item(entry)}${entry.byDefault ? ` (${BY_DEFAULT})` : ""}`), "");
+      }
+      if (!sheet.passed.size) lines.push(CALL.noPassed, "");
+      lines.push("## What does not", "");
+      sheet.findings.forEach((entry, index) => lines.push(
+        `${index + 1}. **${cell(entry.rule_id)}** (${cell(entry.severity)}, ${cell(entry.area)}): ${cell(entry.text)}`,
+        `   - Impact: ${cell(entry.impact)}`,
+        `   - ${entry.rested.length ? `Rests on: ${entry.rested.map((row) => `\`${row.id}\` ${row.says}`).join("; ")}` : CALL.notInProfile}`));
+      if (!sheet.findings.length) lines.push(`${CALL.noFinding} ${sheet.partial ? CALL.partial : CALL.complete}`);
+      lines.push("", "## What to improve", "");
+      sheet.findings.forEach((entry, index) => lines.push(`${index + 1}. **${cell(entry.rule_id)}, ${cell(entry.text)}:** ${cell(entry.remedy)}`));
+      if (!sheet.findings.length) lines.push(CALL.noRemedy);
+      lines.push("", "## Not assessed", "");
+      for (const [heading, entries] of sheet.groups) lines.push(`- **${heading}:** ${entries.map(item).join("; ")}`);
+      if (!sheet.groups.size) lines.push(CALL.allAssessed);
+      lines.push("", "## Does not apply", "");
+      lines.push(sheet.notApplicable.length ? sheet.notApplicable.map(item).join("; ") : CALL.allApply);
+      if (sheet.withheldLine) lines.push("", sheet.withheldLine);
+    }
+    lines.push("", "## Questions still open", "", ...questionLines(profile, catalogue, "###"), "");
+    return lines.join("\n");
   }
   // profile-core:end
 
@@ -996,7 +1266,7 @@
     const tick = (id, key, name) => el("label", { class: "check" },
       el("input", { type: "checkbox", id, "data-withhold": key, checked: withheld.has(key) }),
       el("span", { class: "sr-only" }, `Withhold ${name}`));
-    const table = (first, groups) => el("table", { class: "ptable" },
+    const table = (first, groups, narrow) => el("table", { class: narrow ? "ptable ptable--ids" : "ptable" },
       el("thead", null, el("tr", null,
         el("th", { scope: "col" }, first),
         el("th", { scope: "col" }, edit ? "Written to the file" : "Recorded"),
@@ -1016,6 +1286,12 @@
     const bulk = (what, keys) => (edit && keys.length ? el("p", { class: "ppart__bulk" },
       el("button", { type: "button", class: "btn btn--small", id: `bulk-${what}-all`, "data-bulk": what, "data-on": "true" }, `Withhold all ${what}`),
       el("button", { type: "button", class: "btn btn--small", id: `bulk-${what}-none`, "data-bulk": what, "data-on": "false" }, `Withhold no ${what}`)) : null);
+
+    // Nothing is withheld for the reader: a withheld entry names the checks that still rest on it.
+    const rested = restedOnWithheld(profile);
+    const restedNote = (key) => (rested.has(key)
+      ? el("p", { class: "pdetail prested" }, `${edit ? "Still in the file, resting on this entry" : "Checks in the file that rest on this entry"}: ${rested.get(key).join(", ")}.${edit ? " Their text can say something about it: withhold them too if it should not." : ""}`)
+      : null);
 
     const details = el("dl", { class: "pdetails" }, el("dt", null, "Taken"), el("dd", null, profile.created_at));
     if (!edit) {
@@ -1040,7 +1316,8 @@
             known ? el("span", { class: "pvalue" }, shown(fact.value)) : null,
             stateTag(fact.provenance),
             fact.source ? el("span", { class: "pdetail" }, `from ${fact.source}`) : null),
-          fact.detail ? el("p", { class: "pdetail" }, fact.detail) : null),
+          fact.detail ? el("p", { class: "pdetail" }, fact.detail) : null,
+          restedNote(fact.id)),
         edit ? el("td", { class: "ptable__withhold" }, tick(`w-fact-${index}`, fact.id, `the fact ${fact.id}`)) : null);
     });
     const measured = profile.facts.filter((fact) => fact.provenance === "measured" || fact.provenance === "declared").length;
@@ -1051,7 +1328,8 @@
       el("td", null, el("p", { class: "pline" },
         setting.state === "value" ? el("span", { class: "pvalue" }, setting.value || "(empty)")
           : setting.state === "set" ? el("span", { class: "pdetail" }, "set (value not written)")
-            : stateTag("withheld"))),
+            : stateTag("withheld")),
+        restedNote(settingKey(setting))),
       edit ? el("td", { class: "ptable__withhold" }, tick(`w-setting-${index}`, settingKey(setting), `the setting ${setting.name} of ${setting.scope}`)) : null));
 
     const check = profile.check;
@@ -1059,7 +1337,7 @@
     if (edit) {
       outcome.push(el("label", { class: "check check--row" },
         el("input", { type: "checkbox", id: "w-check", "data-withhold": "check", checked: withheld.has("check") }),
-        el("span", null, "Withhold the check outcome (the scores and the list of findings)")));
+        el("span", null, "Withhold the check outcome (the scores, the list of findings and every check)")));
     }
     if (check.withheld === true) {
       outcome.push(el("p", { class: "block__note" }, stateTag("withheld"), " The scores and the findings are not in the file; it only says that they were withheld."));
@@ -1068,7 +1346,7 @@
         el("thead", null, el("tr", null, el("th", { scope: "col" }, "Area"), el("th", { scope: "col" }, "Score"))),
         el("tbody", null, ...check.scores.map((row) => el("tr", null,
           el("th", { scope: "row" }, row.area),
-          el("td", null, row.score === null ? "n/a" : `${numberText(row.score)}/100${row.partial ? " (partial)" : ""}`))))));
+          el("td", null, scoreWithheld(row) ? stateTag("withheld") : row.score === null ? "n/a" : `${numberText(row.score)}/100${row.partial ? " (partial)" : ""}`))))));
       if (check.partial) outcome.push(el("p", { class: "block__note" }, "The check was partial: not every source was collected or not every rule ran."));
       outcome.push(check.findings.length
         ? el("ul", { class: "pfindings" }, ...check.findings.map((finding) => el("li", null,
@@ -1079,6 +1357,36 @@
             el("span", { class: "tag tag--area" }, finding.area)))))
         : el("p", { class: "block__note" }, "No findings."));
       if (edit && check.findings.length) outcome.push(el("p", { class: "block__note" }, "Only the rule, severity, area and title of a finding are written, never its evidence."));
+      const entries = checkEntries(profile);
+      if (entries !== null) {
+        // Every entry of check.checks with every text it holds.
+        const line = (name, text) => el("p", { class: "pdetail" }, el("span", { class: "pcheck__name" }, `${name}: `), text);
+        const rows = grouped(entries, (entry) => entry.area, (entry, index) => {
+          const about = [];
+          if (!entry.known) about.push(stateTag("unknown"), el("span", { class: "pdetail" }, NOT_KNOWN));
+          else if (entry.outcome === "finding") about.push(severityTag(entry.severity));
+          else if (entry.outcome === "withheld") about.push(stateTag("withheld"));
+          else about.push(el("span", { class: `tag tag--${entry.outcome === "passed" ? "passed" : "reason"}` }, OUTCOME_LABELS[entry.outcome]));
+          const why = entry.known && entry.outcome === "not_assessed"
+            ? `${capitalize(REASON_LABELS[entry.reason])}${entry.needs.length ? `. It needs ${anyOf(entry.needs)}` : ""}.`
+            : entry.known && entry.outcome === "passed" && entry.byDefault ? `${capitalize(BY_DEFAULT)}.` : "";
+          return el("tr", null,
+            el("th", { scope: "row", translate: "no" }, entry.rule_id),
+            el("td", null,
+              el("p", { class: "pline" }, entry.text ? el("span", { class: "pcheck__text" }, entry.text) : null, ...about),
+              why ? el("p", { class: "pdetail" }, why) : null,
+              entry.impact ? line("Impact", entry.impact) : null,
+              entry.remedy ? line("Remedy", entry.remedy) : null,
+              entry.restsOn.length ? line("Rests on", entry.restsOn.join(", ")) : null),
+            edit ? el("td", { class: "ptable__withhold" }, tick(`w-check-${index}`, checkKey(entry), `the check ${entry.rule_id}`)) : null);
+        });
+        outcome.push(
+          // One level under the title of this part, which is an h4 in the review and an h3 in an opened profile.
+          edit ? el("h5", { class: "pchecks__title" }, `Checks (${entries.length})`) : el("h4", { class: "pchecks__title" }, `Checks (${entries.length})`),
+          el("p", { class: "block__note" }, lead("What every rule stated, with every text written to the file."), " Each text is a fixed sentence of the rule, never a value of this instance.",
+            edit ? " A check can be withheld on its own: it stays in the file with its rule id only, its finding leaves the list above, and the score of its area is withheld with it, whatever the check says." : ""),
+          entries.length ? table("Check", rows, true) : el("p", { class: "block__note" }, "No check is listed."));
+      }
     }
 
     return [
@@ -1169,7 +1477,9 @@
     const settings = profile.settings.filter((setting) => setting.state === "withheld").length;
     for (const [id, question] of asked) question.note.hidden = !(answers.has(id) && withheld.has(id));
     const answered = asked.size ? `Answered: ${answers.size} of ${plural(asked.size, "question")}. ` : "";
-    $("share-summary").textContent = `${answered}Withheld: ${facts} of ${plural(profile.facts.length, "fact")}, ${settings} of ${plural(profile.settings.length, "setting")}, check outcome ${profile.check.withheld === true ? "withheld" : "included"}.`;
+    const checks = checkEntries(profile);
+    const checksWithheld = checks ? checks.filter((entry) => entry.outcome === "withheld").length : 0;
+    $("share-summary").textContent = `${answered}Withheld: ${facts} of ${plural(profile.facts.length, "fact")}, ${settings} of ${plural(profile.settings.length, "setting")}, check outcome ${profile.check.withheld === true ? "withheld" : "included"}${checksWithheld ? ` (${checksWithheld} of ${plural(checks.length, "check")} withheld)` : ""}.`;
   }
 
   /** Show the state of the reference field; return true when it can be stored. */
@@ -1224,9 +1534,98 @@
       return;
     }
     $("profile-meta").textContent = `${file.name} · read in this browser, not uploaded`;
-    $("profile-body").replaceChildren(...profileSections(data, false), sheetSection(data));
+    $("profile-body").replaceChildren(callSheetSection(data), ...profileSections(data, false), sheetSection(data));
     showView("profile");
     announce("Profile opened.");
+  }
+
+  /** A button that copies `text`, with its status line and, when the browser refuses the clipboard, the same text to copy by hand. */
+  function copyControls(id, text, what) {
+    const status = el("p", { class: "action-status", role: "status", "aria-live": "polite" });
+    const byHand = el("textarea", { class: "sheet__text", id: `${id}-text`, rows: "10", readonly: true, hidden: true, "aria-label": `The ${what} as Markdown` });
+    const button = el("button", { type: "button", class: "btn", id: `${id}-copy` }, "Copy as Markdown");
+    button.addEventListener("click", async () => {
+      const copied = await copyText(text, button);
+      byHand.hidden = copied;
+      if (!copied) {
+        byHand.value = text;
+        byHand.focus();
+        byHand.select();
+      }
+      status.textContent = copied
+        ? `${capitalize(what)} copied to the clipboard as Markdown.`
+        : "The browser did not allow copying. The sheet is in the box below: copy it from there.";
+    });
+    return [el("div", { class: "sheet__actions" }, button), status, byHand];
+  }
+
+  /**
+   * "Call sheet" for an opened profile: what works well, what does not, what to improve and
+   * what was not assessed, for a call with whoever runs the instance. Made in this browser
+   * from the file alone; every string of the file is inserted as text.
+   */
+  function callSheetSection(profile) {
+    const sheet = callSheetOf(profile, new Date());
+    const catalogue = meta && meta.questions;
+    const part = (title, ...children) => el("section", { class: "ppart" }, el("h4", null, title), ...children);
+    const note = (...children) => el("p", { class: "block__note" }, ...children);
+    const item = (entry, ...more) => el("li", null, el("code", { translate: "no" }, entry.rule_id), " ", entry.text, ...more);
+    const tags = (entry) => el("span", { class: "finding__tags" }, severityTag(entry.severity), el("span", { class: "finding__id", translate: "no" }, entry.rule_id), el("span", { class: "tag tag--area" }, entry.area));
+    const none = sheet.partial ? CALL.partial : CALL.complete;
+
+    const parts = [
+      part("The environment in brief", el("dl", { class: "pdetails" }, ...sheet.brief.flatMap((row) => [
+        el("dt", null, row.label),
+        el("dd", null, row.note ? el("span", { class: "pvalue" }, row.value) : stateTag(row.value), row.note ? el("span", { class: "pdetail" }, ` ${row.note}`) : null),
+      ]))),
+    ];
+    if (sheet.withheld) {
+      parts.push(part("Check outcome", note(stateTag("withheld"), ` ${CALL.checkWithheld}`)));
+    } else if (sheet.entries === null) {
+      parts.push(part(`What does not (${sheet.titles.length})`,
+        sheet.titles.length
+          ? el("ol", { class: "pfindings" }, ...sheet.titles.map((finding) => el("li", null, el("span", { class: "finding__title" }, finding.title), tags(finding))))
+          : note(`${CALL.noFinding} ${none}`),
+        note(CALL.noChecks)));
+    } else {
+      const passedCount = [...sheet.passed.values()].reduce((sum, entries) => sum + entries.length, 0);
+      parts.push(
+        part(`What works well (${passedCount})`, note(CALL.passedIntro),
+          ...(passedCount ? [...sheet.passed].flatMap(([area, entries]) => [
+            el("h5", { class: "sheet__area" }, capitalize(area)),
+            el("ul", { class: "sheet" }, ...entries.map((entry) => item(entry, entry.byDefault ? el("p", { class: "pdetail" }, `${capitalize(BY_DEFAULT)}.`) : null))),
+          ]) : [note(CALL.noPassed)])),
+        part(`What does not (${sheet.findings.length})`,
+          sheet.findings.length
+            ? el("ol", { class: "pfindings" }, ...sheet.findings.map((entry) => el("li", null,
+              el("span", { class: "finding__title" }, entry.text), tags(entry),
+              el("p", { class: "pdetail" }, el("span", { class: "pcheck__name" }, "Impact: "), entry.impact),
+              el("p", { class: "pdetail" }, entry.rested.length ? el("span", { class: "pcheck__name" }, "Rests on: ") : null, entry.rested.length ? entry.rested.map((row) => `${row.id} ${row.says}`).join("; ") : CALL.notInProfile))))
+            : note(`${CALL.noFinding} ${none}`)),
+        part(`What to improve (${sheet.findings.length})`,
+          sheet.findings.length
+            ? el("ol", { class: "sheet" }, ...sheet.findings.map((entry) => el("li", null,
+              el("strong", null, entry.text), " ", el("code", { translate: "no" }, entry.rule_id),
+              el("p", { class: "pdetail" }, entry.remedy))))
+            : note(CALL.noRemedy)),
+        part(`Not assessed (${[...sheet.groups.values()].reduce((sum, entries) => sum + entries.length, 0)})`,
+          sheet.groups.size
+            ? el("ul", { class: "sheet" }, ...[...sheet.groups].map(([heading, entries]) => el("li", null,
+              el("strong", null, heading),
+              el("ul", { class: "sheet sheet--inner" }, ...entries.map((entry) => item(entry))))))
+            : note(CALL.allAssessed)),
+        part(`Does not apply (${sheet.notApplicable.length})`,
+          sheet.notApplicable.length ? el("ul", { class: "sheet" }, ...sheet.notApplicable.map((entry) => item(entry))) : note(CALL.allApply),
+          sheet.withheldLine ? note(sheet.withheldLine) : null));
+    }
+
+    return el("section", { class: "block" }, el("h3", null, "Call sheet"),
+      note(lead("An outline for a call with whoever runs this instance."), " It is made in this browser from the file alone and says nothing the file does not. “Copy as Markdown” copies it whole, with the run details and the questions still open."),
+      sheet.age !== null ? note(el("span", { class: "tag tag--partial" }, "Old"), ` This profile was taken ${sheet.age} days ago: the environment may have changed since.`) : null,
+      ...(catalogue
+        ? copyControls("call", callSheetMarkdown(profile, catalogue, new Date()), "call sheet")
+        : [note("The list of questions did not load from the server, so the sheet cannot be copied. Check that “n8n-healthcheck serve” is still running, reload the page and open the file again.")]),
+      ...parts);
   }
 
   /**
@@ -1243,23 +1642,6 @@
     }
     const sheet = sheetOf(profile, catalogue);
     const text = sheetMarkdown(profile, catalogue);
-    const status = el("p", { class: "action-status", role: "status", "aria-live": "polite" });
-    // Shown only when the browser refuses the clipboard: the same text, to copy by hand.
-    const byHand = el("textarea", { class: "sheet__text", id: "sheet-text", rows: "10", readonly: true, hidden: true, "aria-label": "The question sheet as Markdown" });
-    const button = el("button", { type: "button", class: "btn", id: "sheet-copy" }, "Copy as Markdown");
-    button.addEventListener("click", async () => {
-      const copied = await copyText(text, button);
-      byHand.hidden = copied;
-      if (!copied) {
-        byHand.value = text;
-        byHand.focus();
-        byHand.select();
-      }
-      status.textContent = copied
-        ? "Question sheet copied to the clipboard as Markdown."
-        : "The browser did not allow copying. The sheet is in the box below: copy it from there.";
-    });
-
     const values = (item) => (item.kind === "yes_no"
       ? "Yes or no."
       : `${item.kind === "multi" ? "One or more of" : "One of"}: ${item.values.map((entry) => entry.label).join("; ")}.`);  // a label may hold a comma
@@ -1276,9 +1658,7 @@
       el("p", { class: "block__note" }, rows[0].length + rows[1].length
         ? "What this profile leaves unknown, by who can answer it, ready for a call. “Copy as Markdown” copies this sheet with the profile's date, reason and reference at its top."
         : "This profile leaves nothing unknown that the tool asks about. The questions for a conversation are always listed. “Copy as Markdown” copies this sheet with the profile's date, reason and reference at its top."),
-      el("div", { class: "sheet__actions" }, button),
-      status,
-      byHand,
+      ...copyControls("sheet", text, "question sheet"),
       ...SHEET.parts.map(([name, intro], index) => el("section", { class: "ppart" },
         el("h4", null, `${name} (${rows[index].length})`),
         el("p", { class: "block__note" }, intro),

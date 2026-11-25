@@ -234,7 +234,7 @@ class PageSourceTest(unittest.TestCase):
             "      run: { reason, reference: stripReference(reference) },",
             "      facts: profile.facts.map((fact) => (ids.has(fact.id) ? { ...fact, ...WITHHELD_FACT } : fact)),",
             "      settings: profile.settings.map((setting) => (ids.has(settingKey(setting)) ? { ...setting, ...WITHHELD_SETTING } : setting)),",
-            '      check: ids.has("check") ? WITHHELD_CHECK : profile.check,',
+            '      check: ids.has("check") ? WITHHELD_CHECK : withholdChecks(profile.check, ids),',
         ):
             self.assertIn(line + "\n", body)
         # Signature, "return {", the five lines above, "};" and the closing brace.
@@ -291,7 +291,8 @@ class PageSourceTest(unittest.TestCase):
         self.assertIn("tick(`w-fact-${index}`, fact.id, ", sections)
         self.assertIn("tick(`w-setting-${index}`, settingKey(setting), ", sections)
         self.assertIn('"data-withhold": "check", checked: withheld.has("check")', sections)
-        self.assertEqual(sections.count("tick("), 2)
+        self.assertIn("tick(`w-check-${index}`, checkKey(entry), ", sections)
+        self.assertEqual(sections.count("tick("), 3)
         handler = APP_JS[APP_JS.index('$("share-body").addEventListener("change"'):]
         handler = handler[: handler.index("\n  });\n")]
         for line in (
@@ -358,7 +359,7 @@ class PageSourceTest(unittest.TestCase):
         ):
             self.assertIn(line + "\n", body)
         self.assertEqual(APP_JS.count("declareAnswers("), 2)  # its definition, and the one profile the share step shows and saves
-        self.assertEqual(APP_JS.count('"declared"'), 4)  # the format's list, this constant, and twice where a known fact is shown or counted
+        self.assertEqual(APP_JS.count('"declared"'), 5)  # the format's list, this constant, and three times where a known fact is shown or counted
 
     def test_the_page_holds_no_copy_of_the_catalogue(self):
         page = APP_JS + INDEX_HTML
@@ -372,7 +373,7 @@ class PageSourceTest(unittest.TestCase):
             if value != "none":  # the one value with a rule of its own
                 self.assertNotIn(f'"{value}"', page)
             self.assertNotIn(f'"{label}"', page)
-        self.assertEqual(APP_JS.count("meta.questions"), 3)  # the share step's questions, and the viewer's sheet
+        self.assertEqual(APP_JS.count("meta.questions"), 4)  # the share step's questions, and the viewer's two sheets
 
     def test_the_sheets_fixed_text_is_the_one_render_questions_prints(self):
         block = re.search(r"const SHEET = \{\n(.*?)\n  \};", APP_JS, re.S).group(1)
@@ -1186,7 +1187,7 @@ class PageBehaviourTest(unittest.TestCase):
           const seen = [];
           for (const text of input.files) {
             const opened = await page.open(text);
-            const status = page.walk(page.$("profile-body")).filter((node) => node.getAttribute("role") === "status")[0];
+            const status = page.walk(page.$("profile-body")).filter((node) => node.getAttribute("role") === "status")[1];  // after the call sheet's
             page.$("sheet-copy").click();
             await page.settle();
             const box = page.$("sheet-text");
@@ -1429,7 +1430,8 @@ class PageBehaviourTest(unittest.TestCase):
         self.assertEqual(
             set(got["tags"]) - {"a", "option"},  # made by the page at start-up and on a download, not from a file
             {"section", "h3", "dl", "dt", "dd", "table", "thead", "tbody", "tr", "th", "td", "p", "span", "ul", "li", "wbr", "svg", "path"}
-            | {"h4", "strong", "code", "div", "button", "textarea"},  # the question sheet and its copy button
+            | {"h4", "strong", "code", "div", "button", "textarea"}  # the question sheet and its copy button
+            | {"ol"},  # the call sheet's findings
         )
         self.assertEqual([entry for entry in got["attributes"] if "<" in entry or "alert" in entry], [])
         self.assertLessEqual({entry.split("=")[0] for entry in got["attributes"]}, {"scope", "colspan", "translate", "viewBox", "aria-hidden", "focusable", "d", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-dasharray"}

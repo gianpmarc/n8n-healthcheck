@@ -13,15 +13,16 @@ import copy
 import json
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Callable, Optional
 
-from . import __version__, debug_info, n8n_settings, questions, report, usage
-from .models import REDACTED, Finding, Snapshot
+from . import __version__, debug_info, engine, n8n_settings, questions, report, usage
+from .models import REDACTED, SEVERITIES, Check, Finding, Snapshot
 from .rules._helpers import (
     VALUE_FROM,
     Env,
     command_words,
+    compared_scopes,
     concurrency_flag,
     container_env,
     env_flag,
@@ -86,6 +87,14 @@ NOT_IN_DEBUG_INFO_DETAIL = "the debug information does not state it"
 ONLY_WHEN_INSECURE_DETAIL = "n8n reports this only when it is insecure"
 STATED_ELSEWHERE_DETAIL = "another source of this run states this setting, so the debug information was not used for it"
 VERSIONS_ELSEWHERE_DETAIL = "another source of this run states the versions, so the debug information was not used for it"
+
+
+# check.checks (added in tool version 0.6.0): what a reader may find in an entry.
+CHECK_OUTCOMES = ("finding", "passed", "not_applicable", "not_assessed", "withheld")
+# `needs` id -> the Snapshot section that says whether that source failed.
+NEEDED_SECTION = {"url": "health", "env": "env", "postgres": "postgres", "redis": "redis", "kubernetes": "kubernetes"}
+# A profile older than this is still read, with a line on the call sheet.
+SHEET_STALE_DAYS = 30
 
 
 class ProfileError(ValueError):
@@ -824,6 +833,63 @@ def check_reference(reference: str) -> str:
     return reference
 
 
+def rests_on(info, snapshot: Snapshot, settings: list, facts: list, by_mode: bool = False) -> list:
+    """The ids of the profile entries a rule rests on: facts, then settings that are listed.
+
+    Ids only, the ones `--withhold` takes; the values are those already in the file. A
+    fact is named only when the file holds a value for it: a fact that is unknown reads
+    another source than the rule did (the facts only a debug information fills, when the
+    rule read the environment), or nothing at all. A variable is named in every scope the
+    rule read it in: the env file when one was given, and the Kubernetes roles the rule
+    judges, which next to an env file are the containers it is compared with (see
+    rules/_helpers.py, against_sources()). A variable that is not set has no entry.
+    `by_mode` adds the execution mode, for a rule that does not apply because of it.
+    """
+    known = {fact["id"] for fact in facts if fact["provenance"] != "unknown"}
+    listed = {setting_id(setting) for setting in settings}
+    mode = by_mode and "EXECUTIONS_MODE" not in info.settings
+    names = info.settings + (("EXECUTIONS_MODE",) if mode else ())
+    ids = [
+        f"setting:{scope}:{name}"
+        for name in names
+        for scope in compared_scopes(name, info.scopes)
+        if scope != "instance" or snapshot.env is not None
+    ]
+    wanted = info.facts + (("executions.mode",) if by_mode and "executions.mode" not in info.facts else ())
+    return [item for item in wanted if item in known] + [item for item in ids if item in listed]
+
+
+def _check_entries(checks: list, snapshot: Snapshot, failed: tuple, settings: list, facts: list) -> list:
+    """`check.checks`: one entry per declared rule, in rule order. Every text is a literal of the rule."""
+    entries = []
+    for check in checks:
+        info = check.info
+        if info is None:
+            continue
+        entry = {"rule_id": info.rule_id, "area": info.area, "outcome": check.outcome}
+        if check.outcome == "finding":
+            found = check.finding
+            entry.update(severity=found.severity, text=found.title, impact=found.impact, remedy=found.recommendation)
+        elif check.outcome == "passed":
+            entry.update(basis=check.basis, text=info.passed)
+        else:
+            entry["text"] = info.subject
+            if check.outcome == "not_assessed":
+                reason, needs = check.reason, list(check.needs)
+                # A source that would state it was asked for and could not be collected.
+                asked = [need for need in needs if NEEDED_SECTION.get(need) in failed]
+                if reason == "source_missing" and asked:
+                    reason, needs = "source_failed", asked
+                entry.update(reason=reason, needs=needs)
+        # Whatever the outcome, so that a withheld fact or setting names every check that
+        # tells something about it: one that does not apply, and one that lacks a source,
+        # read values on the way there. Only a rule that failed to run read nothing.
+        raised = check.reason == "rule_error"
+        entry["rests_on"] = [] if raised else rests_on(info, snapshot, settings, facts, check.by_mode)
+        entries.append(entry)
+    return entries
+
+
 def build_profile(
     snapshot: Snapshot,
     findings: list[Finding],
@@ -832,15 +898,20 @@ def build_profile(
     reference: str = "",
     withhold: tuple[str, ...] = (),
     now: Optional[datetime] = None,
+    checks: Optional[list[Check]] = None,
 ) -> dict:
     """The profile of one run, as JSON-serialisable data.
 
-    `failed` is the list cli.failed_sections() computes. Raises ProfileError for a reason,
-    reference or withheld id that is not valid.
+    `failed` is the list cli.failed_sections() computes. `checks` is what engine.assess()
+    returned: with it the profile records the outcome of every rule (`check.checks`), and
+    `findings` is not read, so that the two lists of the file come from one. Raises
+    ProfileError for a reason, reference or withheld id that is not valid.
     """
     if reason not in REASONS:
         raise ProfileError(f"the reason must be one of: {', '.join(REASONS)}")
     failed = tuple(failed)
+    if checks is not None:
+        findings = engine.findings_of(checks)
     outcome = report.build_report(snapshot, findings, failed)
     settings, not_listed = _settings(snapshot)
     created = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -864,15 +935,22 @@ def build_profile(
             ],
         },
     }
+    if checks is not None:
+        # The fixed texts of the rules, never the evidence. See docs/rules.md.
+        profile["check"]["checks"] = _check_entries(checks, snapshot, failed, settings, profile["facts"])
     return apply_withholding(profile, withhold)
 
 
 def apply_withholding(profile: dict, ids) -> dict:
     """A copy of `profile` with the given entries withheld.
 
-    An id is a fact id, `setting:<scope>:<NAME>`, or `check`. A withheld entry stays in
-    the file without its value, so the reader can tell removed from unknown. Raises
-    ProfileError when an id matches nothing in this profile.
+    An id is a fact id, `setting:<scope>:<NAME>`, `check:<RULE_ID>` for one check, or
+    `check` for the whole outcome. A withheld entry stays in the file without its value,
+    so the reader can tell removed from unknown; a withheld check keeps its rule id and
+    its area, its finding leaves `check.findings`, and the score of its area is withheld
+    with it, whatever the check had stated: a score kept, or computed again without the
+    finding, would tell that the check was one. Raises ProfileError when an id matches
+    nothing in this profile.
     """
     profile = copy.deepcopy(profile)
     ids = set(ids)
@@ -884,6 +962,18 @@ def apply_withholding(profile: dict, ids) -> dict:
         if setting_id(setting) in ids:
             ids.discard(setting_id(setting))
             setting.update(state="withheld", value=None)
+    check = profile["check"]
+    for entry in check.get("checks") or []:
+        item = f"check:{entry['rule_id']}"
+        if item in ids:
+            ids.discard(item)
+            withheld = {"rule_id": entry["rule_id"], "area": entry["area"], "outcome": "withheld", "text": ""}
+            entry.clear()
+            entry.update(withheld)
+            check["findings"] = [finding for finding in check["findings"] if finding["rule_id"] != entry["rule_id"]]
+            for row in check["scores"]:
+                if row["area"] == entry["area"]:
+                    row.update(score=None, withheld=True)
     if "check" in ids:
         profile["check"] = {"withheld": True}
         ids.discard("check")
@@ -1041,6 +1131,14 @@ def validate(data) -> dict:
             _require(isinstance(finding, dict), '"check.findings"')
             for key in ("rule_id", "severity", "area", "title"):
                 _require(isinstance(finding.get(key), str), '"check.findings"')
+        # Added in tool version 0.6.0; a file written before has none. What an entry
+        # holds besides these four is read as it is found: see check_entries().
+        if "checks" in check:
+            _require(isinstance(check["checks"], list), '"check.checks"')
+            for entry in check["checks"]:
+                _require(isinstance(entry, dict), '"check.checks"')
+                for key in ("rule_id", "area", "outcome", "text"):
+                    _require(isinstance(entry.get(key), str), '"check.checks"')
     return data
 
 
@@ -1138,6 +1236,8 @@ def render_markdown(profile: dict) -> str:
             score = "n/a" if row["score"] is None else f"{row['score']}/100"
             if row.get("partial") and row["score"] is not None:
                 score += " (partial)"
+            if score_withheld(row):
+                score = "withheld"
             lines.append(f"| {_cell(row['area'])} | {score} |")
         lines.append("")
         if check["partial"]:
@@ -1149,8 +1249,158 @@ def render_markdown(profile: dict) -> str:
             )
         if not check["findings"]:
             lines.append("No findings.")
+        lines += _checks_review(profile)
     lines.append("")
     return "\n".join(lines)
+
+
+# --- checks, as a reader finds them ------------------------------------------------
+
+OUTCOME_LABELS = {
+    "finding": "finding",
+    "passed": "passed",
+    "not_applicable": "does not apply",
+    "not_assessed": "not assessed",
+    "withheld": "withheld",
+}
+BY_DEFAULT = "by n8n's default, not set explicitly"
+REASON_LABELS = {
+    "source_missing": "no source that states it was given",
+    "source_failed": "a source that states it was asked for and could not be collected",
+    "not_stated": "a source was read and does not say",
+    "value_unreadable": "a source holds the value, which could not be read",
+    "sources_disagree": "two sources given in the run disagree on what it reads",
+    "rule_error": "the rule failed to run",
+}
+NOT_KNOWN = "not known to this version of n8n-healthcheck"
+# How `needs` names what the operator gives.
+NEED_LABELS = {
+    "url": "the n8n URL",
+    "env": "the env file",
+    "postgres": "Postgres",
+    "redis": "Redis",
+    "kubernetes": "Kubernetes",
+    "debug_info": "the debug information",
+}
+
+
+def score_withheld(row: dict) -> bool:
+    """True for the score of an area that was withheld with one of its checks: not "no data"."""
+    return row["score"] is None and row.get("withheld") is True
+
+
+def check_entries(profile: dict) -> Optional[list]:
+    """The entries of `check.checks`, each made safe to render; None when the file has none.
+
+    A file is validated only for the four strings every entry holds, so that a later
+    version can add to it. Whatever else an entry holds is read here: text that is not
+    text is empty, a list that is not a list of strings is empty, and an outcome or a
+    reason this version does not know makes the entry `known: False`.
+    """
+    check = profile["check"]
+    if check.get("withheld") is True or "checks" not in check:
+        return None
+
+    def text(value) -> str:
+        return value if isinstance(value, str) else ""
+
+    def strings(value) -> list:
+        return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+    entries = []
+    for entry in check["checks"]:
+        outcome, reason = entry["outcome"], text(entry.get("reason"))
+        known = outcome in CHECK_OUTCOMES and (outcome != "not_assessed" or reason in REASON_LABELS)
+        entries.append(
+            {
+                "rule_id": entry["rule_id"],
+                "area": entry["area"],
+                "outcome": outcome,
+                "text": entry["text"],
+                "known": known,
+                "severity": text(entry.get("severity")),
+                "impact": text(entry.get("impact")),
+                "remedy": text(entry.get("remedy")),
+                "by_default": entry.get("basis") == "default",
+                "reason": reason,
+                "needs": strings(entry.get("needs")),
+                "rests_on": strings(entry.get("rests_on")),
+            }
+        )
+    return entries
+
+
+def _need(need: str) -> str:
+    return NEED_LABELS[need] if need in NEED_LABELS else _cell(need)
+
+
+def _any_of(needs: list) -> str:
+    """'Redis', 'Kubernetes or the debug information', 'any one of the env file, Kubernetes or the debug information'."""
+    names = [_need(need) for need in needs]
+    if len(names) < 3:
+        return " or ".join(names)
+    return f"any one of {', '.join(names[:-1])} or {names[-1]}"
+
+
+def rested_on_withheld(profile: dict) -> dict:
+    """{id of a withheld fact or setting: the rule ids of the checks in the file that rest on it}."""
+    withheld = [fact["id"] for fact in profile["facts"] if fact["provenance"] == "withheld"]
+    withheld += [setting_id(setting) for setting in profile["settings"] if setting["state"] == "withheld"]
+    found = {}
+    for entry in check_entries(profile) or []:
+        for item in entry["rests_on"]:
+            if item in withheld and entry["rule_id"] not in found.setdefault(item, []):
+                found[item].append(entry["rule_id"])
+    return found
+
+
+def _checks_review(profile: dict) -> list:
+    """The lines of `--show-profile` for `check.checks`: every entry with every text it holds."""
+    entries = check_entries(profile)
+    if entries is None:
+        return []
+    lines = [
+        "",
+        "### Checks",
+        "",
+        "What every rule stated, with every text written to the file. Each text is a fixed "
+        "sentence of the rule, never a value of the instance.",
+        "",
+    ]
+    for entry in entries:
+        head = f"- **{_cell(entry['rule_id'])}** ({_cell(entry['area'])}): "
+        if not entry["known"]:
+            lines.append(f"{head}{NOT_KNOWN}. {_cell(entry['text'])}")
+            continue
+        outcome = OUTCOME_LABELS[entry["outcome"]]
+        if entry["outcome"] == "withheld":
+            lines.append(f"{head}{outcome}.")
+            continue
+        if entry["outcome"] == "finding":
+            outcome += f", {_cell(entry['severity'])}"
+        elif entry["outcome"] == "passed" and entry["by_default"]:
+            outcome += f", {BY_DEFAULT}"
+        elif entry["outcome"] == "not_assessed":
+            outcome += f", {REASON_LABELS[entry['reason']]}"
+            if entry["needs"]:
+                outcome += f" (it needs {_any_of(entry['needs'])})"
+        lines.append(f"{head}{outcome}. {_cell(entry['text'])}")
+        if entry["outcome"] == "finding":
+            lines += [f"  - Impact: {_cell(entry['impact'])}", f"  - Remedy: {_cell(entry['remedy'])}"]
+        if entry["rests_on"]:
+            lines.append("  - Rests on: " + ", ".join(f"`{_cell(item)}`" for item in entry["rests_on"]))
+    if not entries:
+        lines.append("No check is listed.")
+    rested = rested_on_withheld(profile)
+    if rested:
+        lines += ["", "Withheld entries that a check in the file still rests on:", ""]
+        lines += [f"- `{_cell(item)}`: {', '.join(_cell(rule_id) for rule_id in rules)}" for item, rules in rested.items()]
+        lines += [
+            "",
+            "The text of such a check can say something about what was withheld. To leave a "
+            "check out as well, withhold it by its rule id: `--withhold check:RULE-ID`.",
+        ]
+    return lines
 
 
 def render_questions(profile: dict) -> str:
@@ -1161,6 +1411,21 @@ def render_questions(profile: dict) -> str:
     written before a question existed still gets it on its sheet.
     """
     run = profile["run"]
+    lines = [
+        "# n8n environment profile: questions still open",
+        "",
+        f"- **Taken:** {_cell(profile['created_at'])}",
+        f"- **Reason:** {run['reason']}",
+        f"- **Reference:** {_cell(run['reference']) or 'none'}",
+        "",
+        *_question_lines(profile, "##"),
+    ]
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _question_lines(profile: dict, heading: str) -> list:
+    """The three parts of the question sheet, under headings of the level given."""
     facts = {}
     for fact in profile["facts"]:
         facts.setdefault(fact["id"], fact)
@@ -1169,13 +1434,7 @@ def render_questions(profile: dict) -> str:
         return fact_id not in facts or facts[fact_id]["provenance"] == "unknown"
 
     lines = [
-        "# n8n environment profile: questions still open",
-        "",
-        f"- **Taken:** {_cell(profile['created_at'])}",
-        f"- **Reason:** {run['reason']}",
-        f"- **Reference:** {_cell(run['reference']) or 'none'}",
-        "",
-        "## 1. Could be measured",
+        f"{heading} 1. Could be measured",
         "",
         "Facts the tool measures by itself when it can. Each says why it could not this time.",
         "",
@@ -1189,7 +1448,7 @@ def render_questions(profile: dict) -> str:
 
     lines += [
         "",
-        "## 2. Ask whoever runs the platform",
+        f"{heading} 2. Ask whoever runs the platform",
         "",
         "Closed questions no probe can answer. The tool can store each answer as a declared fact.",
         "",
@@ -1201,7 +1460,7 @@ def render_questions(profile: dict) -> str:
 
     lines += [
         "",
-        "## 3. Ask in conversation",
+        f"{heading} 3. Ask in conversation",
         "",
         "Never asked or stored by the tool. Record the answers where you keep your own notes.",
         "",
@@ -1211,5 +1470,205 @@ def render_questions(profile: dict) -> str:
     withheld = [_cell(fact["id"]) for fact in profile["facts"] if fact["provenance"] == "withheld"]
     if withheld:
         lines += ["", "Withheld by the sender, not questions to press on: " + ", ".join(withheld) + "."]
-    lines.append("")
+    return lines
+
+
+# --- the call sheet ----------------------------------------------------------------
+
+# The facts of "The environment in brief", in order, with how the sheet names each.
+BRIEF = (
+    ("n8n.version", "n8n version"),
+    ("executions.mode", "Execution mode"),
+    ("main.replicas", "Main replicas"),
+    ("worker.replicas", "Worker replicas"),
+    ("database.engine", "Database type"),
+    ("usage.executions_per_day", "Executions per day"),
+    ("usage.failure_rate_percent", "Failure rate"),
+    ("usage.active_workflows", "Active workflows"),
+    ("usage.users", "Users"),
+)
+# The two usage numbers the profile can mark as an estimate (the fact usage.estimate).
+ESTIMATED = ("usage.executions_per_day", "usage.failure_rate_percent")
+SHEET_NO_CHECKS = (
+    "This file was written by a version of n8n-healthcheck that does not record what passed, "
+    "the impact and the remedy of a finding, what was not assessed or what does not apply."
+)
+SHEET_NOT_IN_PROFILE = "Rests on values that are not in the profile: they are in the report the operator keeps."
+SHEET_PARTIAL = "The check was partial: not every source was collected or not every rule ran."
+
+
+def _age_days(created_at: str, today: date) -> Optional[int]:
+    """Whole days from the day a profile was taken to `today`; None when the file's date is not one."""
+    try:
+        return (today - date.fromisoformat(created_at[:10])).days
+    except ValueError:
+        return None
+
+
+def _known(fact: Optional[dict]) -> bool:
+    return fact is not None and fact["provenance"] in ("measured", "declared")
+
+
+def render_sheet(profile: dict, today: Optional[date] = None) -> str:
+    """The call sheet of a saved profile (already validated) as Markdown.
+
+    An outline for whoever supports the operator: what works well, what does not, what
+    to improve, what was not assessed and what would be needed for it. It is a rendering
+    of the file and holds nothing the file does not. `today` is the day in UTC, for the
+    age of the profile.
+    """
+    run, check = profile["run"], profile["check"]
+    facts = {}
+    for fact in profile["facts"]:
+        facts.setdefault(fact["id"], fact)
+    settings = {}
+    for setting in profile["settings"]:
+        settings.setdefault(setting_id(setting), setting)
+
+    lines = [
+        "# n8n call sheet",
+        "",
+        "## Run",
+        "",
+        f"- **Taken:** {_cell(profile['created_at'])}",
+        f"- **Reason:** {run['reason']}",
+        f"- **Reference:** {_cell(run['reference']) or 'none'}",
+        f"- **Written by:** n8n-healthcheck {_cell(profile['tool_version'])}",
+        "- **Sources:** "
+        + "; ".join(f"{_cell(name)} {state.replace('_', ' ')}" for name, state in profile["sources"].items()),
+    ]
+    age = _age_days(profile["created_at"], today or datetime.now(timezone.utc).date())
+    if age is not None and age > SHEET_STALE_DAYS:
+        lines += ["", f"This profile was taken {age} days ago: the environment may have changed since."]
+
+    lines += ["", "## The environment in brief", ""]
+    estimate = facts.get("usage.estimate")
+    for fact_id, label in BRIEF:
+        fact = facts.get(fact_id)
+        if not _known(fact):
+            # A fact the file does not hold (an older version wrote it) is unknown.
+            lines.append(f"- **{label}:** {'withheld' if fact is not None and fact['provenance'] == 'withheld' else 'unknown'}")
+            continue
+        value = _cell(_shown(fact["value"])) + ("%" if fact_id == "usage.failure_rate_percent" else "")
+        note = fact["provenance"]
+        if fact_id in ESTIMATED:
+            if not _known(estimate):
+                note += ", may be an estimate"
+            elif estimate["value"] is True:
+                value = f"about {value}"
+        lines.append(f"- **{label}:** {value} ({note})")
+
+    entries = check_entries(profile)
+    if check.get("withheld") is True:
+        lines += ["", "## Check outcome", "", "The operator withheld the check outcome: what passed, the findings and what was not assessed are not in the file."]
+    elif entries is None:
+        lines += ["", "## What does not", ""]
+        lines += [
+            f"{number}. **{_cell(finding['rule_id'])}** ({_cell(finding['severity'])}, {_cell(finding['area'])}): {_cell(finding['title'])}"
+            for number, finding in enumerate(check["findings"], 1)
+        ]
+        if not check["findings"]:
+            lines.append("No finding. " + (SHEET_PARTIAL if check["partial"] else "Every source was collected and every rule ran."))
+        lines += ["", SHEET_NO_CHECKS]
+    else:
+        lines += _sheet_checks(entries, check["partial"], facts, settings, check["scores"])
+
+    lines += ["", "## Questions still open", "", *_question_lines(profile, "###"), ""]
     return "\n".join(lines)
+
+
+def _rested_value(item: str, facts: dict, settings: dict) -> str:
+    """One id of `rests_on` with the value the file holds for it, withheld or not as the operator chose."""
+    name = f"`{_cell(item)}`"
+    if item in settings:
+        setting = settings[item]
+        if setting["state"] == "value":
+            return f"{name} = {_cell(setting['value']) or '(empty)'}"
+        return f"{name} {'withheld' if setting['state'] == 'withheld' else 'is set (value not written)'}"
+    if item in facts:
+        fact = facts[item]
+        return f"{name} = {_cell(_shown(fact['value']))}" if _known(fact) else f"{name} {fact['provenance']}"
+    return f"{name} is not in the file"
+
+
+def _sheet_checks(entries: list, partial: bool, facts: dict, settings: dict, scores: list) -> list:
+    """Sections 3 to 7 of the call sheet, from the entries of `check.checks`."""
+    of = lambda outcome: [entry for entry in entries if entry["known"] and entry["outcome"] == outcome]
+    item = lambda entry: f"{_cell(entry['rule_id'])} {_cell(entry['text'])}"
+
+    lines = ["", "## What works well", "", "Checks that read the values they need and found the good condition.", ""]
+    passed = of("passed")
+    for area in dict.fromkeys(entry["area"] for entry in passed):
+        lines += [f"### {_cell(area)[:1].upper()}{_cell(area)[1:]}", ""]
+        lines += [
+            f"- {item(entry)}" + (f" ({BY_DEFAULT})" if entry["by_default"] else "")
+            for entry in passed
+            if entry["area"] == area
+        ]
+        lines.append("")
+    if not passed:
+        lines += ["No check passed.", ""]
+
+    def severity(entry: dict) -> int:
+        return SEVERITIES.index(entry["severity"]) if entry["severity"] in SEVERITIES else len(SEVERITIES)
+
+    findings = sorted(of("finding"), key=severity)  # stable: rule order within a severity
+    lines += ["## What does not", ""]
+    for number, entry in enumerate(findings, 1):
+        lines += [
+            f"{number}. **{_cell(entry['rule_id'])}** ({_cell(entry['severity'])}, {_cell(entry['area'])}): {_cell(entry['text'])}",
+            f"   - Impact: {_cell(entry['impact'])}",
+            "   - "
+            + (
+                "Rests on: " + "; ".join(_rested_value(rested, facts, settings) for rested in entry["rests_on"])
+                if entry["rests_on"]
+                else SHEET_NOT_IN_PROFILE
+            ),
+        ]
+    if not findings:
+        lines.append("No finding. " + (SHEET_PARTIAL if partial else "Every source was collected and every rule ran."))
+
+    lines += ["", "## What to improve", ""]
+    lines += [
+        f"{number}. **{_cell(entry['rule_id'])}, {_cell(entry['text'])}:** {_cell(entry['remedy'])}"
+        for number, entry in enumerate(findings, 1)
+    ]
+    if not findings:
+        lines.append("Nothing to improve was found.")
+
+    lines += ["", "## Not assessed", ""]
+    groups = {}  # heading -> entries, in the order the sheet prints them
+    not_assessed = of("not_assessed")
+    for reason, heading in (("source_missing", "With {}"), ("source_failed", "Asked for and not collected: {}")):
+        for entry in not_assessed:
+            if entry["reason"] == reason:
+                needs = _any_of(entry["needs"]) or "a source that states it"
+                groups.setdefault(heading.format(needs), []).append(entry)
+    for reason, heading in (
+        ("not_stated", "A source was read and does not say"),
+        ("value_unreadable", "The value could not be read (a Secret, a file, a redacted value or an incomplete environment)"),
+        ("sources_disagree", "Two sources given in the run disagree on what the check reads"),
+        ("rule_error", "The rule failed to run, which is a bug in n8n-healthcheck"),
+    ):
+        for entry in not_assessed:
+            if entry["reason"] == reason:
+                groups.setdefault(heading, []).append(entry)
+    for entry in entries:
+        if not entry["known"]:
+            groups.setdefault(NOT_KNOWN.capitalize(), []).append(entry)
+    lines += [f"- **{heading}:** {'; '.join(item(entry) for entry in group)}" for heading, group in groups.items()]
+    if not groups:
+        lines.append("Every check that applies was assessed.")
+
+    lines += ["", "## Does not apply", ""]
+    not_applicable = of("not_applicable")
+    lines.append("; ".join(item(entry) for entry in not_applicable) if not_applicable else "No check was left out as not applying.")
+    withheld = len(of("withheld"))
+    said = [f"Checks withheld by the operator: {withheld}."] if withheld else []
+    areas = [_cell(row["area"]) for row in scores if score_withheld(row)]
+    if areas:
+        # Whatever the check had stated: the score would tell whether it was a finding.
+        said.append(f"The score of its area is withheld with a check: {', '.join(areas)}.")
+    if said:
+        lines += ["", " ".join(said)]
+    return lines

@@ -140,7 +140,7 @@ body {
 
 h1, h2, h3, h4, p, ul, ol, dl, dd, fieldset, legend { margin: 0; padding: 0; }
 ul, ol { list-style: none; }
-h1, h2, h3, h4 { text-wrap: balance; font-weight: 500; overflow-wrap: anywhere; }
+h1, h2, h3, h4, h5 { text-wrap: balance; font-weight: 500; overflow-wrap: anywhere; }
 h2 { font-size: clamp(2rem, 1.5rem + 2.6vw, 3.25rem); line-height: 1.02; letter-spacing: var(--tracking-tight); }
 h3 { font-size: 1.5rem; line-height: 1.15; letter-spacing: -0.01em; }
 h4 { font-size: 1rem; line-height: 1.25; }
@@ -571,6 +571,7 @@ input[data-masked="true"] { -webkit-text-security: disc; }
 .tag--warning { color: var(--warning); background: var(--warning-bg); }
 .tag--info { color: var(--info); background: var(--info-bg); }
 .tag--area { color: var(--muted); }
+.tag--passed { color: var(--ok); background: var(--ok-bg); }
 /* These can carry values this page does not know (a new reason, area or severity). */
 .tag--area, .tag--reason, .tag--failed { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 
@@ -945,6 +946,8 @@ input[data-masked="true"] { -webkit-text-security: disc; }
 /* A group is named by text of the profile (the start of a fact id, a scope): shown as it is. */
 .ptable__group th { padding-block: var(--space-2); background: var(--surface-2); box-shadow: inset 4px 0 0 var(--accent); color: var(--text); font-weight: 600; text-transform: none; }
 .ptable th[scope="row"] { width: 38%; font-family: var(--mono); font-size: 0.875rem; }
+/* A first column of short ids (the checks): the room goes to the text. */
+.ptable--ids thead th:first-child, .ptable--ids th[scope="row"] { width: 7.5rem; }
 .ptable .ptable__withhold { width: 6.5rem; padding-block: var(--space-1); text-align: center; vertical-align: middle; }
 .ptable thead .ptable__withhold { padding-block: var(--space-3); }
 .pline { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
@@ -1012,14 +1015,24 @@ p.pdetail { margin-top: var(--space-1); }
 .sheet strong { font-weight: 500; }
 .sheet code { color: var(--muted); }
 .sheet__left-out { overflow-wrap: anywhere; }
+.sheet--inner { margin-top: var(--space-2); border-bottom: 0; }
+.sheet--inner li { padding-block: var(--space-2); }
+.sheet__area, .pchecks__title { margin-top: var(--space-5); font-size: 0.875rem; font-weight: 600; }
+.pchecks__title { font-size: 1rem; }
+
+/* One check of a profile: its text, then what it says about it. */
+.pcheck__text { min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
+.pcheck__name { color: var(--text); font-weight: 500; }
+.prested { color: var(--text); }
 
 .pfindings { margin-top: var(--space-3); border-bottom: 1px solid var(--border); }
-.pfindings li { padding-block: var(--space-3); border-top: 1px solid var(--border); }
+.pfindings li { padding-block: var(--space-3); border-top: 1px solid var(--border); overflow-wrap: anywhere; }
 
 @media (max-width: 30rem) {
   .ptable th, .ptable td { padding: var(--space-2) var(--space-3); }
   .ptable .ptable__withhold { width: 5.25rem; padding-inline: var(--space-1); }
   .ptable th[scope="row"] { width: 42%; font-size: 0.8125rem; }
+  .ptable--ids thead th:first-child, .ptable--ids th[scope="row"] { width: 5.75rem; }
   .pdetails { grid-template-columns: minmax(0, 1fr); }
   .pdetails dd + dt { margin-top: var(--space-2); }
 }
@@ -1064,5 +1077,5 @@ p.pdetail { margin-top: var(--space-1); }
   .finding__toggle { display: block; padding-left: var(--space-4); }
   .finding__body { padding-left: var(--space-4); }
   .finding, .score, .na li, .sheet li, .status { break-inside: avoid; }
-  h3, h4 { break-after: avoid; }
+  h3, h4, h5 { break-after: avoid; }
 }

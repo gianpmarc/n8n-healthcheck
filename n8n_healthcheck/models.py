@@ -1,13 +1,15 @@
 """Shared contract between collectors, rules, engine and report.
 
-Collectors fill a Snapshot. Rules read a Snapshot and return a Finding or None.
-A Snapshot section that is None means "not collected": rules must return None
-for it, never guess.
+Collectors fill a Snapshot. Rules read a Snapshot and return a Finding or an Outcome:
+every rule states, on every run, that it found a problem, that it verified the good
+condition, that it does not apply, or that it could not decide and why.
+A Snapshot section that is None means "not collected": a rule that needs it says so
+(`not_assessed`), it never guesses.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 # Collectors replace the value of any secret-looking variable (password, key,
@@ -113,4 +115,89 @@ class Finding:
     recommendation: str  # the concrete fix
 
 
-Rule = Callable[[Snapshot], Optional[Finding]]
+# What a rule can state about one run. "finding" is a Finding; the others are an Outcome.
+OUTCOMES = ("finding", "passed", "not_applicable", "not_assessed")
+# How a passed check knows the good value: it read it, or the variable is not set in an
+# environment read in full and the n8n default is the good value.
+BASES = ("read", "default")
+# Why a rule could not decide. `rule_error` is set by the engine, never by a rule.
+NOT_ASSESSED_REASONS = ("source_missing", "value_unreadable", "source_failed", "not_stated", "sources_disagree", "rule_error")
+# What the operator can give, as `needs` names it. "url" covers the health and metrics endpoints.
+SOURCE_IDS = ("url", "env", "postgres", "redis", "kubernetes", "debug_info")
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What a rule states when it has no finding. Made with the helpers of rules/_helpers.py."""
+
+    outcome: str  # "passed", "not_applicable" or "not_assessed"
+    basis: str = ""  # passed: one of BASES
+    reason: str = ""  # not_assessed: one of NOT_ASSESSED_REASONS
+    needs: tuple = ()  # not_assessed, source_missing: the SOURCE_IDS of which any one would let the rule decide
+    # True when the rule read the execution mode to state this, whether or not the mode is
+    # among its own facts and settings (see profile.rests_on()): a rule that does not apply
+    # because of the mode, the not_assessed that replaces it when another source of the run
+    # says otherwise, and a queue rule that lacks its source on an instance not known to be
+    # in regular mode.
+    by_mode: bool = False
+
+
+@dataclass(frozen=True)
+class Variant:
+    """The fixed texts of one way a rule can fail. Literals of the code: no value of an instance."""
+
+    title: str
+    impact: str
+    remedy: str
+
+
+@dataclass(frozen=True)
+class RuleInfo:
+    """What a rule is, whatever the instance: its id and its fixed texts.
+
+    `subject` names what the rule checks, in a few words; `passed` is the sentence that
+    states the good condition. `facts` are the profile facts the rule rests on, and
+    `settings` the n8n variables, read in the `scopes` given: only where the rule and that
+    entry of the profile read the same thing (see profile.rests_on()).
+    """
+
+    rule_id: str  # stable, e.g. "SCAL-001"
+    area: str  # one of AREAS
+    subject: str
+    passed: str
+    variants: tuple = ()
+    facts: tuple = ()
+    settings: tuple = ()
+    scopes: tuple = ("instance", "main")
+
+    def finding(self, variant: Variant, severity: str, evidence: str) -> Finding:
+        return Finding(
+            rule_id=self.rule_id,
+            area=self.area,
+            severity=severity,
+            title=variant.title,
+            evidence=evidence,
+            impact=variant.impact,
+            recommendation=variant.remedy,
+        )
+
+
+@dataclass
+class Check:
+    """One rule's statement about one run, as the engine recorded it.
+
+    `info` is None for a callable that is not a declared rule (a test double). `finding`
+    is set for outcome "finding", and for a rule that raised: then it is the placeholder
+    with rule_id ENGINE-SKIPPED that the report lists under "Not assessed".
+    """
+
+    info: Optional[RuleInfo]
+    outcome: str  # one of OUTCOMES
+    finding: Optional[Finding] = None
+    basis: str = ""
+    reason: str = ""
+    needs: tuple = field(default_factory=tuple)
+    by_mode: bool = False
+
+
+Rule = Callable[[Snapshot], "Finding | Outcome"]

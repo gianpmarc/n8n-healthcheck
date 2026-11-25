@@ -1,20 +1,86 @@
-"""Small readers shared by the rule modules. No rule logic lives here."""
+"""Small readers shared by the rule modules, and how a rule states its outcome. No rule logic lives here."""
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import math
 import re
 from typing import Iterator, Optional
 
 from .. import debug_info
-from ..models import REDACTED, Snapshot
+from ..models import REDACTED, Outcome, RuleInfo, Snapshot
 
 # Leading x.y.z of an image tag: "2.40.1", "v2.40.1" and "2.40.1-build7" are one release.
 _VERSION = re.compile(r"v?(\d+\.\d+\.\d+)")
+# An image tag that names a part of a 0.x or 1.x version: "1", "1.80", "1.x", "v1", "1-debian",
+# "1_custom". Not "10", and not "1a2b3c", which is a word.
+_TAG_BEFORE_2 = re.compile(r"v?0*[01](?:$|[._-])")
 
 
 # Value of a Kubernetes container variable that is set but could not be read (a Secret).
 VALUE_FROM = "<valueFrom>"
+
+
+# --- outcomes ----------------------------------------------------------------------
+# A rule returns a Finding, or one of these. The line that matters is between PASSED and
+# the rest: PASSED only when the rule read the values it needs and they are good. A
+# silence kept on purpose is NOT_APPLICABLE, anything the rule could not tell is not assessed.
+
+PASSED = Outcome("passed", basis="read")
+# The variable is not set in an environment read in full, and the n8n default is the good value.
+PASSED_BY_DEFAULT = Outcome("passed", basis="default")
+NOT_APPLICABLE = Outcome("not_applicable")
+# Not applicable because the instance is known not to run in queue mode.
+NOT_QUEUE = Outcome("not_applicable", by_mode=True)
+# A source the rule reads was given and read, and does not say what the rule needs.
+NOT_STATED = Outcome("not_assessed", reason="not_stated")
+# A source holds the value, but it could not be read: a Secret, a file, a redacted value,
+# or an environment of which a part is missing.
+UNREADABLE = Outcome("not_assessed", reason="value_unreadable")
+# Two sources given in the run state different things about what the rule reads. The
+# order between sources decides when a finding is raised; it never makes a rule pass,
+# or not apply, against a source that says otherwise.
+SOURCES_DISAGREE = Outcome("not_assessed", reason="sources_disagree")
+
+
+def source_missing(*needs: str) -> Outcome:
+    """None of the sources where the rule looks was given; any one of `needs` would let it decide."""
+    return Outcome("not_assessed", reason="source_missing", needs=tuple(needs))
+
+
+def rule(rule_id: str, area: str, *, subject: str, passed: str, variants=(), facts=(), settings=(), scopes=("instance", "main")):
+    """Declare a rule: its id, its area and its fixed texts (models.RuleInfo).
+
+    The function it decorates states an outcome on every run: a Finding or an Outcome.
+    The rule itself keeps the contract it had before outcomes existed, a Finding or None,
+    so that it can still be called alone; `rule.assess` is the function that says why
+    there is no finding, which the engine calls, and `rule.info` what the rule is.
+    """
+
+    def declare(function):
+        @functools.wraps(function)
+        def finding_or_none(snapshot: Snapshot):
+            result = function(snapshot)
+            return None if isinstance(result, Outcome) else result
+
+        @functools.wraps(function)
+        def assess(snapshot: Snapshot):
+            result = function(snapshot)
+            if isinstance(result, Outcome) and result.outcome in ("passed", "not_applicable"):
+                # A rule that does not apply because of the mode read the mode, declared or not.
+                mode = result.by_mode and "EXECUTIONS_MODE" not in settings
+                names = tuple(settings) + (("EXECUTIONS_MODE",) if mode else ())
+                why = against_sources(snapshot, names, tuple(scopes))
+                # It still read the mode: the entry of the file names it (profile.rests_on()).
+                return dataclasses.replace(why, by_mode=result.by_mode) if why is not None else result
+            return result
+
+        finding_or_none.assess = assess
+        finding_or_none.info = RuleInfo(rule_id, area, subject, passed, tuple(variants), tuple(facts), tuple(settings), tuple(scopes))
+        return finding_or_none
+
+    return declare
 
 
 class Env(dict):
@@ -105,8 +171,164 @@ def debug_info_env(section: dict) -> dict:
         "EXECUTIONS_DATA_SAVE_ON_PROGRESS": section.get("save_progress"),
         "N8N_SECURE_COOKIE": False if insecure.get("secure_cookie") else None,
         "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES": False if insecure.get("file_access_blocked") else None,
+        "N8N_DEFAULT_BINARY_DATA_MODE": section.get("binary_mode"),
     }
     return {name: str(value).lower() for name, value in values.items() if value is not None}
+
+
+# The n8n default of the variables the rules read, written as debug_info_env() writes them.
+# A variable that is not set in an environment read in full states its default. The ones
+# left out have no default that holds on every version (the binary data mode, whether
+# the task runners are on): not set, they state only that they are not set.
+DEFAULTS = {
+    "EXECUTIONS_MODE": "regular",
+    "DB_TYPE": "sqlite",
+    "N8N_MULTI_MAIN_SETUP_ENABLED": "false",
+    "N8N_CONCURRENCY_PRODUCTION_LIMIT": "-1",
+    "EXECUTIONS_DATA_PRUNE": "true",
+    "EXECUTIONS_DATA_SAVE_ON_PROGRESS": "false",
+    "N8N_SECURE_COOKIE": "true",
+    "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES": "true",
+    "N8N_RUNNERS_MODE": "internal",
+    "N8N_METRICS": "false",
+    "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": "false",
+}
+NOT_SET = "<not set>"
+
+
+def _same(one, other) -> bool:
+    """True when two values of one n8n variable mean the same: `1` and `true`, `10` and ` 10`."""
+    one, other = str(one).strip().lower(), str(other).strip().lower()
+    if one == other:
+        return True
+    flags = {"true": True, "1": True, "false": False, "0": False}
+    if one in flags and other in flags:
+        return flags[one] is flags[other]
+    try:
+        return int(one) == int(other)
+    except ValueError:
+        return False
+
+
+def told(env: dict, name: str, complete: bool = True) -> Optional[str]:
+    """What one environment states for `name`, or None when it cannot be told.
+
+    Its value when it is set and readable. Not set in an environment read in full: its
+    n8n default, or NOT_SET for a variable without one. It cannot be told when the value
+    is not readable (a Secret, a redacted value), when it is given through `<NAME>_FILE`,
+    or when it is not among the variables read of an environment read in part.
+    """
+    if name in env:
+        return None if env[name] in (VALUE_FROM, REDACTED) else env[name]
+    if name + "_FILE" in env or not complete:
+        return None
+    return DEFAULTS.get(name, NOT_SET)
+
+
+# The variables that are one for the instance: every process is in the same execution
+# mode and on the same database, whatever its role. They are compared across every n8n
+# container, also for a rule that judges one role only.
+INSTANCE_WIDE = ("EXECUTIONS_MODE", "DB_TYPE")
+ROLES = ("main", "worker", "webhook")
+
+
+def compared_scopes(name: str, scopes: tuple) -> tuple:
+    """The scopes where a rule's variable is read: its own, and every role for a variable that is one for the instance."""
+    if name not in INSTANCE_WIDE:
+        return scopes
+    return scopes + tuple(role for role in ROLES if role not in scopes)
+
+
+def against_sources(snapshot: Snapshot, names: tuple, scopes: tuple) -> Optional[Outcome]:
+    """Why a rule cannot pass, or not apply, on `names` given every source of the run; None when it can.
+
+    Three comparisons, each between sources that describe the same thing, on what each
+    states (see told()): a variable that is not set states its n8n default.
+
+    - The env file describes every process: it is compared with each Kubernetes
+      container of the roles in `scopes`, and of every role for a variable that is one
+      for the instance (INSTANCE_WIDE).
+    - Such a variable is also compared between the containers of Kubernetes themselves:
+      a main container in regular mode next to a worker in queue mode is one instance
+      stated in two ways. For any other variable two containers are two processes, each
+      with its own value, and are not compared.
+    - The debug information reports the effective values of the main process: it is
+      compared with the env file and with each main container, for a variable the rule
+      reads on main; and with every container for a variable that is one for the instance.
+
+    SOURCES_DISAGREE when two of them state different things. UNREADABLE when none does
+    and a container next to an env file cannot be told for a variable: the file says how
+    every process is set, and that container cannot be said to agree.
+    """
+    containers = [
+        (container.get("env") or {}, container.get("env_complete") is True, role)
+        for _, container, role in n8n_containers(snapshot.kubernetes or {})
+    ]
+    text = debug_info_env(debug_info.of(snapshot) or {})
+    untold = False
+    for name in names:
+        roles = compared_scopes(name, scopes)
+        stated_there = [
+            (told(env, name, complete), role)
+            for env, complete, role in containers
+            # A worker or a webhook processor runs in queue mode only, by its start command:
+            # what the variable gives there when it is not set is n8n's business, and is
+            # not taken as "regular". Only a mode that is set on them is a statement. Read
+            # in part, the mode may be set in what was not read: that one cannot be told.
+            if role in roles and not (name == "EXECUTIONS_MODE" and role != "main" and complete and name not in env and name + "_FILE" not in env)
+        ]
+        file_says = told(snapshot.env, name) if snapshot.env is not None else None
+        if file_says is not None:
+            if any(says is not None and not _same(says, file_says) for says, _role in stated_there):
+                return SOURCES_DISAGREE
+            untold = untold or any(says is None for says, _role in stated_there)
+        if name in INSTANCE_WIDE:
+            known = [says for says, _role in stated_there if says is not None]
+            if any(not _same(says, known[0]) for says in known):
+                return SOURCES_DISAGREE
+        # The text describes the main process: it says nothing to a rule that reads the
+        # variable on the workers only.
+        if name not in text or "main" not in roles:
+            continue
+        there = [says for says, role in stated_there if role == "main" or name in INSTANCE_WIDE]
+        for says in ([told(snapshot.env, name)] if snapshot.env is not None else []) + there:
+            # Not set and without a default: the effective value the text reports cannot contradict it.
+            if says not in (None, NOT_SET) and not _same(says, text[name]):
+                return SOURCES_DISAGREE
+    return UNREADABLE if untold else None
+
+
+def majors_read(snapshot: Snapshot) -> set:
+    """The major version of every n8n version read in the run.
+
+    From /metrics, from the debug information and the instances it lists, and from the
+    image tag of each n8n container in Kubernetes, whatever its role. Only a full
+    x.y.z is a version that can be "2.x or later". A tag that names a part of a version
+    can hold a pass back and never give one: one that starts with 1 or 0 (1, 1.80, 1.x,
+    1-debian) is read as 1, and any other (2, 42, 24.04: a version, a build number, a
+    date) is not a version read, like latest, a digest or a word.
+    """
+    majors = {int(version.split(".")[0]) for version in versions_stated(snapshot) if _VERSION.fullmatch(version)}
+    for _deployment, container, _role in n8n_containers(snapshot.kubernetes or {}):
+        full = image_version(container.get("image"))
+        if full is not None:
+            majors.add(int(full.split(".")[0]))
+        elif _TAG_BEFORE_2.match(image_tag(container.get("image")) or ""):
+            majors.add(1)
+    return majors
+
+
+def versions_stated(snapshot: Snapshot) -> set:
+    """The n8n versions (leading x.y.z) that /metrics and the debug information state for the instance."""
+    section = debug_info.of(snapshot) or {}
+    versions = [snapshot.n8n_version, section.get("n8n_version"), *((section.get("cluster") or {}).get("versions") or [])]
+    return {release(version) for version in versions if isinstance(version, str) and version}
+
+
+def release(version: str) -> str:
+    """The leading x.y.z of a version, so 2.40.1 and v2.40.1-build7 are one release; else the text as it is."""
+    match = _VERSION.match(version)
+    return match.group(1) if match else version
 
 
 def stated(snapshot: Snapshot, name: str) -> bool:
@@ -184,6 +406,50 @@ def unknown(env: dict, name: str) -> bool:
     if name in env:
         return env[name] in (VALUE_FROM, REDACTED)
     return not getattr(env, "complete", True)
+
+
+def undecided(env: dict, name: str) -> Optional[Outcome]:
+    """Why `name` cannot be told, or None when it is readable or provably not set.
+
+    Stricter than unknown(): a variable given through `<NAME>_FILE` cannot be told either.
+    For the path of a rule that has no finding; what raises a finding stays with unknown().
+    """
+    if name in env:
+        return UNREADABLE if env[name] in (VALUE_FROM, REDACTED) else None
+    if name + "_FILE" in env:
+        return UNREADABLE
+    if getattr(env, "complete", True):
+        return None
+    # Kubernetes with a part of the environment missing; else the debug information alone.
+    return UNREADABLE if getattr(env, "source", "") else NOT_STATED
+
+
+def no_environment(snapshot: Snapshot, text: bool = False, needs: tuple = ()) -> Outcome:
+    """The outcome of a rule that has no environment to read.
+
+    `text` says the rule also reads the debug information for it. Not stated when one of
+    those sources was given (Kubernetes without a main container, or with mains that
+    disagree; a text that does not say); else `needs`, by default all of them.
+    """
+    given = snapshot.env is not None or snapshot.kubernetes is not None
+    if given or (text and debug_info.of(snapshot) is not None):
+        return NOT_STATED
+    return source_missing(*(needs or ("env", "kubernetes") + (("debug_info",) if text else ())))
+
+
+def queue_only(env: dict) -> Optional[Outcome]:
+    """For a rule about queue mode: why it says nothing, or None when the mode is queue."""
+    return undecided(env, "EXECUTIONS_MODE") or (None if is_queue_mode(env) else NOT_QUEUE)
+
+
+def flag_is(env: dict, name: str, good: bool, default: bool) -> Outcome:
+    """The outcome of a boolean variable that must be `good`, once a finding is ruled out."""
+    why = undecided(env, name)
+    if why is not None:
+        return why
+    if name not in env:
+        return PASSED_BY_DEFAULT if default is good else NOT_STATED
+    return PASSED if env_flag(env, name) is good else NOT_STATED
 
 
 def env_flag(env: dict, name: str) -> Optional[bool]:
