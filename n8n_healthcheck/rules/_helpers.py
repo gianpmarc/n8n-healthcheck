@@ -13,9 +13,9 @@ from ..models import REDACTED, Outcome, RuleInfo, Snapshot
 
 # Leading x.y.z of an image tag: "2.40.1", "v2.40.1" and "2.40.1-build7" are one release.
 _VERSION = re.compile(r"v?(\d+\.\d+\.\d+)")
-# An image tag that starts with a version number, whole or in part: "1", "1.80", "v2-debian".
-# A longer number is a date or a build number, and a word that starts with a digit is a word.
-_TAG_MAJOR = re.compile(r"v?(\d{1,3})(?:\.\d+\.\d+|(?:\.\d+)?(?![\w.]))")
+# An image tag that names a part of a 0.x or 1.x version: "1", "1.80", "1.x", "v1", "1-debian",
+# "1_custom". Not "10", and not "1a2b3c", which is a word.
+_TAG_BEFORE_2 = re.compile(r"v?0*[01](?:$|[._-])")
 
 
 # Value of a Kubernetes container variable that is set but could not be read (a Secret).
@@ -302,15 +302,19 @@ def majors_read(snapshot: Snapshot) -> set:
     """The major version of every n8n version read in the run.
 
     From /metrics, from the debug information and the instances it lists, and from the
-    image tag of each n8n container in Kubernetes, whatever its role. A tag counts when
-    it starts with a version number, also in part (1, 1.80). A tag or a text that names
-    no version (latest, a digest, a word, a date) is not a version read.
+    image tag of each n8n container in Kubernetes, whatever its role. Only a full
+    x.y.z is a version that can be "2.x or later". A tag that names a part of a version
+    can hold a pass back and never give one: one that starts with 1 or 0 (1, 1.80, 1.x,
+    1-debian) is read as 1, and any other (2, 42, 24.04: a version, a build number, a
+    date) is not a version read, like latest, a digest or a word.
     """
     majors = {int(version.split(".")[0]) for version in versions_stated(snapshot) if _VERSION.fullmatch(version)}
     for _deployment, container, _role in n8n_containers(snapshot.kubernetes or {}):
-        match = _TAG_MAJOR.match(image_tag(container.get("image")) or "")
-        if match:
-            majors.add(int(match.group(1)))
+        full = image_version(container.get("image"))
+        if full is not None:
+            majors.add(int(full.split(".")[0]))
+        elif _TAG_BEFORE_2.match(image_tag(container.get("image")) or ""):
+            majors.add(1)
     return majors
 
 

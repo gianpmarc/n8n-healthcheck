@@ -381,6 +381,23 @@ Decided by the owner on 2026-11-25, as a last small round.
 
 Findings, scores and the health report are unchanged by these as well.
 
+### After the fifth review
+
+Decided by the owner on 2026-11-25, as the last round.
+
+- **For SEC-002 a tag that names a part of a version can hold the pass back, never give
+  it.** "Every n8n version read is 2.x or later" needs a full x.y.z: from `/metrics`, the
+  debug information, an instance it lists, or a full x.y.z tag. A tag whose leading
+  number is 1 or 0, followed by the end of the tag or by `.`, `-` or `_` (`1`, `1.80`,
+  `1.x`, `v1`, `1-debian`, `1_custom`), is read as a 1.x. Any other tag (`2`, `42`,
+  `24.04`, a word, a digest) is not a version read.
+- **Known limits, written out:** with Kubernetes alone, a worker read in part or with
+  the mode in a Secret is compared with nothing for the mode too, also against the debug
+  information; and SCAL-004 compares the limit of the text only when Kubernetes shows no
+  worker container. Both are in `docs/rules.md`, "Known limits".
+
+Findings, scores and the health report are unchanged by these as well.
+
 ## Left to the builder
 
 - How rules state their outcome, and the internal names.

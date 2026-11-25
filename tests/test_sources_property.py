@@ -60,7 +60,7 @@ DEFAULT = {
     "EXECUTIONS_DATA_SAVE_ON_PROGRESS": "false",
 }
 UNSET = "<unset>"
-IMAGES = ["n8nio/n8n:1.80.0", "n8nio/n8n:2.1.0", "n8nio/n8n:2.1.0", "n8nio/n8n:2.1.0", "n8nio/n8n:1", "n8nio/n8n:1.80", "n8nio/n8n:latest", "n8nio/n8n@sha256:abc", "registry.example/team/n8n:prod", "redis:7"]  # fmt: skip
+IMAGES = ["n8nio/n8n:1.80.0", "n8nio/n8n:2.1.0", "n8nio/n8n:2.1.0", "n8nio/n8n:2.1.0", "n8nio/n8n:1", "n8nio/n8n:1.80", "n8nio/n8n:1.x", "n8nio/n8n:1_custom", "n8nio/n8n:42", "n8nio/n8n:2", "n8nio/n8n:latest", "n8nio/n8n@sha256:abc", "registry.example/team/n8n:prod", "redis:7"]  # fmt: skip
 COMMANDS = [[], [], ["n8n", "worker"], ["n8n", "worker", "--concurrency=3"], ["sh", "-c", "n8n worker --concurrency 12"], ["n8n", "webhook"]]
 VERSIONS = [None, "1.80.0", "2.1.0", "v2.1.0"]
 
@@ -251,12 +251,25 @@ def major(version) -> int:
     return int(version.lstrip("v").split(".")[0])
 
 
+def tag_version(tag: str):
+    """The version an image tag is read as: its own when it is a full x.y.z, "1" when it names a part of a 0.x or 1.x, else None.
+
+    A tag that names a part of a version (2, 42, 24.04) may be a build number or a date:
+    it can hold a pass back when it starts with 1 or 0, and never gives one.
+    """
+    pieces = tag.removeprefix("v").split(".")
+    if len(pieces) >= 3 and pieces[0].isdigit() and pieces[1].isdigit() and pieces[2][:1].isdigit():
+        return tag
+    first = pieces[0].replace("-", "_").split("_")[0]
+    return "1" if first.isdigit() and int(first) < 2 else None
+
+
 def versions_read(snapshot: Snapshot) -> dict:
-    """Every n8n version read in the run, by where it was read: a tag that starts with a number is one, on any n8n container."""
+    """Every n8n version read in the run, by where it was read; an image tag on any n8n container, as tag_version() reads it."""
     section = snapshot.debug_info or {}
     tags = [(container["image"].rsplit(":", 1) + [""])[1] for *_rest, container, _replicas in containers(snapshot) if "@" not in container["image"]]
     return {
-        "image tag": [tag for tag in tags if tag[:1].isdigit()],
+        "image tag": [tag_version(tag) for tag in tags if tag_version(tag)],
         "listed instance": list((section.get("cluster") or {}).get("versions") or []),
         "instance": [version for version in (snapshot.n8n_version, section.get("n8n_version")) if version],
     }

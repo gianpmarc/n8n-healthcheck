@@ -730,7 +730,7 @@ class ReviewTest(unittest.TestCase):
             ("main on 2.x, a webhook processor on 1.x", runners(on(external, image="n8nio/n8n:2.1.0"), webhook({}, image="n8nio/n8n:1.80.0")), {"SEC-002": DISAGREE}),
             ("the only container on the tag 1", runners(on(external, image="n8nio/n8n:1")), {"SEC-002": DISAGREE}),
             ("the only container on the tag 1.80", runners(on(external, image="n8nio/n8n:1.80")), {"SEC-002": DISAGREE}),
-            ("the only container on the tag 2, no other version", Snapshot(kubernetes=kube(on(external, image="n8nio/n8n:2"))), {"SEC-002": READ}),
+            ("the only container on the tag 2, no other version", Snapshot(kubernetes=kube(on(external, image="n8nio/n8n:2"))), {"SEC-002": NOT_STATED}),
             ("a tag that is a date or a build number names no version", Snapshot(kubernetes=kube(on(external, image="n8nio/n8n:20261105"))), {"SEC-002": NOT_STATED}),
             ("a tag that starts with a digit and is a word names no version", runners(on(external, image="n8nio/n8n:1a2b3c")), {"SEC-002": READ}),
         ]
@@ -740,6 +740,20 @@ class ReviewTest(unittest.TestCase):
                     (check,) = engine.assess(snapshot, [RULES[rule_id]])
                     self.assertEqual(stated(check), outcome)
                     self.assertEqual(RULES[rule_id](snapshot) is not None, outcome == FINDING)
+
+    def test_the_fifth_review(self):
+        # SEC-002: a tag that names a part of a version can hold the pass back, never give it.
+        tagged = lambda tag, **sections: Snapshot(kubernetes=kube(("main", 1, container(env={"N8N_RUNNERS_MODE": "external"}, image=f"n8nio/n8n:{tag}"))), **sections)
+        cases = [(f"the tag {tag} alone", tagged(tag), NOT_STATED) for tag in ("42", "7", "123", "999", "24.04", "2.1", "v2-debian", "1000", "1", "1.80")]
+        cases += [(f"the tag {tag} next to /metrics on 2.x", tagged(tag, n8n_version="2.1.0"), DISAGREE) for tag in ("1.x", "1.80.x", "1.", "1_custom", "v1", "1-debian", "01", "0.236")]
+        cases += [(f"the tag {tag} next to /metrics on 2.x", tagged(tag, n8n_version="2.1.0"), READ) for tag in ("42", "24.04", "2", "10", "1a2b3c", "custom-1.80.0")]
+        cases += [(f"the tag {tag} next to /metrics on 1.x", tagged(tag, n8n_version="1.80.0"), NOT_STATED) for tag in ("42", "2", "1")]
+        cases += [(f"the full tag {tag} alone", tagged(tag), READ) for tag in ("2.1.0", "v2.1.0-exp.0", "24.11.5")]
+        for label, snapshot, outcome in cases:
+            with self.subTest(case=label):
+                (check,) = engine.assess(snapshot, [RULES["SEC-002"]])
+                self.assertEqual(stated(check), outcome)
+                self.assertIsNone(RULES["SEC-002"](snapshot))
 
     def test_what_makes_a_rule_not_apply_is_carried_to_the_profile(self):
         by_mode = lambda snapshot, rule_id: engine.assess(snapshot, [RULES[rule_id]])[0].by_mode

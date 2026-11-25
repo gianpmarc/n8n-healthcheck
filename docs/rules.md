@@ -131,20 +131,36 @@ show as `value_unreadable`.
   `postgresdb`, workers whose `DB_TYPE` is in a Secret or whose environment was read in
   part: REL-001 passes with its sentence about "every process". Without an env file there
   is nothing that says how every process is set, so such a container is compared with
-  nothing; next to an env file the same containers give `value_unreadable`.
+  nothing; next to an env file the same containers give `value_unreadable`. The same
+  holds for the mode, also against the debug information: a main container in regular
+  mode, or a text in regular mode, next to workers read in part or with
+  `EXECUTIONS_MODE` in a Secret is not a disagreement, and SCAL-002 passes while
+  SCAL-003, REL-001 and REL-006 "do not apply".
+- **SCAL-004 and the debug information.** The limit the text states is compared with the
+  limit of the env file only when Kubernetes shows no worker container. An env file with
+  a limit of 10, a worker container with a limit of 10 and a text that states 3:
+  SCAL-004 passes, on what the worker container says.
 - **Several main containers that differ** are read by no rule, as in 0.5.0: the checks
   that read the main process are `not_stated`.
-- **Image tags.** SEC-002 takes a version from a tag that starts with a version number
-  (`2.1.0`, `1.80`, `1`, `v2-debian`). A number of four digits or more (a date, a build
-  number) and a word that starts with a digit name no version. MAINT-003 compares full
-  x.y.z tags only: a tag `1` cannot be said to differ from `1.80.0`.
+- **Image tags.** For SEC-002 a tag is a version read in two cases only. A tag that
+  starts with a full x.y.z, with or without a leading `v` (`2.1.0`, `v2.1.0-exp.0`,
+  `1.80.0`), is that version: it can give the pass or hold it back. A tag whose leading
+  number is 1 or 0, followed by the end of the tag or by `.`, `-` or `_` (`1`, `1.80`,
+  `1.x`, `1.80.x`, `1.`, `v1`, `1-debian`, `1_custom`), is read as a 1.x: it holds the
+  pass back and cannot give it. Any other tag is not a version read, and neither gives
+  nor holds back: a number alone or x.y (`2`, `42`, `24.04`, `2.1`, which may be a build
+  number or a date), `v2-debian`, a word that starts with a digit (`1a2b3c`), a tag where
+  the number is not first (`custom-1.80.0`), `latest`, a digest. So a pass on "every n8n
+  version read is 2.x or later" always has a full x.y.z behind it. A full x.y.z that is
+  a date (`24.11.5`) is read as a version, as in the rounds before. MAINT-003 compares
+  full x.y.z tags only: a tag `1` cannot be said to differ from `1.80.0`.
 
 ### What the property test covers
 
 `tests/test_sources_property.py` asserts the above, and what follows about `rests_on`, on
 snapshots made by a seeded generator and not on listed cases. It generates an env file,
 Kubernetes Deployments of the three roles (variables set, not set, in a Secret, given by
-`_FILE`, environments read in part, images on n8n 1.x and 2.x, on the tags `1` and `1.80`, and without a version,
+`_FILE`, environments read in part, images on n8n 1.x and 2.x, on the tags `1`, `1.80`, `1.x`, `1_custom`, `2` and `42`, and without a version,
 replicas, the `--concurrency` flag), a debug information (with and without a cluster
 section), the answers of the URL, the n8n version, Redis and Postgres; half of the
 snapshots repeat one environment across their sources so that sources also agree.
@@ -156,8 +172,9 @@ every n8n container state them one way: it does not take from the rules which co
 a variable is compared on. A worker or a webhook processor is left out for the mode only
 when it does not set it in an environment read in full. It also asks that SEC-002 does
 not pass on a process that leaves `N8N_RUNNERS_ENABLED` unset when any version read in
-the run is 1.x or none was read, a version being also any image tag that starts with a
-number, on any n8n container; the test fails when no snapshot has a 1.x stated by an
+the run is 1.x or none was read. It reads an image tag, on any n8n container, with a
+function of its own: a full x.y.z is a version, a part of a 0.x or 1.x holds the pass
+back, any other tag is no version read (see "Known limits"). The test fails when no snapshot has a 1.x stated by an
 image tag alone, by a listed instance alone, and by `/metrics` or the text alone. And it
 asks that SCAL-004 does not pass on the limit of the env file alone against another limit
 in the debug information.
@@ -647,7 +664,7 @@ the file to name.
 ### SEC-002
 
 - **Subject** (written when the rule does not apply or could not decide): Task runners for the Code node
-- **Reads:** `N8N_RUNNERS_MODE` and `N8N_RUNNERS_ENABLED` of every process that runs Code nodes: the env file; else, in Kubernetes, the main container (unless it offloads manual executions) and every worker container. When `N8N_RUNNERS_ENABLED` is not set, every n8n version read in the run: from `/metrics`, from the debug information and the instances it lists, and from the image tag of each n8n container, whatever its role, when the tag starts with a version number, whole or in part (`2.1.0`, `1.80`, `1`). `DB_TYPE` and the mode for the severity of the finding.
+- **Reads:** `N8N_RUNNERS_MODE` and `N8N_RUNNERS_ENABLED` of every process that runs Code nodes: the env file; else, in Kubernetes, the main container (unless it offloads manual executions) and every worker container. When `N8N_RUNNERS_ENABLED` is not set, every n8n version read in the run: from `/metrics`, from the debug information and the instances it lists, and from the image tag of each n8n container, whatever its role: a full x.y.z is that version, a tag that names a part of a 0.x or 1.x (`1`, `1.80`, `1-debian`) is read as 1.x and can only hold the pass back, any other tag (`2`, `42`, `latest`) is not a version read. `DB_TYPE` and the mode for the severity of the finding.
 - **Passed when:** `N8N_RUNNERS_MODE` read as `external` on every process judged, and `N8N_RUNNERS_ENABLED` there either read as true, or not set while every n8n version read is 2.x or later (the first source that answers does not decide for the others: the process judged may be another one than the one that reported its version). Never by default: the default is `internal`. The pass says what the variables are, not that the runners run. The rule's own remedy says that n8n 1.x also needs `N8N_RUNNERS_ENABLED=true`, which is why a variable that is not set does not pass on 1.x, nor when the version is not known. Nobody checked n8n itself for its default on 1.x, nor whether n8n 2.x still reads the variable: `false` never passes, on any version.
 - **Passed text:** N8N_RUNNERS_MODE is external on every process that was read and runs Code nodes, and N8N_RUNNERS_ENABLED is not set to false there: it is set to true, or it is not set and every n8n version read is 2.x or later.
 - **Not applicable when:** Never.
