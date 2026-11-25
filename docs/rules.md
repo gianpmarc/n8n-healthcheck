@@ -132,10 +132,13 @@ show as `value_unreadable`.
   part: REL-001 passes with its sentence about "every process". Without an env file there
   is nothing that says how every process is set, so such a container is compared with
   nothing; next to an env file the same containers give `value_unreadable`. The same
-  holds for the mode, also against the debug information: a main container in regular
-  mode, or a text in regular mode, next to workers read in part or with
-  `EXECUTIONS_MODE` in a Secret is not a disagreement, and SCAL-002 passes while
-  SCAL-003, REL-001 and REL-006 "do not apply".
+  holds for the mode, also against the debug information: workers read in part or with
+  `EXECUTIONS_MODE` in a Secret are not a disagreement on the mode. Next to a main
+  container in regular mode, SCAL-002 passes while SCAL-003, REL-001 and REL-006 "do not
+  apply". Next to a text in regular mode and no main container, REL-006 "does not
+  apply", and so does REL-001 unless the database type disagrees; SCAL-002 is
+  `sources_disagree` (worker replicas against a text in regular mode) and SCAL-003 is
+  `not_stated`.
 - **SCAL-004 and the debug information.** The limit the text states is compared with the
   limit of the env file only when Kubernetes shows no worker container. An env file with
   a limit of 10, a worker container with a limit of 10 and a text that states 3:
