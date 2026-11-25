@@ -1113,7 +1113,7 @@ class PageBehaviourTest(unittest.TestCase):
             for source, label in (("url", "the n8n URL"), ("env", "the env file"), ("postgres", "Postgres"), ("kubernetes", "Kubernetes"))
         ]
         expected.append(f"{plural(coverage['failed']['redis'])} need{'s' if coverage['failed']['redis'] == 1 else ''} Redis, which was asked for and could not be read.")
-        expected.append(f"{plural(coverage['unstated'])} need{'s' if coverage['unstated'] == 1 else ''} a source that states a setting none of the sources of this run shows, or a value that could not be read.")
+        expected.append(f"{plural(coverage['unstated'])} could not be decided: a source that was read does not state the setting, or holds a value that could not be read.")
         self.assertEqual(coverage["waiting"]["redis"], 0)
         self.assertEqual(got, {"view": "step-5", "block": True, "decided": f"This run decided {coverage['decided']} of 24 checks.", "rest": "What the others need:",
                                "list": True, "lines": expected, "note": True, "action": True, "back": "step-3"})  # fmt: skip

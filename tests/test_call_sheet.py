@@ -985,7 +985,7 @@ class CliTest(unittest.TestCase):
         code, out, err, file = self.saved()
         self.assertEqual(code, 1)
         self.assertEqual([entry["rule_id"] for entry in file["check"]["checks"]], [rule.info.rule_id for rule in ALL_RULES])
-        self.assertEqual(file["tool_version"], "0.6.0")
+        self.assertEqual(file["tool_version"], "0.7.0")
         self.assertEqual(file["format_version"], 1)
         from n8n_healthcheck import report
 

@@ -96,9 +96,9 @@ class CatalogueTest(unittest.TestCase):
         self.assertEqual(profile.FORMAT_1_FACT_IDS, validate_0_2_0.FORMAT_1_FACT_IDS)
 
     def test_version(self):
-        self.assertEqual(n8n_healthcheck.__version__, "0.6.0")
+        self.assertEqual(n8n_healthcheck.__version__, "0.7.0")
         self.assertEqual(profile.FORMAT_VERSION, 1)
-        self.assertEqual(base.build()["tool_version"], "0.6.0")
+        self.assertEqual(base.build()["tool_version"], "0.7.0")
 
     def test_every_operator_question_is_documented(self):
         with open(base.DOCS, encoding="utf-8") as handle:

@@ -8,13 +8,13 @@
 
 If you downloaded the repository as a ZIP, macOS may refuse to open the launcher (not tested; this is our understanding of Gatekeeper). Run `bash "Start Health Check.command"` in Terminal from the repository root instead. To keep double-clicking, allow the file once: on macOS 15 and later in System Settings → Privacy & Security → Open Anyway, on older versions with right-click → Open. A `git clone` is not affected.
 
-## The form
+## The page
 
-Every field is optional; give at least one. The first one, "Debug information", takes the text n8n shows under Help > About n8n > Debug information > Copy, pasted as it is. It needs no access to the instance, so it works from the container without any of the network notes below, and it can be the only field you fill. The instance id, the host ids and the browser's user agent in it are read and discarded: [Debug information](../README.md#debug-information).
+The page guides you through six steps. Step 2, "Debug information", is the only required one: it takes the text n8n shows under Help > About n8n > Debug information > Copy, pasted as it is. It needs no access to the instance, so it works from the container without any of the network notes below, and it can be the only thing you give. The instance id, the host ids and the browser's user agent in it are read and discarded: [Debug information](../README.md#debug-information). Every source of step 3 is optional.
 
 ## After a run: the environment profile
 
-Under the report the page offers "Share the environment profile": review each fact and setting, withhold what you do not want to share, and download `n8n-profile-YYYY-MM-DD.json`. The file is made in your browser and saved by it, so it lands in your downloads folder on your machine, not in the container; nothing is written to the container and nothing is sent anywhere. The same step asks a few optional questions about what no probe can read (where n8n runs, what sits in front of it); an answer is written as "declared". "Open a profile" on the start page reads a saved profile the same way, in the browser, without uploading it, and lists the questions it leaves open, ready to copy as Markdown. What the file holds and never holds: [Environment profile](../README.md#environment-profile).
+Step 5, "Review what you share", lists each fact and setting; withhold what you do not want to share (everything can be, except the n8n version). Step 6 downloads `n8n-profile-YYYY-MM-DD.json`. The file is made in your browser and saved by it, so it lands in your downloads folder on your machine, not in the container; nothing is written to the container and nothing is sent anywhere. Send it yourself to the person who asked you for it, by e-mail or attached to your support ticket. Step 5 also asks a few optional questions about what no probe can read (where n8n runs, what sits in front of it); an answer is written as "declared". "Open a profile" on the first screen reads a saved profile the same way, in the browser, without uploading it, and lists the questions it leaves open, ready to copy as Markdown. What the file holds and never holds: [Environment profile](../README.md#environment-profile); what the tool does and never does: [What n8n-healthcheck does](../docs/what-it-does.md).
 
 ## What is in the image, and why
 

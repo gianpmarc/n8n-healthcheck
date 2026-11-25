@@ -1706,7 +1706,7 @@
       if (failed) lines.push(`${checksThat(failed, "need")} ${NEED_LABELS[source]}, which was asked for and could not be read.`);
     }
     const bySource = lines.length;
-    if (whole(coverage.unstated)) lines.push(`${checksThat(whole(coverage.unstated), "need")} a source that states a setting none of the sources of this run shows, or a value that could not be read.`);
+    if (whole(coverage.unstated)) lines.push(`${plural(whole(coverage.unstated), "check")} could not be decided: a source that was read does not state the setting, or holds a value that could not be read.`);
     if (whole(coverage.disagree)) lines.push(`${plural(whole(coverage.disagree), "check")}: two sources of this run disagree on what the check reads.`);
     if (whole(coverage.errors)) lines.push(`${plural(whole(coverage.errors), "check")} failed to run, which is a bug in n8n-healthcheck.`);
     $("coverage-list").hidden = lines.length === 0;

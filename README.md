@@ -4,6 +4,8 @@ Point it at a self-hosted n8n instance. It reads health endpoints, metrics, conf
 
 > Status: working, tested end to end against n8n 2.47 with Postgres 16, Redis 7 and Kubernetes. Not an official n8n project.
 
+**Deciding whether to allow it?** [What n8n-healthcheck does](docs/what-it-does.md) says what it reads, what it computes, what it writes and what it never does, with the test that holds each statement.
+
 ## Why
 
 Deploying n8n is well documented. Knowing whether an existing deployment is healthy is not. This tool answers one question: *is this instance ready for production load, and if not, what do I change first?*
@@ -24,7 +26,7 @@ No command line needed. With Docker running, double-click `Start Health Check.co
 docker compose up -d --build
 ```
 
-Then open http://localhost:8080, fill in what you have, and press Run. The first field of the form takes the [debug information](#debug-information) of n8n (Help > About n8n > Debug information > Copy), pasted as it is; it can be the only field you fill. The image includes `psql` and `kubectl`, so there is nothing else to install. Details, Linux notes and how to reach services on your machine: [docker/README.md](docker/README.md).
+Then open http://localhost:8080. The page guides you through six steps: what the tool does, the [debug information](#debug-information) of n8n (Help > About n8n > Debug information > Copy, pasted as it is; it is required and can be the only thing you give), the other sources, the run and its report, the review of what you share, and the download of the [environment profile](#environment-profile). The image includes `psql` and `kubectl`, so there is nothing else to install. Details, Linux notes and how to reach services on your machine: [docker/README.md](docker/README.md).
 
 Without Docker:
 
@@ -32,7 +34,7 @@ Without Docker:
 python3 -m n8n_healthcheck serve
 ```
 
-The interface listens on `localhost` only, has no login, and stores nothing. After a run it also offers the [environment profile](#environment-profile) to review and download, and the start page can open a saved one.
+The interface listens on `localhost` only, has no login, and stores nothing. Its first screen can also open a saved profile.
 
 ## Usage: command line
 
@@ -40,7 +42,7 @@ The interface listens on `localhost` only, has no login, and stores nothing. Aft
 python3 -m n8n_healthcheck --url https://n8n.example.com --env-file n8n.env -o report.md
 ```
 
-Every source is optional. A source you do not provide is reported as "not assessed", never guessed.
+For the report every source is optional. A source you do not provide is reported as "not assessed", never guessed. To write an [environment profile](#environment-profile) the debug information is required.
 
 | Flag | Source |
 |---|---|
@@ -68,7 +70,7 @@ pbpaste | python3 -m n8n_healthcheck --debug-info -
 
 It can be the only source: the rules that can read it run, and the scores are marked partial. It also combines with the others. A probe wins, value by value: the text is used only for what the other sources of the run do not state, and the evidence of a finding says which values came from it and when it was generated. The report's summary says that it was read, warns when it is more than 30 days old or carries no date, and says so when the text has no `cluster` section (older n8n versions), because replicas and version alignment cannot be told without it.
 
-In the web interface, paste the text in the "Debug information" field, the first of the form. The server reads it in memory and keeps nothing of it; a text it refuses is reported next to the field, and nothing is collected.
+In the web interface it is step 2, and it is required: paste the text and press "Check the text". The server reads it in memory and keeps nothing of it. The step then shows what was read (the n8n version, the execution mode, the number of instances), with the same warnings as the report; a text the server refuses is reported next to the field, and the later steps stay closed. Nothing is collected at that point.
 
 The tool reads known values, numbers and versions from the text and discards the rest. The instance id, the host ids and the browser's user agent in it are never stored or shown, in the report, a saved snapshot or the profile. A text that went through a ticket or a chat (quote marks, changed bullets, a code fence, lost `#`) still reads. A line that a mail client broke in two is joined again, and a UTF-16 file (what Windows PowerShell writes with `>`) is read. A file that is larger than 64 KB, is not a debug information, or holds more than one of them stops the run with exit code 3: give a single text, the most recent. Texts of n8n 1.x are read too.
 
@@ -89,22 +91,24 @@ Use the key of the owner or of an admin. Any other user's key sees only that use
 The report says what will break. Whoever helps you with the instance also needs to know what the environment is. For that the tool can write a second output: one JSON file of facts (n8n version, execution mode, replicas, database and queue figures, the n8n settings that are set), each marked as measured, unknown or withheld.
 
 ```bash
-python3 -m n8n_healthcheck --url https://n8n.example.com --kube-namespace n8n \
+python3 -m n8n_healthcheck --debug-info debug-info.txt --url https://n8n.example.com --kube-namespace n8n \
   --save-profile n8n-profile-2026-11-18.json --reason pre_upgrade --reference "upgrade to 2.50"
 ```
 
+A profile needs the [debug information](#debug-information): it is what states the n8n version, the one fact every later conversation needs. `--save-profile` without `--debug-info` stops with exit code 3 before anything is collected. The report alone needs none.
+
 | Flag | Meaning |
 |---|---|
-| `--save-profile FILE` | write the profile as JSON, next to the usual report |
+| `--save-profile FILE` | write the profile as JSON, next to the usual report; needs `--debug-info` |
 | `--reason REASON` | `baseline` (default), `pre_upgrade`, `post_upgrade`, `incident` or `other` |
 | `--reference TEXT` | one line of free text stored in the profile, at most 200 characters; do not put secrets in it |
-| `--withhold ID` | leave an entry out; repeatable. A fact id (`worker.replicas`), `setting:<scope>:<NAME>`, `check:<RULE_ID>` for one check, or `check` for the whole outcome |
+| `--withhold ID` | leave an entry out; repeatable. A fact id (`worker.replicas`), `setting:<scope>:<NAME>`, `check:<RULE_ID>` for one check, or `check` for the whole outcome. The n8n version (`n8n.version`) cannot be withheld: asking for it stops with exit code 3 |
 | `--show-profile FILE` | print a saved profile as Markdown and exit; works offline, takes only `-o` |
 | `--show-sheet FILE` | print the [call sheet](#call-sheet) of a saved profile as Markdown and exit; works offline, takes only `-o` |
 
 Read the file before you share it: `--show-profile` prints exactly what is in it. A withheld entry stays in the file marked `withheld`, so the reader knows it was removed rather than unknown.
 
-The profile never contains a secret, a host name, a URL, an IP address, a file path, an e-mail address, or a Deployment, namespace or registry name. A setting's value is written only when n8n documents the variable as a boolean, a number or one word of a fixed list; every other documented variable is listed as "set" without its value, and variables n8n does not document are counted, not named. Anything the tool cannot tell for certain is `unknown`, never guessed. The tool does not send the file anywhere.
+The profile never contains a secret, a host name, a URL, an IP address, a file path, an e-mail address, or a Deployment, namespace or registry name. A setting's value is written only when n8n documents the variable as a boolean, a number or one word of a fixed list; every other documented variable is listed as "set" without its value, and variables n8n does not document are counted, not named. Anything the tool cannot tell for certain is `unknown`, never guessed. The one text written as you type it is the optional reference. The tool does not send the file anywhere.
 
 From version 0.6.0 the profile also holds the outcome of every rule: a finding with its impact and its remedy, a check that passed, one that does not apply, or one that could not be assessed and why. Every such text is a fixed sentence of the rule, never a value of your instance; [docs/rules.md](docs/rules.md) lists what each rule reads and every sentence it can write. The evidence of a finding, which quotes what was read, stays in the report.
 
@@ -114,11 +118,18 @@ Withholding applies to the profile only. The report is a separate document and q
 
 ### In the web interface
 
-After a run, the page shows a step under the report, "Share the environment profile". It lists every fact and every setting exactly as it will be written, each with a box to withhold it, plus one box for the check outcome and one for each check, the reason and the reference. "Download profile" saves `n8n-profile-YYYY-MM-DD.json` on your computer; the page sends it nowhere. The same rule as on the command line applies: each row is its own entry, so withhold the fact, the setting and the check separately if you want a datum gone. A withheld fact or setting names the checks that still rest on it.
+The page is a guide in six steps, with a list of the steps on top and one step on screen at a time. "Back" never loses what you entered.
 
-Above the tables the step asks "A few questions": the [profile questions](#profile-questions) the tool could not answer itself, as radio buttons and checkboxes. Every one is optional and starts on "No answer". An answer shows in the facts table as `declared` and can be withheld there like any fact; a fact the tool measured is not asked about. The downloaded file is the one `--answer` and `--withhold` write for the same choices.
+1. **What this tool does**: what it reads, where it connects, what the file never contains, before you give it anything.
+2. **Debug information** (required): see [above](#debug-information).
+3. **Other sources** (optional): the five other sources and the API key. The step shows what the checks decided on the debug information alone ("The debug information decides N of 24 checks") and, under each source, how many checks can be decided with it. A check that can be decided with more than one source is counted under each, so those numbers do not add up.
+4. **Run and report**: the run, then the report. The report stays with you and quotes raw values as evidence.
+5. **Review what you share**: on top, how many of the 24 checks the run decided and what each source you did not give would add, with a way back to step 3. Then every fact and every setting exactly as it will be written, each with a box to withhold it, plus one box for the check outcome and one for each check, the reason and the reference. The n8n version has no box: it is always part of the file. The same rule as on the command line applies: each row is its own entry, so withhold the fact, the setting and the check separately if you want a datum gone. A withheld fact or setting names the checks that still rest on it. If you go back and run again, what you withheld, your answers, the reason and the reference are kept.
+6. **Download and send**: saves `n8n-profile-YYYY-MM-DD.json` on your computer. Send it to the person who asked you for it, by e-mail or attached to your support ticket; the page sends it nowhere.
 
-To read a profile someone sent you, use "Open a profile" on the start page. The file is read in the browser, not uploaded. It opens on the [call sheet](#call-sheet), with "Copy as Markdown" (the same text as `--show-sheet`), followed by its run details, sources, facts, settings and check outcome: the same content as `--show-profile`. Under them, "Questions still open" lists what the profile leaves unknown, and "Copy as Markdown" copies that sheet: the same text as `--show-questions`. A file that is not a profile, was written by a newer version, or is incomplete is refused with a message; nothing of it is shown.
+Step 5 also asks "A few questions": the [profile questions](#profile-questions) the tool could not answer itself, as radio buttons and checkboxes. Every one is optional and starts on "No answer". An answer shows in the facts table as `declared` and can be withheld there like any fact; a fact the tool measured is not asked about. The downloaded file is the one `--answer` and `--withhold` write for the same choices.
+
+To read a profile someone sent you, use "Open a profile" on the first screen. The file is read in the browser, not uploaded. It opens on the [call sheet](#call-sheet), with "Copy as Markdown" (the same text as `--show-sheet`), followed by its run details, sources, facts, settings and check outcome: the same content as `--show-profile`. Under them, "Questions still open" lists what the profile leaves unknown, and "Copy as Markdown" copies that sheet: the same text as `--show-questions`. A file that is not a profile, was written by a newer version, or is incomplete is refused with a message; nothing of it is shown.
 
 ### Call sheet
 
@@ -131,7 +142,7 @@ The person who supports an instance often receives only the profile. `--show-she
 5. **not assessed**: the checks that could not decide, grouped by what would have to be provided ("With Postgres: ..."), and those that do not apply;
 6. the questions still open.
 
-The sheet is made from the file alone and changes nothing. A profile written before 0.6.0 opens too: its sheet lists the findings by title and says that the rest was not recorded. A 0.6.0 profile opens in 0.5.0, which ignores what it does not know.
+The sheet is made from the file alone and changes nothing. A profile written before 0.6.0 opens too: its sheet lists the findings by title and says that the rest was not recorded. A 0.6.0 profile opens in 0.5.0, which ignores what it does not know. Version 0.7.0 changes nothing in the file: a 0.7.0 profile opens in 0.6.0, and an older profile, written without the debug information or with the n8n version withheld, still opens in 0.7.0.
 
 `--save-profile` needs a live run: it cannot be combined with `--snapshot`. The exit code is the one of the health check, with or without a profile. The file format is described in [docs/profile-format.md](docs/profile-format.md).
 
@@ -140,7 +151,7 @@ The sheet is made from the file alone and changes nothing. A profile written bef
 Some of what matters cannot be read by any probe: where n8n runs, what sits in front of it, how the database is backed up. The tool has a short list of closed questions for that, 15 at most. Every one is optional, and an answer is a value from a fixed list, never text you type.
 
 ```bash
-python3 -m n8n_healthcheck --url https://n8n.example.com --kube-namespace n8n \
+python3 -m n8n_healthcheck --debug-info debug-info.txt --url https://n8n.example.com --kube-namespace n8n \
   --save-profile n8n-profile-2026-11-19.json \
   --answer hosting.model=public_cloud --answer database.backups=point_in_time \
   --answer observability.tools=prometheus,grafana

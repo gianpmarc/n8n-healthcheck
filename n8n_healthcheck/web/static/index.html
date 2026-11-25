@@ -58,7 +58,7 @@
 
       <ul class="assurances">
         <li><strong>It only reads.</strong> Nothing is changed on your instance, your database or your cluster.</li>
-        <li><strong>It runs here and contacts only what you point it at.</strong> The check runs on the machine where n8n-healthcheck was started. It contacts the n8n URL (with the API key, when you give one), the database, Redis, and the cluster of the kubectl context you choose. A redirect the n8n URL answers with is followed without the API key. The report and the file are sent nowhere.</li>
+        <li><strong>It runs here and contacts only what you point it at.</strong> The check runs on the machine where n8n-healthcheck was started. It contacts the n8n URL, the database, Redis, and the cluster of the kubectl context you choose. A redirect the n8n URL answers with is followed, and those requests use the proxy settings of this machine if it has any; the API key, when you give one, goes to that URL only, never to another host or through a proxy. The report and the file are sent nowhere.</li>
         <li><strong>You end with one file, which you review and send yourself.</strong> You can leave out any entry of it except the n8n version, which is always part of the file.</li>
       </ul>
 
@@ -240,7 +240,7 @@
     <section id="step-4" class="step" aria-labelledby="step-4-title" hidden>
       <h2 id="step-4-title" tabindex="-1"><span class="step__count">Step 4 of 6</span> Run and report</h2>
       <div id="run-panel">
-        <p class="lead">The check reads the sources you gave and writes a report. Nothing has been collected so far.</p>
+        <p class="lead">The check reads the sources you gave and writes a report. Nothing is collected from them before you press the button.</p>
         <dl class="pdetails">
           <dt>Sources of this run</dt>
           <dd id="run-sources"></dd>

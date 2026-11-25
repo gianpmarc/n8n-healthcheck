@@ -708,6 +708,12 @@ document that quotes raw values as evidence; share it or not as before.
 - Version 0.6.0 added `check.checks` without raising the format version: a
   file that has it opens in version 0.5.0, which ignores the key, and a file
   without it opens in 0.6.0.
+- Version 0.7.0 changes nothing in the file. It changes when one is written:
+  only for a run that was given a debug information, and never with the fact
+  `n8n.version` withheld (the command line and the page refuse both). Neither
+  is a rule of the format: a file with the source `debug_info` as
+  `not_provided`, or with `n8n.version` withheld, is still valid and opens in
+  every version.
 - When a file is opened, `run.reference` must obey the rules it is typed
   under: one line, at most 200 characters, no control characters, no
   surrounding spaces. A file that is not valid is refused with a message that
