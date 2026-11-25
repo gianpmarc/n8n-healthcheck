@@ -273,8 +273,94 @@ main { padding-block: var(--space-7); }
   background: var(--critical-bg);
 }
 
-/* ── Form view ──────────────────────────────────────────────────────── */
-#view-form { max-width: 44rem; }
+/* ── The six steps ──────────────────────────────────────────────────── */
+/* The list of steps: a number and a name each. The current one is said by
+   aria-current, a filled number and a heavier name, never by colour alone; a
+   step that cannot be opened yet is a disabled button with a dashed number. */
+.stepper { margin-bottom: var(--space-6); }
+.stepper ol { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.stepper li { flex: 1 1 8.5rem; min-width: 0; }
+.stepper__step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 2.75rem;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.875rem;
+  line-height: 1.2;
+  text-align: left;
+  cursor: pointer;
+}
+.stepper__step:hover:not(:disabled) { border-color: var(--border-strong); }
+.stepper__n {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  font: 400 0.75rem/1 var(--mono);
+}
+.stepper__label { min-width: 0; overflow-wrap: anywhere; }
+.stepper__step[aria-current="step"] { border: 2px solid var(--text); font-weight: 600; cursor: default; }
+.stepper__step[aria-current="step"] .stepper__n { background: var(--text); border-color: var(--text); color: var(--bg); }
+.stepper__step:disabled { background: transparent; border-style: dashed; color: var(--muted); cursor: not-allowed; }
+.stepper__step:disabled .stepper__n { border-style: dashed; }
+/* On a phone the six names do not fit: the numbers stay, in one row, and the heading of the step says its name. */
+@media (max-width: 40rem) {
+  .stepper ol { flex-wrap: nowrap; }
+  .stepper li { flex: 1 1 0; }
+  .stepper__step { justify-content: center; padding-inline: 0; }
+  .stepper__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+.step { max-width: 44rem; }
+#step-4, #step-5 { max-width: none; }
+#run-panel, #step-4 > .step-nav { max-width: 44rem; }
+.step > h2 { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.step__count {
+  flex-basis: 100%;
+  color: var(--muted);
+  font: 400 0.75rem/1.4 var(--mono);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+.step__sub { margin-top: var(--space-6); }
+.step-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-4);
+  margin-top: var(--space-6);
+}
+.step-nav .btn { min-height: 3rem; padding-inline: var(--space-5); }
+.btn:disabled { cursor: not-allowed; opacity: 0.6; }
+.step a { color: var(--accent-text); text-underline-offset: 0.15em; }
+.howto { margin-top: var(--space-4); padding-left: var(--space-5); list-style: decimal; max-width: var(--measure); }
+.howto li + li { margin-top: var(--space-1); }
+.readout .pdetails { margin-top: var(--space-2); }
+.gain p + p, .readout .messages { margin-top: var(--space-2); }
+.source__gain { padding-top: var(--space-1); font-size: 0.9375rem; font-weight: 500; }
+#view-report { margin-top: var(--space-7); }
+.report-title { font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2rem); }
+#open-block { margin-top: var(--space-7); }
+
+/* ── Form fields ────────────────────────────────────────────────────── */
 .lead { margin-top: var(--space-4); color: var(--muted); font-size: 1.125rem; max-width: var(--measure); }
 
 .assurances {
@@ -1068,7 +1154,7 @@ p.pdetail { margin-top: var(--space-1); }
   .wrap { max-width: none; padding-inline: 0; }
   main { padding-block: 0; }
   .masthead { border-bottom: 1px solid var(--text); margin-bottom: 12pt; }
-  .skip-link, #view-form, #share-block, .actions, .action-status, .sheet__actions, .sheet__text, .toolbar, .toolbar__count,
+  .skip-link, .stepper, .step-nav, .step__count, #run-panel, #step-1, #step-2, #step-3, #step-5, #step-6, .actions, .action-status, .sheet__actions, .sheet__text, .toolbar, .toolbar__count,
   #findings-empty button, .empty--filtered, .chevron { display: none !important; }
   /* Collapsed and filtered-out findings are printed too: paper has no controls. */
   .finding__body[hidden], .finding[hidden], .sev-group[hidden] { display: block !important; }

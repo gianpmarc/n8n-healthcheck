@@ -7,7 +7,8 @@
 //
 // Input (stdin, JSON): { app: path of app.js, index: path of index.html, scenario: "async (page, input) => ...",
 //                        input: any, withoutRawJSON: boolean, meta: what GET /api/meta answers (the server's own),
-//                        noClipboard: boolean (the browser refuses to copy) }
+//                        noClipboard: boolean (the browser refuses to copy),
+//                        debugText: a debug information to paste in step 2, checked: what POST /api/debug-info answers for it }
 // Output (stdout, JSON): what the scenario returned.
 "use strict";
 
@@ -67,7 +68,7 @@ class Element {
   querySelectorAll() { return []; } // the page uses it for the form and the findings only, not exercised here
   addEventListener(type, handler) { (this.listeners[type] = this.listeners[type] || []).push(handler); }
   focus() { document.activeElement = this; }
-  click() { return dispatch(this, "click"); }
+  click() { return this.disabled ? undefined : dispatch(this, "click"); } // a disabled button does nothing, as in a browser
   select() {}
 }
 
@@ -88,7 +89,7 @@ const document = {
   createElement(tag) { const node = new Element(tag); created.push(node); return node; },
   createElementNS(_, tag) { return this.createElement(tag); },
   // Only the fields of the form are found, for the listeners that clear an inline error.
-  querySelectorAll(selector) { return selector === "#run-form input, #run-form textarea" ? FIELDS.map((id) => this.getElementById(id)) : []; },
+  querySelectorAll(selector) { return selector === "#debug-form textarea, #sources-form input, #sources-form textarea" ? FIELDS.map((id) => this.getElementById(id)) : []; },
 };
 const FIELDS = ["f-debug", "f-url", "f-apikey", "f-env", "f-postgres", "f-redis", "f-kube-ns", "f-kube-ctx"];
 // What index.html hides at the start is hidden here too.
@@ -102,10 +103,19 @@ const saved = []; // Blobs handed to URL.createObjectURL: the downloads
 const copied = []; // texts handed to the clipboard
 const sent = []; // the bodies of the page's POST /api/run requests, as text
 let answerRun = null; // resolves or rejects the page's pending POST /api/run
+const sentChecks = []; // the bodies of the page's POST /api/debug-info requests, as text
+let answerCheck = null; // resolves or rejects the page's pending POST /api/debug-info
+const history = []; // what the page put in the browser's history: step numbers, nothing else
+const windowListeners = {};
 const response = (status, text) => ({ ok: status === 200, status, text: async () => text, json: async () => JSON.parse(text) });
 const context = vm.createContext({
   document,
-  window: { scrollTo() {}, print() {} },
+  window: {
+    scrollTo() {},
+    print() {},
+    history: { pushState(state, title, url) { history.push({ state, url }); }, replaceState(state, title, url) { history.push({ state, url }); } },
+    addEventListener(type, handler) { windowListeners[type] = handler; },
+  },
   CSS: { supports: () => true },
   // Without a clipboard the page falls back to document.execCommand, which this document does not have either.
   navigator: request.noClipboard ? {} : { clipboard: { async writeText(text) { copied.push(text); } } },
@@ -113,6 +123,10 @@ const context = vm.createContext({
   URL: Object.assign(class extends URL {}, { createObjectURL(blob) { saved.push(blob); return "blob:saved"; }, revokeObjectURL() {} }),
   fetch(url, options) {
     if (url === "/api/meta") return Promise.resolve(response(200, JSON.stringify({ version: "test", sources: [], ...request.meta })));
+    if (url === "/api/debug-info") {
+      sentChecks.push(options.body);
+      return new Promise((resolve, reject) => { answerCheck = { resolve, reject }; });
+    }
     if (url !== "/api/run") throw new Error(`the page asked for ${url}`);
     sent.push(options.body);
     return new Promise((resolve, reject) => { answerRun = { resolve, reject }; });
@@ -140,14 +154,40 @@ const page = {
   walk,
   settle,
   rawJSON: vm.runInContext("typeof JSON.rawJSON === 'function'", context),
-  /** The view on screen: "form", "report" or "profile" (exactly one, or this throws). */
+  /** What is on screen: "step-1" to "step-6", or "profile" (exactly one, or this throws). */
   view() {
-    const shown = ["form", "report", "profile"].filter((name) => visible(`view-${name}`));
-    if (shown.length !== 1) throw new Error(`views on screen: ${shown.join(", ") || "none"}`);
+    const shown = [1, 2, 3, 4, 5, 6].filter((n) => visible("flow") && visible(`step-${n}`)).map((n) => `step-${n}`);
+    if (visible("view-profile")) shown.push("profile");
+    if (shown.length !== 1) throw new Error(`on screen: ${shown.join(", ") || "nothing"}`);
     return shown[0];
   },
-  /** Press "Run health check"; the answer is given later with finishRun() or failRun(). */
+  /** Press the button of the list of steps for step `n`; a step that cannot be opened stays closed. */
+  go(n) { document.getElementById(`go-${n}`).click(); return this.view(); },
+  /** Press the button of step 2 ("Check the text", then "Continue") with the field as it is. */
+  async pressDebug() {
+    dispatch(document.getElementById("debug-form"), "submit");
+    await settle();
+  },
+  async finishCheck(text, status = 200) { answerCheck.resolve(response(status, text)); await settle(); },
+  async failCheck() { answerCheck.reject(new TypeError("network")); await settle(); },
+  sentChecks,
+  /** Steps 1 and 2: paste a debug information, have the server accept it, and continue to step 3. */
+  async passDebug(text = request.debugText) {
+    this.go(2);
+    this.type("f-debug", text);
+    await this.pressDebug();
+    await this.finishCheck(request.checked);
+    await this.pressDebug();
+    if (this.view() !== "step-3") throw new Error(`after the debug information: ${this.view()}`);
+  },
+  /** Press "Continue" on step 3 with the form as it is. */
+  async continueSources() {
+    dispatch(document.getElementById("sources-form"), "submit");
+    await settle();
+  },
+  /** From wherever the page is to a run under way; the answer is given later with finishRun() or failRun(). */
   async startRun() {
+    if (["step-1", "step-2"].includes(this.view())) await this.passDebug();
     document.getElementById("f-env").value = "EXECUTIONS_MODE=queue";
     await this.submit();
   },
@@ -156,6 +196,9 @@ const page = {
     dispatch(document.getElementById("run-form"), "submit");
     await settle();
   },
+  /** The browser's Back or Forward, to a history entry the page wrote. */
+  popstate(state) { windowListeners.popstate({ state }); return this.view(); },
+  history,
   sent,
   async finishRun(text, status = 200) { answerRun.resolve(response(status, text)); await settle(); },
   async failRun() { answerRun.reject(new TypeError("network")); await settle(); },
@@ -188,13 +231,17 @@ const page = {
     return found[0];
   },
   type(id, text) { document.getElementById(id).value = text; dispatch(document.getElementById(id), "input"); },
-  /** Press "Download profile"; the text of the file, or null when nothing was saved. */
+  /** "Continue" on step 5, then "Download the file" on step 6; the text of the file, or null when nothing was saved. */
   async download() {
     const before = saved.length;
     dispatch(document.getElementById("share-form"), "submit");
     await settle();
+    if (this.view() === "step-6") document.getElementById("profile-download").click();
+    await settle();
     return saved.length > before ? saved[saved.length - 1].text() : null;
   },
+  /** The number of files saved so far. */
+  saved: () => saved.length,
   /** Choose a file in "Open a profile". */
   async open(text, name = "n8n-profile.json") {
     const input = document.getElementById("f-profile");

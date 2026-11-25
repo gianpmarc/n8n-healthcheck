@@ -1217,6 +1217,7 @@ class PageTest(Base):
     def test_the_key_is_sent_with_the_url_and_is_not_kept_in_the_form(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               page.type("f-url", "https://n8n.example.test");
               page.type("f-apikey", "  " + input.key + " ");
               await page.submit();
@@ -1230,8 +1231,8 @@ class PageTest(Base):
             }""",
             key=KEY, response=self.response(self.read(insights=(200, summary(27, 5)), users=403)),
         )  # fmt: skip
-        self.assertEqual(got["sent"], {"url": "https://n8n.example.test", "api_key": KEY})
-        self.assertEqual((got["view"], got["key"], got["block"]), ("report", "", True))
+        self.assertEqual(got["sent"], {"debug_info_text": pasted.FULL, "url": "https://n8n.example.test", "api_key": KEY})
+        self.assertEqual((got["view"], got["key"], got["block"]), ("step-4", "", True))  # the report is on step 4
         self.assertEqual(got["basis"], "Executions over the last 7 days, as n8n's Insights counts them. Insights can lag behind by up to an hour.")
         self.assertEqual(
             got["tiles"],
@@ -1248,6 +1249,7 @@ class PageTest(Base):
     def test_without_a_key_there_is_no_usage_block(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               page.type("f-url", "https://n8n.example.test");
               await page.submit();
               const sent = JSON.parse(page.sent[0]);
@@ -1256,11 +1258,12 @@ class PageTest(Base):
             }""",
             response=self.response(None),
         )
-        self.assertEqual(got, {"sent": {"url": "https://n8n.example.test"}, "block": False, "tiles": 0})
+        self.assertEqual(got, {"sent": {"debug_info_text": pasted.FULL, "url": "https://n8n.example.test"}, "block": False, "tiles": 0})
 
     def test_a_key_without_a_url_is_stopped_on_the_page(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               page.type("f-apikey", input.key);
               page.type("f-env", "A=1");
               await page.submit();
@@ -1274,6 +1277,7 @@ class PageTest(Base):
     def test_the_error_that_asks_for_the_url_goes_when_the_url_is_typed(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               const state = () => [page.visible("e-apikey"), page.$("f-apikey").getAttribute("aria-invalid")];
               page.type("f-apikey", input.key);
               page.type("f-env", "A=1");
@@ -1297,6 +1301,7 @@ class PageTest(Base):
     def test_a_key_the_server_refuses_is_shown_next_to_its_field(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               page.type("f-url", "https://n8n.example.test");
               page.type("f-apikey", input.key);
               await page.submit();
@@ -1306,11 +1311,13 @@ class PageTest(Base):
             }""",
             key=KEY,
         )
-        self.assertEqual(got, {"view": "form", "error": "The API key must be a single line.", "focus": "f-apikey", "banner": False, "debug": False})
+        # Back on step 3, where the field is.
+        self.assertEqual(got, {"view": "step-3", "error": "The API key must be a single line.", "focus": "f-apikey", "banner": False, "debug": False})
 
     def test_a_refused_key_and_a_partial_result_are_shown_as_not_read(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               page.type("f-url", "https://n8n.example.test");
               page.type("f-apikey", input.key);
               await page.submit();

@@ -38,143 +38,403 @@
     <p class="notice notice--error">This page needs JavaScript to run a health check. You can use the command line instead: <code>python3 -m n8n_healthcheck --help</code>.</p>
   </noscript>
 
-  <!-- ───────────── Form view ───────────── -->
-  <section id="view-form" aria-labelledby="form-title">
-    <h2 id="form-title" tabindex="-1">What should be inspected?</h2>
-    <p class="lead">Give at least one source. The more you give, the more complete the report.</p>
+  <!-- ───────────── The guided flow: six steps, one on screen at a time ───────────── -->
+  <div id="flow">
+    <nav class="stepper" aria-label="Steps">
+      <ol>
+        <li><button type="button" class="stepper__step" id="go-1" data-step="1" aria-current="step"><span class="stepper__n" aria-hidden="true">1</span><span class="sr-only">Step 1: </span><span class="stepper__label">What this tool does</span></button></li>
+        <li><button type="button" class="stepper__step" id="go-2" data-step="2" disabled><span class="stepper__n" aria-hidden="true">2</span><span class="sr-only">Step 2: </span><span class="stepper__label">Debug information</span></button></li>
+        <li><button type="button" class="stepper__step" id="go-3" data-step="3" disabled><span class="stepper__n" aria-hidden="true">3</span><span class="sr-only">Step 3: </span><span class="stepper__label">Other sources</span></button></li>
+        <li><button type="button" class="stepper__step" id="go-4" data-step="4" disabled><span class="stepper__n" aria-hidden="true">4</span><span class="sr-only">Step 4: </span><span class="stepper__label">Run and report</span></button></li>
+        <li><button type="button" class="stepper__step" id="go-5" data-step="5" disabled><span class="stepper__n" aria-hidden="true">5</span><span class="sr-only">Step 5: </span><span class="stepper__label">Review what you share</span></button></li>
+        <li><button type="button" class="stepper__step" id="go-6" data-step="6" disabled><span class="stepper__n" aria-hidden="true">6</span><span class="sr-only">Step 6: </span><span class="stepper__label">Download and send</span></button></li>
+      </ol>
+    </nav>
 
-    <ul class="assurances">
-      <li><strong>Read-only.</strong> Nothing is changed on your instance, database or cluster.</li>
-      <li><strong>Local.</strong> The check runs on the machine running n8n-healthcheck; what you type is sent only to that server.</li>
-      <li><strong>Nothing kept.</strong> No form value is saved in the browser, and the server keeps nothing once the check ends. Reloading the page clears the form.</li>
-    </ul>
+    <!-- Step 1 -->
+    <section id="step-1" class="step" aria-labelledby="step-1-title">
+      <h2 id="step-1-title" tabindex="-1"><span class="step__count">Step 1 of 6</span> What this tool does</h2>
+      <p class="lead">n8n-healthcheck inspects a self-hosted n8n instance and makes one file about it, the environment profile, for the person who asked you for it. This is what it does, before you give it anything.</p>
 
-    <div id="meta-loading" class="notice" role="status">Loading the available sources…</div>
-    <div id="meta-error" class="notice notice--error" role="alert" hidden>
-      <p><strong>Could not load the list of sources.</strong> <span id="meta-error-text"></span></p>
-      <p><button type="button" class="btn" id="meta-retry">Try again</button></p>
-    </div>
+      <ul class="assurances">
+        <li><strong>It only reads.</strong> Nothing is changed on your instance, your database or your cluster.</li>
+        <li><strong>It runs here and contacts only what you point it at.</strong> The check runs on the machine where n8n-healthcheck was started. It contacts the n8n URL (with the API key, when you give one), the database, Redis, and the cluster of the kubectl context you choose. A redirect the n8n URL answers with is followed without the API key. The report and the file are sent nowhere.</li>
+        <li><strong>You end with one file, which you review and send yourself.</strong> You can leave out any entry of it except the n8n version, which is always part of the file.</li>
+      </ul>
 
-    <!-- method=post: if the script ever fails to load, values still never reach the URL. -->
-    <form id="run-form" method="post" action="/api/run" novalidate autocomplete="off" hidden>
+      <h3 class="step__sub">What the file never contains</h3>
+      <p class="block__note">No secret, host name, URL, IP address, file path, e-mail address, or Deployment, namespace or registry name. A setting's value is written only when it is a boolean, a number or a fixed word; otherwise the file only says it is set.</p>
+      <p class="block__note"><strong class="lead-in">One exception.</strong> The optional one-line reference you can type in step 5, for example a ticket number, is written to the file as you type it.</p>
+      <p class="block__note">What the tool reads, computes and writes is set out in <a href="https://github.com/gianpmarc/n8n-healthcheck/blob/main/docs/what-it-does.md" target="_blank" rel="noopener noreferrer">What n8n-healthcheck does</a>, with the tests that hold each statement. The link opens the tool's public repository on github.com in a new tab; this page itself loads nothing from outside.</p>
 
-      <fieldset class="source" data-source="debug_info">
-        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
-        <p class="source__hint"></p>
-        <div class="field">
-          <label for="f-debug">Paste the debug information <span class="field__note">(up to 64 KB; text around it, such as a ticket's or a chat's, is ignored)</span></label>
-          <textarea id="f-debug" name="debug_info_text" rows="6" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="# Debug info&#10;&#10;## core&#10;&#10;- n8nVersion: …" aria-describedby="e-debug"></textarea>
-          <p class="field__error" id="e-debug" hidden></p>
-        </div>
-      </fieldset>
-
-      <fieldset class="source" data-source="url">
-        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
-        <p class="source__hint"></p>
-        <div class="field">
-          <label for="f-url">Base URL</label>
-          <input id="f-url" name="url" type="url" inputmode="url" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="https://n8n.example.com…" aria-describedby="e-url">
-          <p class="field__error" id="e-url" hidden></p>
-        </div>
-        <div class="field">
-          <label for="f-apikey">n8n API key <span class="field__note">(optional; needs the URL)</span></label>
-          <div class="secret">
-            <input id="f-apikey" name="api_key" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" aria-describedby="h-apikey e-apikey">
-            <button type="button" class="btn secret__toggle" data-toggle="f-apikey" data-what="n8n API key" aria-label="Show n8n API key">Show</button>
-          </div>
-          <p class="field__hint" id="h-apikey">Adds four usage numbers to the report: executions per day, failure rate, active workflows and users. Create a key in n8n under Settings &gt; n8n API, for this run only, and delete it there afterwards. It is used for <code>GET</code> requests to this URL and is neither kept nor shown again. Where n8n lets you choose scopes, these are enough: <code>insights:read</code>, <code>execution:list</code>, <code>workflow:list</code>, <code>user:list</code>, <code>user:read</code>. Use the key of the owner or of an admin: any other key sees only its own user's workflows and executions, and the numbers are then marked as partial.</p>
-          <p class="field__error" id="e-apikey" hidden></p>
-        </div>
-      </fieldset>
-
-      <fieldset class="source" data-source="env">
-        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
-        <p class="source__hint"></p>
-        <div class="field" id="env-paste">
-          <label for="f-env">Paste the variables</label>
-          <textarea id="f-env" name="env_text" rows="6" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="EXECUTIONS_MODE=queue&#10;DB_TYPE=postgresdb&#10;…" aria-describedby="e-env"></textarea>
-        </div>
-        <div class="field" id="env-pick">
-          <label for="f-env-file">Or choose a file <span class="field__note">(read in this browser, up to 1 MB, not shown on screen)</span></label>
-          <input id="f-env-file" type="file" aria-describedby="e-env">
-        </div>
-        <div class="filechip" id="env-chip" hidden>
-          <span class="filechip__text" id="env-chip-text"></span>
-          <button type="button" class="btn btn--small" id="env-chip-remove">Remove file</button>
-        </div>
-        <p class="field__error" id="e-env" hidden></p>
-      </fieldset>
-
-      <fieldset class="source" data-source="postgres">
-        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
-        <p class="source__hint"></p>
-        <div class="field">
-          <label for="f-postgres">Connection string</label>
-          <div class="secret">
-            <input id="f-postgres" name="postgres_dsn" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" placeholder="postgresql://user:password@host:5432/n8n…" aria-describedby="e-postgres">
-            <button type="button" class="btn secret__toggle" data-toggle="f-postgres" data-what="Postgres connection string" aria-label="Show Postgres connection string">Show</button>
-          </div>
-          <p class="field__error" id="e-postgres" hidden></p>
-        </div>
-      </fieldset>
-
-      <fieldset class="source" data-source="redis">
-        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
-        <p class="source__hint"></p>
-        <div class="field">
-          <label for="f-redis">Connection URL</label>
-          <div class="secret">
-            <input id="f-redis" name="redis_url" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" placeholder="redis://:password@host:6379…" aria-describedby="e-redis">
-            <button type="button" class="btn secret__toggle" data-toggle="f-redis" data-what="Redis connection URL" aria-label="Show Redis connection URL">Show</button>
-          </div>
-          <p class="field__error" id="e-redis" hidden></p>
-        </div>
-      </fieldset>
-
-      <fieldset class="source" data-source="kubernetes">
-        <legend><span class="source__name"></span> <span class="source__state"></span></legend>
-        <p class="source__hint"></p>
-        <div class="field-row">
-          <div class="field">
-            <label for="f-kube-ns">Namespace</label>
-            <input id="f-kube-ns" name="kube_namespace" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="n8n…" aria-describedby="e-kube">
-          </div>
-          <div class="field">
-            <label for="f-kube-ctx">Context <span class="field__note">(optional)</span></label>
-            <input id="f-kube-ctx" name="kube_context" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Current kubectl context…" aria-describedby="e-kube">
-          </div>
-        </div>
-        <p class="field__error" id="e-kube" hidden></p>
-      </fieldset>
-
-      <div id="form-error" class="notice notice--error" role="alert" tabindex="-1" hidden>
-        <p><strong id="form-error-title"></strong> <span id="form-error-text"></span></p>
-        <p id="form-error-actions"><button type="button" class="btn" id="form-retry">Try again</button></p>
+      <div id="meta-loading" class="notice" role="status">Loading the available sources…</div>
+      <div id="meta-error" class="notice notice--error" role="alert" hidden>
+        <p><strong>Could not load the list of sources.</strong> <span id="meta-error-text"></span></p>
+        <p><button type="button" class="btn" id="meta-retry">Try again</button></p>
+      </div>
+      <div class="step-nav" id="nav-1" hidden>
+        <button type="button" class="btn btn--primary" id="next-1">Continue</button>
       </div>
 
-      <div class="submit-row">
-        <button type="submit" class="btn btn--primary" id="run-button">
-          <span class="spinner" aria-hidden="true"></span>
-          <span id="run-button-label">Run health check</span>
-        </button>
-        <p id="run-progress" class="progress" hidden>
-          <span class="progress__bar" aria-hidden="true"></span>
-          <span><span id="run-elapsed">Reading your sources…</span> A source that does not answer is given up on after about 5 seconds.</span>
-        </p>
-      </div>
-    </form>
+      <section aria-labelledby="open-title" class="block" id="open-block">
+        <h3 id="open-title">Open a profile</h3>
+        <p class="block__note">Received an environment profile (a file named like <code>n8n-profile-2026-11-18.json</code>)? Open it here to read it. It needs no access to the instance.</p>
+        <div class="field">
+          <label for="f-profile">Choose a profile file <span class="field__note">(read in this browser, not uploaded, not kept)</span></label>
+          <input id="f-profile" type="file" accept=".json,application/json" aria-describedby="h-profile e-profile">
+          <p class="field__hint" id="h-profile" hidden>A health check is running. A profile can be opened when it has finished.</p>
+          <p class="field__error" id="e-profile" hidden></p>
+        </div>
+      </section>
+    </section>
 
-    <section aria-labelledby="open-title" class="block" id="open-block">
-      <h3 id="open-title">Open a profile</h3>
-      <p class="block__note">Received an environment profile (a file named like <code>n8n-profile-2026-11-18.json</code>)? Open it here to read it. It needs no access to the instance.</p>
-      <div class="field">
-        <label for="f-profile">Choose a profile file <span class="field__note">(read in this browser, not uploaded, not kept)</span></label>
-        <input id="f-profile" type="file" accept=".json,application/json" aria-describedby="h-profile e-profile">
-        <p class="field__hint" id="h-profile" hidden>A health check is running. A profile can be opened when it has finished.</p>
-        <p class="field__error" id="e-profile" hidden></p>
+    <!-- Step 2 -->
+    <section id="step-2" class="step" aria-labelledby="step-2-title" hidden>
+      <h2 id="step-2-title" tabindex="-1"><span class="step__count">Step 2 of 6</span> Debug information <span class="tag tag--partial">Required</span></h2>
+      <p class="lead">n8n writes a short text about itself. The file is built on it: it states the n8n version, which every later conversation needs. Without it no file can be made.</p>
+      <ol class="howto">
+        <li>In n8n, open <strong>Help</strong>, then <strong>About n8n</strong>.</li>
+        <li>Choose <strong>Debug information</strong>, then <strong>Copy</strong>.</li>
+        <li>Paste the text below and press <strong>Check the text</strong>.</li>
+      </ol>
+
+      <!-- method=post: if the script ever fails to load, values still never reach the URL. -->
+      <form id="debug-form" method="post" action="/api/debug-info" novalidate autocomplete="off">
+        <fieldset class="source" data-source="debug_info">
+          <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+          <p class="source__hint"></p>
+          <div class="field">
+            <label for="f-debug">Paste the debug information <span class="field__note">(up to 64 KB; text around it, such as a ticket's or a chat's, is ignored)</span></label>
+            <textarea id="f-debug" name="debug_info_text" rows="6" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="# Debug info&#10;&#10;## core&#10;&#10;- n8nVersion: …" aria-describedby="e-debug"></textarea>
+            <p class="field__error" id="e-debug" hidden></p>
+          </div>
+        </fieldset>
+
+        <div id="debug-read" class="notice readout" tabindex="-1" hidden>
+          <p><strong class="lead-in">Read from the text.</strong> Nothing was collected from the instance yet.</p>
+          <dl class="pdetails" id="debug-read-rows"></dl>
+          <p class="block__note">The instance ids, the host ids and the browser's user agent in the text were read and discarded: they are not kept, shown or written anywhere.</p>
+          <ul class="messages" id="debug-notes" hidden></ul>
+        </div>
+
+        <div id="debug-error" class="notice notice--error" role="alert" tabindex="-1" hidden>
+          <p><strong id="debug-error-title"></strong> <span id="debug-error-text"></span></p>
+        </div>
+
+        <div class="step-nav">
+          <button type="button" class="btn" id="back-2">Back</button>
+          <button type="submit" class="btn btn--primary" id="debug-button">
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="debug-button-label">Check the text</span>
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Step 3 -->
+    <section id="step-3" class="step" aria-labelledby="step-3-title" hidden>
+      <h2 id="step-3-title" tabindex="-1"><span class="step__count">Step 3 of 6</span> Other sources <span class="tag tag--reason">Optional</span></h2>
+      <p class="lead">None is required. Each source you add lets more checks be decided and fills more of the file.</p>
+
+      <div class="notice gain">
+        <p><strong id="gain-decided"></strong> This is the result of running the checks on it alone, not a prediction.</p>
+        <p>Under each source below: how many of the other checks can be decided with it. A check that can be decided with more than one source is counted under each of them, so the numbers do not add up.</p>
+        <p id="gain-unstated" hidden></p>
+      </div>
+      <p class="block__note"><strong class="lead-in">Nothing kept.</strong> What you type is sent only to the n8n-healthcheck server you opened this page from. No form value is saved in the browser, and the server keeps nothing once the check ends. Reloading the page clears the form.</p>
+
+      <form id="sources-form" method="post" action="/api/run" novalidate autocomplete="off">
+
+        <fieldset class="source" data-source="url">
+          <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+          <p class="source__hint"></p>
+          <p class="source__gain" id="gain-url"></p>
+          <div class="field">
+            <label for="f-url">Base URL</label>
+            <input id="f-url" name="url" type="url" inputmode="url" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="https://n8n.example.com…" aria-describedby="e-url">
+            <p class="field__error" id="e-url" hidden></p>
+          </div>
+          <div class="field">
+            <label for="f-apikey">n8n API key <span class="field__note">(optional; needs the URL)</span></label>
+            <div class="secret">
+              <input id="f-apikey" name="api_key" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" aria-describedby="h-apikey e-apikey">
+              <button type="button" class="btn secret__toggle" data-toggle="f-apikey" data-what="n8n API key" aria-label="Show n8n API key">Show</button>
+            </div>
+            <p class="field__hint" id="h-apikey">Adds four usage numbers and no check: executions per day, failure rate, active workflows and users. Create a key in n8n under Settings &gt; n8n API, for this run only, and delete it there afterwards. It is used for <code>GET</code> requests to this URL and is neither kept nor shown again. Where n8n lets you choose scopes, these are enough: <code>insights:read</code>, <code>execution:list</code>, <code>workflow:list</code>, <code>user:list</code>, <code>user:read</code>. Use the key of the owner or of an admin: any other key sees only its own user's workflows and executions, and the numbers are then marked as partial.</p>
+            <p class="field__error" id="e-apikey" hidden></p>
+          </div>
+        </fieldset>
+
+        <fieldset class="source" data-source="env">
+          <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+          <p class="source__hint"></p>
+          <p class="source__gain" id="gain-env"></p>
+          <div class="field" id="env-paste">
+            <label for="f-env">Paste the variables</label>
+            <textarea id="f-env" name="env_text" rows="6" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="EXECUTIONS_MODE=queue&#10;DB_TYPE=postgresdb&#10;…" aria-describedby="e-env"></textarea>
+          </div>
+          <div class="field" id="env-pick">
+            <label for="f-env-file">Or choose a file <span class="field__note">(read in this browser, up to 1 MB, not shown on screen)</span></label>
+            <input id="f-env-file" type="file" aria-describedby="e-env">
+          </div>
+          <div class="filechip" id="env-chip" hidden>
+            <span class="filechip__text" id="env-chip-text"></span>
+            <button type="button" class="btn btn--small" id="env-chip-remove">Remove file</button>
+          </div>
+          <p class="field__error" id="e-env" hidden></p>
+        </fieldset>
+
+        <fieldset class="source" data-source="postgres">
+          <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+          <p class="source__hint"></p>
+          <p class="source__gain" id="gain-postgres"></p>
+          <div class="field">
+            <label for="f-postgres">Connection string</label>
+            <div class="secret">
+              <input id="f-postgres" name="postgres_dsn" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" placeholder="postgresql://user:password@host:5432/n8n…" aria-describedby="e-postgres">
+              <button type="button" class="btn secret__toggle" data-toggle="f-postgres" data-what="Postgres connection string" aria-label="Show Postgres connection string">Show</button>
+            </div>
+            <p class="field__error" id="e-postgres" hidden></p>
+          </div>
+        </fieldset>
+
+        <fieldset class="source" data-source="redis">
+          <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+          <p class="source__hint"></p>
+          <p class="source__gain" id="gain-redis"></p>
+          <div class="field">
+            <label for="f-redis">Connection URL</label>
+            <div class="secret">
+              <input id="f-redis" name="redis_url" type="text" data-masked="true" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" data-1p-ignore data-lpignore="true" placeholder="redis://:password@host:6379…" aria-describedby="e-redis">
+              <button type="button" class="btn secret__toggle" data-toggle="f-redis" data-what="Redis connection URL" aria-label="Show Redis connection URL">Show</button>
+            </div>
+            <p class="field__error" id="e-redis" hidden></p>
+          </div>
+        </fieldset>
+
+        <fieldset class="source" data-source="kubernetes">
+          <legend><span class="source__name"></span> <span class="source__state"></span></legend>
+          <p class="source__hint"></p>
+          <p class="source__gain" id="gain-kubernetes"></p>
+          <div class="field-row">
+            <div class="field">
+              <label for="f-kube-ns">Namespace</label>
+              <input id="f-kube-ns" name="kube_namespace" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="n8n…" aria-describedby="e-kube">
+            </div>
+            <div class="field">
+              <label for="f-kube-ctx">Context <span class="field__note">(optional)</span></label>
+              <input id="f-kube-ctx" name="kube_context" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Current kubectl context…" aria-describedby="e-kube">
+            </div>
+          </div>
+          <p class="field__error" id="e-kube" hidden></p>
+        </fieldset>
+
+        <div class="step-nav">
+          <button type="button" class="btn" id="back-3">Back</button>
+          <button type="submit" class="btn btn--primary" id="next-3">Continue</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Step 4 -->
+    <section id="step-4" class="step" aria-labelledby="step-4-title" hidden>
+      <h2 id="step-4-title" tabindex="-1"><span class="step__count">Step 4 of 6</span> Run and report</h2>
+      <div id="run-panel">
+        <p class="lead">The check reads the sources you gave and writes a report. Nothing has been collected so far.</p>
+        <dl class="pdetails">
+          <dt>Sources of this run</dt>
+          <dd id="run-sources"></dd>
+        </dl>
+        <p class="block__note"><strong class="lead-in">The report stays with you.</strong> It quotes raw values of your instance as evidence, unlike the file you share in the next steps.</p>
+
+        <form id="run-form" method="post" action="/api/run" novalidate autocomplete="off">
+          <div id="form-error" class="notice notice--error" role="alert" tabindex="-1" hidden>
+            <p><strong id="form-error-title"></strong> <span id="form-error-text"></span></p>
+            <p id="form-error-actions"><button type="button" class="btn" id="form-retry">Try again</button></p>
+          </div>
+
+          <div class="submit-row">
+            <button type="submit" class="btn btn--primary" id="run-button">
+              <span class="spinner" aria-hidden="true"></span>
+              <span id="run-button-label">Run health check</span>
+            </button>
+            <p id="run-progress" class="progress" hidden>
+              <span class="progress__bar" aria-hidden="true"></span>
+              <span><span id="run-elapsed">Reading your sources…</span> A source that does not answer is given up on after about 5 seconds.</span>
+            </p>
+          </div>
+        </form>
+      </div>
+
+      <!-- The report of the last run. -->
+      <section id="view-report" aria-labelledby="report-title" hidden>
+        <div class="report-head">
+          <div>
+            <h3 id="report-title" class="report-title" tabindex="-1">Health check report</h3>
+            <p class="report-meta" id="report-meta"></p>
+          </div>
+          <div class="actions" role="group" aria-label="Report actions">
+            <button type="button" class="btn" id="act-md">Download Markdown</button>
+            <button type="button" class="btn" id="act-json">Download snapshot JSON</button>
+            <button type="button" class="btn" id="act-copy">Copy Markdown</button>
+            <button type="button" class="btn" id="act-print">Print</button>
+          </div>
+        </div>
+        <p id="action-status" class="action-status" role="status" aria-live="polite"></p>
+
+        <div id="status" class="status">
+          <span class="status__icon" id="status-icon" aria-hidden="true"></span>
+          <div class="status__body">
+            <p class="status__label"><span id="status-label"></span> <span id="status-partial" class="tag tag--partial" hidden>Partial report</span></p>
+            <p class="status__summary" id="summary"></p>
+            <ul class="stats" id="stats" hidden></ul>
+            <div class="urgent" id="urgent" hidden>
+              <p class="urgent__label">Fix this first</p>
+              <p class="urgent__title"><strong id="urgent-title"></strong></p>
+              <p id="urgent-text"></p>
+            </div>
+            <ul class="status__points" id="summary-points" hidden></ul>
+            <p class="status__note" id="status-note" hidden></p>
+          </div>
+        </div>
+
+        <section aria-labelledby="usage-title" class="block" id="usage-block" hidden>
+          <h3 id="usage-title">Usage</h3>
+          <p class="block__note"><strong class="lead-in">Read through the n8n API.</strong> These numbers describe the instance: no finding or score rests on them.</p>
+          <p class="block__note" id="usage-basis" hidden></p>
+          <dl class="usage" id="usage"></dl>
+        </section>
+
+        <section aria-labelledby="scores-title" class="block">
+          <h3 id="scores-title">Scores by area</h3>
+          <ul class="scores" id="scores"></ul>
+          <p class="block__note" id="scores-note" hidden></p>
+        </section>
+
+        <section aria-labelledby="findings-title" class="block">
+          <h3 id="findings-title" tabindex="-1">Findings</h3>
+          <div class="toolbar" id="findings-toolbar">
+            <div class="toolbar__group" role="group" aria-label="Filter by severity" id="severity-filter"></div>
+            <div class="toolbar__group">
+              <label for="area-filter">Area</label>
+              <select id="area-filter"></select>
+            </div>
+            <div class="toolbar__group toolbar__group--end">
+              <button type="button" class="btn btn--small" id="expand-all">Expand all</button>
+              <button type="button" class="btn btn--small" id="collapse-all">Collapse all</button>
+            </div>
+          </div>
+          <p class="toolbar__count" id="findings-count" role="status" aria-live="polite"></p>
+          <div id="findings"></div>
+          <div id="findings-empty" class="empty" hidden>
+            <p id="findings-empty-text"></p>
+            <p><button type="button" class="btn btn--small" id="clear-filters" hidden>Clear filters</button></p>
+          </div>
+        </section>
+
+        <section aria-labelledby="na-title" class="block">
+          <h3 id="na-title">Not assessed</h3>
+          <p class="block__note" id="na-intro"></p>
+          <ul class="na" id="not-assessed"></ul>
+        </section>
+
+        <section aria-labelledby="warn-title" class="block" id="warnings-block" hidden>
+          <h3 id="warn-title">Messages from the collectors</h3>
+          <p class="block__note"><strong class="lead-in">What the tool reported while reading your sources.</strong> Useful when a source could not be read.</p>
+          <ul class="messages" id="warnings"></ul>
+        </section>
+
+        <p class="report-foot">Generated by n8n-healthcheck, a read-only community tool. Not an official n8n project.</p>
+      </section>
+
+      <div class="step-nav">
+        <button type="button" class="btn" id="back-4">Back</button>
+        <button type="button" class="btn btn--primary" id="next-4" hidden>Continue</button>
       </div>
     </section>
-  </section>
+
+    <!-- Step 5 -->
+    <section id="step-5" class="step" aria-labelledby="step-5-title" hidden>
+      <h2 id="step-5-title" tabindex="-1"><span class="step__count">Step 5 of 6</span> Review what you share</h2>
+      <p class="lead">The profile is one JSON file of facts about this environment, for the person who asked you for it. Review it here and withhold what you do not want to share.</p>
+
+      <section aria-labelledby="coverage-title" class="block" id="coverage-block" hidden>
+        <h3 id="coverage-title">How much the file lets the reader assess</h3>
+        <p class="block__note"><strong class="lead-in" id="coverage-decided"></strong> <span id="coverage-rest"></span></p>
+        <ul class="messages" id="coverage-list" hidden></ul>
+        <p class="block__note" id="coverage-note" hidden>A check that can be decided with more than one source is counted under each of them, so these numbers do not add up.</p>
+        <p class="block__note" id="coverage-action" hidden><button type="button" class="btn btn--small" id="coverage-back">Back to step 3 to add a source</button></p>
+      </section>
+
+      <section aria-labelledby="share-title" class="block" id="share-block">
+        <h3 id="share-title">What goes in the file</h3>
+        <ul class="assurances">
+          <li><strong>What it never contains.</strong> No secret, host name, URL, IP address, file path, e-mail address, or Deployment, namespace or registry name. A setting's value is written only when it is a boolean, a number or a fixed word; otherwise the file only says it is set.</li>
+          <li><strong>Nothing is sent anywhere.</strong> The file is made in this browser and saved on this computer.</li>
+          <li><strong>The health report is a separate document.</strong> Its evidence quotes raw values, and nothing you withhold here changes it.</li>
+        </ul>
+
+        <p class="notice" id="share-kept" hidden>Kept from your previous run: what you withheld, your answers, the reason and the reference. An entry you withheld stays withheld wherever this run still has it.</p>
+
+        <form id="share-form" novalidate autocomplete="off">
+          <div class="field-row">
+            <div class="field">
+              <label for="f-reason">Why this profile is taken</label>
+              <select id="f-reason"></select>
+            </div>
+            <div class="field">
+              <label for="f-reference">Reference <span class="field__note">(optional)</span></label>
+              <input id="f-reference" type="text" autocomplete="off" spellcheck="false" aria-describedby="h-reference e-reference">
+              <p class="field__hint" id="h-reference">One line, for example a ticket or change number. It is written to the file as you type it: do not put secrets in it. <span id="reference-count"></span></p>
+              <p class="field__error" id="e-reference" hidden></p>
+            </div>
+          </div>
+
+          <section class="ppart" id="questions-block" aria-labelledby="questions-title" hidden>
+            <h4 id="questions-title">A few questions</h4>
+            <p class="block__note"><strong class="lead-in">Some things no probe can read.</strong> Every question is optional: leave any of them on “No answer”. An answer is written to the file as “declared”, so the reader can tell it from what the tool measured. What the tool measured is listed below, with your answers.</p>
+            <p class="block__note" id="questions-empty" hidden>Nothing to ask: the tool measured every one of these itself.</p>
+            <div id="questions-list"></div>
+          </section>
+
+          <p class="block__note share-note"><strong>Every row is its own entry.</strong> Withholding a fact does not withhold a setting or a finding that says something similar: check the facts, the settings and the check outcome each on their own. A withheld entry stays in the file marked “withheld”, without its value.</p>
+
+          <div id="share-body"></div>
+
+          <p id="share-status" class="action-status" role="status" aria-live="polite"></p>
+          <div class="step-nav">
+            <button type="button" class="btn" id="back-5">Back</button>
+            <button type="submit" class="btn btn--primary" id="next-5">Continue</button>
+            <p class="progress" id="share-summary"></p>
+          </div>
+        </form>
+      </section>
+    </section>
+
+    <!-- Step 6 -->
+    <section id="step-6" class="step" aria-labelledby="step-6-title" hidden>
+      <h2 id="step-6-title" tabindex="-1"><span class="step__count">Step 6 of 6</span> Download and send</h2>
+      <p class="lead">The file is made in this browser, from what you reviewed in step 5, and saved on this computer.</p>
+      <dl class="pdetails">
+        <dt>File</dt>
+        <dd id="file-name" translate="no"></dd>
+        <dt>It holds</dt>
+        <dd id="file-holds"></dd>
+      </dl>
+      <div class="submit-row">
+        <button type="button" class="btn btn--primary" id="profile-download">Download the file</button>
+      </div>
+      <p id="download-status" class="action-status" role="status" aria-live="polite"></p>
+
+      <h3 class="step__sub">Send it yourself</h3>
+      <p class="block__note">Send the file to the person who asked you for it, by e-mail or attached to your support ticket. This page does not send it.</p>
+      <p class="block__note">The health report of step 4 is a separate document and stays with you. Nothing you withheld here changes it.</p>
+
+      <div class="step-nav">
+        <button type="button" class="btn" id="back-6">Back</button>
+      </div>
+    </section>
+  </div>
 
   <!-- ───────────── Profile view (a saved profile, read in the browser) ───────────── -->
   <section id="view-profile" aria-labelledby="profile-title" hidden>
@@ -190,130 +450,6 @@
     </div>
     <div id="profile-body"></div>
     <p class="report-foot">Shown by n8n-healthcheck, a read-only community tool. Not an official n8n project.</p>
-  </section>
-
-  <!-- ───────────── Report view ───────────── -->
-  <section id="view-report" aria-labelledby="report-title" hidden>
-    <div class="report-head">
-      <div>
-        <h2 id="report-title" tabindex="-1">Health check report</h2>
-        <p class="report-meta" id="report-meta"></p>
-      </div>
-      <div class="actions" role="group" aria-label="Report actions">
-        <button type="button" class="btn" id="act-md">Download Markdown</button>
-        <button type="button" class="btn" id="act-json">Download snapshot JSON</button>
-        <button type="button" class="btn" id="act-copy">Copy Markdown</button>
-        <button type="button" class="btn" id="act-print">Print</button>
-        <button type="button" class="btn btn--primary" id="act-again">Run again</button>
-      </div>
-    </div>
-    <p id="action-status" class="action-status" role="status" aria-live="polite"></p>
-
-    <div id="status" class="status">
-      <span class="status__icon" id="status-icon" aria-hidden="true"></span>
-      <div class="status__body">
-        <p class="status__label"><span id="status-label"></span> <span id="status-partial" class="tag tag--partial" hidden>Partial report</span></p>
-        <p class="status__summary" id="summary"></p>
-        <ul class="stats" id="stats" hidden></ul>
-        <div class="urgent" id="urgent" hidden>
-          <p class="urgent__label">Fix this first</p>
-          <p class="urgent__title"><strong id="urgent-title"></strong></p>
-          <p id="urgent-text"></p>
-        </div>
-        <ul class="status__points" id="summary-points" hidden></ul>
-        <p class="status__note" id="status-note" hidden></p>
-      </div>
-    </div>
-
-    <section aria-labelledby="usage-title" class="block" id="usage-block" hidden>
-      <h3 id="usage-title">Usage</h3>
-      <p class="block__note"><strong class="lead-in">Read through the n8n API.</strong> These numbers describe the instance: no finding or score rests on them.</p>
-      <p class="block__note" id="usage-basis" hidden></p>
-      <dl class="usage" id="usage"></dl>
-    </section>
-
-    <section aria-labelledby="scores-title" class="block">
-      <h3 id="scores-title">Scores by area</h3>
-      <ul class="scores" id="scores"></ul>
-      <p class="block__note" id="scores-note" hidden></p>
-    </section>
-
-    <section aria-labelledby="findings-title" class="block">
-      <h3 id="findings-title" tabindex="-1">Findings</h3>
-      <div class="toolbar" id="findings-toolbar">
-        <div class="toolbar__group" role="group" aria-label="Filter by severity" id="severity-filter"></div>
-        <div class="toolbar__group">
-          <label for="area-filter">Area</label>
-          <select id="area-filter"></select>
-        </div>
-        <div class="toolbar__group toolbar__group--end">
-          <button type="button" class="btn btn--small" id="expand-all">Expand all</button>
-          <button type="button" class="btn btn--small" id="collapse-all">Collapse all</button>
-        </div>
-      </div>
-      <p class="toolbar__count" id="findings-count" role="status" aria-live="polite"></p>
-      <div id="findings"></div>
-      <div id="findings-empty" class="empty" hidden>
-        <p id="findings-empty-text"></p>
-        <p><button type="button" class="btn btn--small" id="clear-filters" hidden>Clear filters</button></p>
-      </div>
-    </section>
-
-    <section aria-labelledby="na-title" class="block">
-      <h3 id="na-title">Not assessed</h3>
-      <p class="block__note" id="na-intro"></p>
-      <ul class="na" id="not-assessed"></ul>
-    </section>
-
-    <section aria-labelledby="warn-title" class="block" id="warnings-block" hidden>
-      <h3 id="warn-title">Messages from the collectors</h3>
-      <p class="block__note"><strong class="lead-in">What the tool reported while reading your sources.</strong> Useful when a source could not be read.</p>
-      <ul class="messages" id="warnings"></ul>
-    </section>
-
-    <section aria-labelledby="share-title" class="block" id="share-block" hidden>
-      <h3 id="share-title">Share the environment profile</h3>
-      <p class="block__note"><strong class="lead-in">The profile is one JSON file of facts about this environment, for whoever helps you with it.</strong> Review it here, withhold what you do not want to share, then download it and send it yourself.</p>
-      <ul class="assurances">
-        <li><strong>What it never contains.</strong> No secret, host name, URL, IP address, file path, e-mail address, or Deployment, namespace or registry name. A setting's value is written only when it is a boolean, a number or a fixed word; otherwise the file only says it is set.</li>
-        <li><strong>Nothing is sent anywhere.</strong> The file is made in this browser and saved on this computer.</li>
-        <li><strong>The health report is a separate document.</strong> Its evidence quotes raw values, and nothing you withhold here changes it.</li>
-      </ul>
-
-      <form id="share-form" novalidate autocomplete="off">
-        <div class="field-row">
-          <div class="field">
-            <label for="f-reason">Why this profile is taken</label>
-            <select id="f-reason"></select>
-          </div>
-          <div class="field">
-            <label for="f-reference">Reference <span class="field__note">(optional)</span></label>
-            <input id="f-reference" type="text" autocomplete="off" spellcheck="false" aria-describedby="h-reference e-reference">
-            <p class="field__hint" id="h-reference">One line, for example a ticket or change number. It is written to the file as you type it: do not put secrets in it. <span id="reference-count"></span></p>
-            <p class="field__error" id="e-reference" hidden></p>
-          </div>
-        </div>
-
-        <section class="ppart" id="questions-block" aria-labelledby="questions-title" hidden>
-          <h4 id="questions-title">A few questions</h4>
-          <p class="block__note"><strong class="lead-in">Some things no probe can read.</strong> Every question is optional: leave any of them on “No answer”. An answer is written to the file as “declared”, so the reader can tell it from what the tool measured. What the tool measured is listed below, with your answers.</p>
-          <p class="block__note" id="questions-empty" hidden>Nothing to ask: the tool measured every one of these itself.</p>
-          <div id="questions-list"></div>
-        </section>
-
-        <p class="block__note share-note"><strong>Every row is its own entry.</strong> Withholding a fact does not withhold a setting or a finding that says something similar: check the facts, the settings and the check outcome each on their own. A withheld entry stays in the file marked “withheld”, without its value.</p>
-
-        <div id="share-body"></div>
-
-        <div class="submit-row">
-          <button type="submit" class="btn btn--primary" id="share-download">Download profile</button>
-          <p class="progress" id="share-summary"></p>
-        </div>
-        <p id="share-status" class="action-status" role="status" aria-live="polite"></p>
-      </form>
-    </section>
-
-    <p class="report-foot">Generated by n8n-healthcheck, a read-only community tool. Not an official n8n project.</p>
   </section>
 </main>
 </body>

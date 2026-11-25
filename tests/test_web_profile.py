@@ -87,6 +87,8 @@ FINDING = Finding(
 
 # A fact, a setting of each scope and the check: every kind of entry the page can blank.
 WITHHELD = ["n8n.version", "resources.main", "setting:instance:EXECUTIONS_MODE", "setting:main:N8N_HOST", "check"]
+# The same on the page, where since 0.7.0 the n8n version has no box: another fact stands in for it.
+PAGE_WITHHELD = ["executions.mode", *WITHHELD[1:]]
 
 # References the page must store, or refuse, exactly as profile.check_reference does.
 REFERENCES = [
@@ -171,6 +173,11 @@ def js_constant(name):
     literal = re.sub(r",\s*([\]}])", r"\1", match.group(1))  # trailing commas
     literal = re.sub(r"([{,]\s*)(\w+): ", r'\1"\2": ', literal)  # bare keys
     return json.loads(literal)
+
+
+def between_ids(first, second):
+    """The part of index.html from the element with one id to the element with the other."""
+    return INDEX_HTML[INDEX_HTML.index(f'id="{first}"') : INDEX_HTML.index(f'id="{second}"')]
 
 
 def js_function(name):
@@ -280,10 +287,12 @@ class PageSourceTest(unittest.TestCase):
         )
         body = js_function("downloadProfile")
         self.assertLess(body.index("if (!checkReference())"), body.index("const profile = currentProfile();"))
-        self.assertIn("profileText(profile), \"share-status\");", body)
+        self.assertIn("profileText(profile), \"download-status\");", body)
+        # Nothing is saved before a run answered with a profile, which only a run with a debug information does.
+        self.assertLess(body.index("if (!canOpen(6)) return;"), body.index("const profile = currentProfile();"))
         for other_source in ("report.profile", "JSON.stringify", "report.snapshot"):
             self.assertNotIn(other_source, body)
-        self.assertEqual(APP_JS.count("downloadProfile()"), 2)  # its definition and the form's submit
+        self.assertEqual(APP_JS.count("downloadProfile()"), 2)  # its definition and the button of step 6
 
     def test_every_checkbox_carries_the_id_it_withholds(self):
         sections = js_function("profileSections")
@@ -305,21 +314,67 @@ class PageSourceTest(unittest.TestCase):
         self.assertIn("report.profile.facts.map((fact) => fact.id)", APP_JS)
         self.assertIn("report.profile.settings.map(settingKey)", APP_JS)
 
-    def test_a_new_run_starts_with_no_choice_reason_or_reference_of_the_last(self):
-        body = js_function("resetShare")
-        for line in (
-            "withheld.clear();",
-            "answers.clear();",
-            '$("f-reason").value = Object.keys(PROFILE_REASONS)[0];',
-            '$("f-reference").value = "";',
-        ):
-            self.assertIn(line, body)
+    def test_a_new_run_keeps_the_choices_of_the_run_before(self):
+        # Until 0.6.0 a new run cleared them (resetShare). A withheld entry coming back into the file
+        # unnoticed is the failure to avoid, so nothing clears the choices any more but a reload.
+        self.assertNotIn("resetShare", APP_JS)
+        for cleared in ("withheld.clear()", "answers.clear()", '$("f-reference").value = ""'):
+            self.assertNotIn(cleared, APP_JS)
+        self.assertEqual(APP_JS.count('$("f-reason").value ='), 1)  # set once, when the page loads
+        self.assertNotIn('$("f-reason").value =', js_function("renderReport") + js_function("renderShare") + js_function("submit"))
         self.assertEqual(next(iter(js_constant("PROFILE_REASONS"))), "baseline")
         report_body = js_function("renderReport")
-        self.assertLess(report_body.index("resetShare();"), report_body.index("renderQuestions();"))
+        self.assertLess(report_body.index("renderCoverage(data.coverage);"), report_body.index("renderQuestions();"))
         self.assertLess(report_body.index("renderQuestions();"), report_body.index("renderShare();"))
         self.assertEqual(APP_JS.count("report = {"), 1)  # one place receives a run, and it renders the report
         self.assertRegex(js_function("submit"), r"report = \{ \.\.\.data, finishedAt: new Date\(\) \};\n    renderReport\(\);")
+        # A question that is asked again shows the answer that was kept.
+        self.assertIn("const kept = answers.get(question.id);", js_function("renderQuestions"))
+
+    def test_the_n8n_version_has_no_box_and_no_button_withholds_it(self):
+        self.assertIn(f'const ALWAYS_SHARED = "{profile.ALWAYS_SHARED}";', APP_JS)
+        sections = js_function("profileSections")
+        self.assertIn('fact.id === ALWAYS_SHARED\n          ? el("span", { class: "pdetail", id: "always-shared" }, "Always in the file")\n          : tick(`w-fact-${index}`, fact.id, ', sections)
+        self.assertIn("report.profile.facts.map((fact) => fact.id).filter((id) => id !== ALWAYS_SHARED)", APP_JS)
+        self.assertIn("if (!key || key === ALWAYS_SHARED) return;", APP_JS)
+        self.assertEqual(APP_JS.count("withheld.add("), 2)  # the checkbox and the bulk button, both behind the lines above
+
+    def test_the_six_steps_and_what_each_needs(self):
+        self.assertEqual(re.findall(r'<section id="step-(\d)" class="step" aria-labelledby="step-\d-title"( hidden)?>', INDEX_HTML), [("1", ""), *[(str(n), " hidden") for n in range(2, 7)]])
+        names = re.findall(r'<h2 id="step-(\d)-title" tabindex="-1"><span class="step__count">Step (\d) of 6</span> ([^<]+?)(?: <span|</h2>)', INDEX_HTML)
+        self.assertEqual(names, [(str(n), str(n), name) for n, name in enumerate(("What this tool does", "Debug information", "Other sources", "Run and report", "Review what you share", "Download and send"), 1)])
+        # The list of steps names the same six, as buttons, with the current one marked.
+        listed = re.findall(r'<li><button type="button" class="stepper__step" id="go-(\d)" data-step="\d"(?: disabled)?( aria-current="step")?>.*?<span class="stepper__label">([^<]+)</span></button></li>', INDEX_HTML)
+        self.assertEqual([(number, name) for number, _, name in listed], [(number, name) for number, _, name in names])
+        self.assertEqual([current for _, current, _ in listed], [' aria-current="step"', "", "", "", "", ""])
+        self.assertIn('<nav class="stepper" aria-label="Steps">', INDEX_HTML)
+        # The gate, in one function: 3 and 4 need the checked debug information, 5 and 6 the profile of a run.
+        gate = js_function("canOpen")
+        for line in (
+            "if (!meta || running || checking) return false;",
+            "if (n >= 5 && !(report && report.profile)) return false;",
+            "return n < 3 || debugChecked();",
+        ):
+            self.assertIn(line, gate)
+        self.assertIn('const debugChecked = () => checked !== null && $("f-debug").value === checkedText;', APP_JS)
+        self.assertEqual(APP_JS.count("checked = data;"), 1)  # set in one place: after the server accepted the text
+        self.assertIn("if (n === step || !canOpen(n)) return false;", js_function("go"))
+        # A step is shown with the focus on its heading.
+        self.assertIn("$(`step-${n}-title`).focus({ preventScroll: true });", js_function("showStep"))
+        self.assertIn('fieldset class="source" data-source="debug_info"', between_ids("step-2", "step-3"))
+        self.assertIn('<span class="tag tag--partial">Required</span>', between_ids("step-2", "step-3"))
+        self.assertIn('id="run-form"', between_ids("step-4", "step-5"))
+        self.assertIn('id="view-report"', between_ids("step-4", "step-5"))
+        self.assertIn('id="share-form"', between_ids("step-5", "step-6"))
+        self.assertIn('id="profile-download"', between_ids("step-6", "view-profile"))
+        # "Open a profile" is a secondary entry of the first screen.
+        self.assertIn('id="open-block"', between_ids("step-1", "step-2"))
+
+    def test_step_six_says_how_the_file_travels_and_that_the_page_does_not_send_it(self):
+        step = between_ids("step-6", "view-profile")
+        self.assertIn("Send the file to the person who asked you for it, by e-mail or attached to your support ticket. This page does not send it.", step)
+        for way in ("mailto:", "<a ", "<form", "action="):
+            self.assertNotIn(way, step)
 
     def test_an_opened_file_is_shown_only_after_it_passed_the_check(self):
         body = js_function("openProfile")
@@ -341,9 +396,9 @@ class PageSourceTest(unittest.TestCase):
         self.assertIn('id="h-profile" hidden>A health check is running.', INDEX_HTML)
         self.assertIn('aria-describedby="h-profile e-profile"', INDEX_HTML)
         self.assertIn("if (running) {", js_function("openProfile"))
-        # A run's error is written to the form, and the form is on screen when it is.
+        # A run's error is written to step 4, and step 4 is on screen when it is.
         failure = js_function("submit")
-        self.assertLess(failure.index('if ($("view-form").hidden) showView("form");'), failure.index("showFormError(failure[0]"))
+        self.assertLess(failure.index("if (step !== 4) showStep(4); // an error"), failure.index("showFormError(failure[0]"))
 
     # --- questions: the page asks what the server lists and stores what profile.py stores
 
@@ -387,7 +442,9 @@ class PageSourceTest(unittest.TestCase):
         body = js_function("renderQuestions")
         self.assertIn('return el("fieldset", { class: "question" },\n        el("legend", null,', body)
         self.assertIn('type: multi ? "checkbox" : "radio"', body)
-        self.assertIn('checked: !multi && value === "",', body)  # only "No answer" starts selected
+        # Only "No answer" starts selected: `chosen` is "" (or no value at all) until the operator answers.
+        self.assertIn("checked: multi ? chosen.includes(value) : value === chosen,", body)
+        self.assertIn('const chosen = multi ? (Array.isArray(kept) ? kept : []) : typeof kept === "string" ? kept : "";', body)
         self.assertIn('multi ? null : option("", "No answer", 0),', body)
         self.assertIn("...question.values.map((item, number) => option(item.value, item.label, number + 1))", body)
         self.assertIn('report.profile.facts.some((fact) => fact.id === question.id && fact.provenance === "unknown")', body)
@@ -442,9 +499,14 @@ class PageSourceTest(unittest.TestCase):
     def test_page_stores_nothing_and_loads_nothing_else(self):
         for store in ("localStorage", "sessionStorage", "indexedDB", "document.cookie", "console.log", "console.error"):
             self.assertNotIn(store, APP_JS)
-        # The profile is read and written in the browser: the only requests are the two that existed.
-        self.assertEqual(sorted(set(re.findall(r'fetch\("([^"]+)"', APP_JS))), ["/api/meta", "/api/run"])
-        self.assertEqual(APP_JS.count("fetch("), 2)
+        # The profile is read and written in the browser: the only requests are to this server, the two
+        # that existed and, since 0.7.0, the one that reads the debug information before the run.
+        self.assertEqual(sorted(set(re.findall(r'fetch\("([^"]+)"', APP_JS))), ["/api/debug-info", "/api/meta", "/api/run"])
+        self.assertEqual(APP_JS.count("fetch("), 3)
+        # The browser's history holds a step number and never a URL: no value of the form can reach either.
+        self.assertEqual(re.findall(r"history\.(\w+)\((.*?)\);", APP_JS), [("pushState", '{ step: n }, ""'), ("replaceState", '{ step }, ""')])
+        for address in ("location", "URLSearchParams", "searchParams", ".href", "document.title"):
+            self.assertNotIn(address, APP_JS)
         for other_way_out in ("XMLHttpRequest", "sendBeacon", "WebSocket", "EventSource", ".submit("):
             self.assertNotIn(other_way_out, APP_JS)
         self.assertEqual(web.CONTENT_SECURITY_POLICY.split(";")[0], "default-src 'none'")
@@ -814,6 +876,7 @@ PATHS = (True, False) if EXACT else (False,)
 
 
 READ = debug_info.parse(pasted.FULL)  # what the server keeps of the pasted text
+CHECKED = json.dumps(web.check_debug_info(READ))  # what POST /api/debug-info answers for it
 
 
 def run_response(snapshot=PLAIN, debug=True):
@@ -837,6 +900,9 @@ def run_page(scenario, raw=True, **data):
         "withoutRawJSON": not raw,
         "meta": {} if data.pop("no_questions", False) else {"questions": CATALOGUE},
         "noClipboard": data.pop("no_clipboard", False),
+        # Step 2 of the page: the text page.passDebug() pastes, and the real server's answer for it.
+        "debugText": pasted.FULL,
+        "checked": CHECKED,
     }
     done = subprocess.run(
         [NODE, HARNESS], input=json.dumps(request), capture_output=True, text=True, encoding="utf-8", timeout=120, env=NODE_ENV
@@ -864,67 +930,297 @@ class PageBehaviourTest(unittest.TestCase):
 
     # --- the debug information ------------------------------------------------------
 
-    def test_the_pasted_debug_information_is_sent_as_it_is_and_alone(self):
+    def test_the_debug_information_is_checked_before_step_three_opens(self):
         got = run_page(
             """async (page, input) => {
-              await page.submit();
-              const empty = { sent: page.sent.length, error: page.visible("form-error") && page.$("form-error-text").textContent };
+              const start = { view: page.view(), locked: [3, 4, 5, 6].map((n) => page.go(n)) };
+              page.go(2);
+              await page.pressDebug();  // nothing pasted
+              const empty = { view: page.view(), checks: page.sentChecks.length, error: page.visible("e-debug") && page.$("e-debug").textContent,
+                              focus: document.activeElement.id, locked: [3, 4, 5, 6].map((n) => page.go(n)) };
               page.type("f-debug", input.text);
+              await page.pressDebug();
+              const during = { busy: page.$("debug-button").getAttribute("aria-disabled"), label: page.$("debug-button-label").textContent,
+                               locked: [1, 3].map((n) => page.go(n)) };
+              await page.finishCheck(input.checked);
+              const read = { view: page.view(), shown: page.visible("debug-read"), rows: page.$("debug-read-rows").textContent, notes: page.visible("debug-notes"),
+                             label: page.$("debug-button-label").textContent, focus: document.activeElement.id, busy: page.$("debug-button").getAttribute("aria-disabled") };
+              await page.pressDebug();  // now "Continue"
+              const third = { view: page.view(), focus: document.activeElement.id, decided: page.$("gain-decided").textContent,
+                              unstated: page.visible("gain-unstated") && page.$("gain-unstated").textContent,
+                              gains: ["url", "env", "postgres", "redis", "kubernetes"].map((source) => page.$("gain-" + source).textContent) };
+              await page.continueSources();
+              const fourth = { view: page.view(), sources: page.$("run-sources").textContent, runs: page.sent.length, locked: [5, 6].map((n) => page.go(n)) };
               await page.submit();
-              return { empty, sent: page.sent.map((body) => JSON.parse(body)), busy: page.$("run-button").getAttribute("aria-disabled") };
+              // The text is edited after it was checked: it is no longer the text the server read.
+              return { start, empty, during, read, third, fourth, checks: page.sentChecks.map((body) => JSON.parse(body)), sent: page.sent.map((body) => JSON.parse(body)),
+                       busy: page.$("run-button").getAttribute("aria-disabled"), history: page.history };
             }""",
-            text=pasted.FULL,
-        )
-        self.assertEqual(got["empty"], {"sent": 0, "error": "Fill in at least one source above, then run the health check."})
+            text=pasted.FULL, checked=CHECKED,
+        )  # fmt: skip
+        self.assertEqual(got["start"], {"view": "step-1", "locked": ["step-1"] * 4})
+        self.assertEqual(got["empty"], {"view": "step-2", "checks": 0, "error": "Paste the debug information to continue. The file cannot be made without it.", "focus": "f-debug", "locked": ["step-2"] * 4})
+        self.assertEqual(got["during"], {"busy": "true", "label": "Checking the text…", "locked": ["step-2"] * 2})
+        # What was read is shown on the step, and the operator continues from there.
+        self.assertEqual(got["read"], {"view": "step-2", "shown": True, "rows": "n8n version3.3.0Execution modequeue (single main)Instances3 (1 main, 2 worker)Generated on2026-11-19",
+                                       "notes": False, "label": "Continue", "focus": "debug-read", "busy": None})  # fmt: skip
+        coverage = json.loads(CHECKED)["coverage"]
+        self.assertEqual((got["third"]["view"], got["third"]["focus"]), ("step-3", "step-3-title"))
+        self.assertEqual(got["third"]["decided"], f"The debug information decides {coverage['decided']} of 24 checks.")
+        self.assertEqual(got["third"]["unstated"], f"{coverage['unstated']} check needs a source that states a setting the debug information does not show.")
+        self.assertEqual(coverage["unstated"], 1)
+        self.assertEqual(got["third"]["gains"], [
+            f"{count} check{'' if count == 1 else 's'} can be decided with this source." for count in (coverage["waiting"][source] for source in ("url", "env", "postgres", "redis", "kubernetes"))
+        ])  # fmt: skip
+        self.assertEqual(got["fourth"], {"view": "step-4", "sources": "the debug information.", "runs": 0, "locked": ["step-4"] * 2})
+        # The text goes to the server as it was pasted, once to be read and once with the run, and alone.
+        self.assertEqual(got["checks"], [{"debug_info_text": pasted.FULL}])
         self.assertEqual(got["sent"], [{"debug_info_text": pasted.FULL}])
         self.assertEqual(got["busy"], "true")
+        # The browser's history holds step numbers only, and no address.
+        self.assertEqual(got["history"], [{"state": {"step": number}} for number in (1, 2, 3, 4)])
+
+    def test_a_text_edited_after_the_check_closes_the_later_steps_again(self):
+        got = run_page(
+            """async (page, input) => {
+              await page.run(input.response);
+              const open = [5, 6, 2].map((n) => page.go(n));
+              page.type("f-debug", page.$("f-debug").value + " ");
+              const edited = { shown: page.visible("debug-read"), label: page.$("debug-button-label").textContent, locked: [3, 4, 5, 6].map((n) => page.go(n)),
+                               saved: await page.download(), files: page.saved() };
+              page.$("profile-download").click();  // the button of step 6, pressed although its step is closed
+              await page.settle();
+              edited.filesAfter = page.saved();
+              await page.submit();  // and a run asked for all the same
+              edited.runs = page.sent.length;
+              edited.view = page.view();
+              edited.error = page.visible("e-debug") && page.$("e-debug").textContent;
+              // Checked again, the steps open again, with the report of the run before still there.
+              await page.pressDebug();
+              await page.finishCheck(input.checked);
+              return { open, edited, checks: page.sentChecks.length, again: [3, 4, 5, 6].map((n) => page.go(n)) };
+            }""",
+            response=run_response(), checked=CHECKED,
+        )  # fmt: skip
+        self.assertEqual(got["open"], ["step-5", "step-6", "step-2"])
+        self.assertEqual(got["edited"], {"shown": False, "label": "Check the text", "locked": ["step-2"] * 4, "saved": None, "files": 0, "filesAfter": 0, "runs": 1, "view": "step-2",
+                                         "error": "The debug information has to be checked before a run. Press “Check the text”."})  # fmt: skip
+        self.assertEqual((got["checks"], got["again"]), (2, ["step-3", "step-4", "step-5", "step-6"]))
+
+    def test_the_notes_of_an_older_or_undated_text_are_shown_and_it_is_still_accepted(self):
+        for label, text in (("no cluster section", pasted.NO_CLUSTER), ("no date", pasted.text((pasted.STAMP, "")))):
+            checked = web.check_debug_info(debug_info.parse(text))
+            self.assertEqual(len(checked["notes"]), 1)
+            got = run_page(
+                """async (page, input) => {
+                  page.go(2);
+                  page.type("f-debug", input.text);
+                  await page.pressDebug();
+                  await page.finishCheck(input.checked);
+                  const notes = page.visible("debug-notes") && page.$("debug-notes").textContent;
+                  await page.pressDebug();
+                  return { notes, view: page.view() };
+                }""",
+                text=text, checked=json.dumps(checked),
+            )  # fmt: skip
+            with self.subTest(text=label):
+                self.assertEqual(got, {"notes": checked["notes"][0], "view": "step-3"})
 
     def test_a_refused_debug_information_is_shown_next_to_its_field(self):
         for sentence in (debug_info.NOT_DEBUG_INFO, debug_info.SEVERAL, debug_info.TOO_LARGE):
             got = run_page(
                 """async (page, input) => {
+                  page.go(2);
                   page.type("f-debug", input.text);
-                  await page.submit();
-                  await page.finishRun(JSON.stringify({ error: input.sentence, field: "debug_info_text" }), 400);
+                  await page.pressDebug();
+                  await page.finishCheck(JSON.stringify({ error: input.sentence, field: "debug_info_text" }), 400);
                   const refused = { view: page.view(), error: page.visible("e-debug") && page.$("e-debug").textContent,
                                     invalid: page.$("f-debug").getAttribute("aria-invalid"), focus: document.activeElement.id,
-                                    banner: page.visible("form-error"), kept: page.$("f-debug").value === input.text,
-                                    busy: page.$("run-button").getAttribute("aria-disabled") };
-                  return { refused };
+                                    banner: page.visible("debug-error"), kept: page.$("f-debug").value === input.text, read: page.visible("debug-read"),
+                                    busy: page.$("debug-button").getAttribute("aria-disabled"), label: page.$("debug-button-label").textContent,
+                                    locked: [3, 4, 5, 6].map((n) => page.go(n)) };
+                  await page.pressDebug();  // pressed again: asked again, never let through
+                  return { refused, checks: page.sentChecks.length, runs: page.sent.length };
                 }""",
                 text=f"hello {pasted.MARK}", sentence=sentence,
             )  # fmt: skip
             with self.subTest(sentence=sentence):
                 said = sentence[0].upper() + sentence[1:] + "."
-                self.assertEqual(got["refused"], {"view": "form", "error": said, "invalid": "true", "focus": "f-debug", "banner": False, "kept": True, "busy": None})
+                self.assertEqual(got["refused"], {"view": "step-2", "error": said, "invalid": "true", "focus": "f-debug", "banner": False, "kept": True, "read": False,
+                                                  "busy": None, "label": "Check the text", "locked": ["step-2"] * 4})  # fmt: skip
+                self.assertEqual((got["checks"], got["runs"]), (2, 0))
+
+    def test_a_text_the_run_refuses_after_all_brings_the_operator_back_to_step_two(self):
+        got = run_page(
+            """async (page, input) => {
+              await page.startRun();
+              await page.finishRun(JSON.stringify({ error: input.sentence, field: "debug_info_text" }), 400);
+              return { view: page.view(), error: page.visible("e-debug") && page.$("e-debug").textContent, focus: document.activeElement.id,
+                       banner: page.visible("form-error"), locked: [3, 4].map((n) => page.go(n)) };
+            }""",
+            sentence=debug_info.NOT_DEBUG_INFO,
+        )
+        said = debug_info.NOT_DEBUG_INFO[0].upper() + debug_info.NOT_DEBUG_INFO[1:] + "."
+        self.assertEqual(got, {"view": "step-2", "error": said, "focus": "f-debug", "banner": False, "locked": ["step-2"] * 2})
+
+    def test_the_check_of_the_text_can_fail_without_losing_it(self):
+        endings = {
+            "no answer": ("await page.failCheck()", "The server could not be reached."),
+            "an error of the server": ("await page.finishCheck('{\"error\": \"boom\"}', 500)", "The health check failed on the server."),
+            "an answer that is not JSON": ("await page.finishCheck('<html>')", "The server sent an answer this page could not read."),
+            "an answer that is not the expected one": ("await page.finishCheck('{}')", "The server sent an answer this page could not read."),
+            "a request the server refuses": ("await page.finishCheck('{\"error\": \"unknown field: x\"}', 400)", "The server did not accept the request."),
+        }
+        for name, (end, title) in endings.items():
+            got = run_page(
+                """async (page, input) => {
+                  page.go(2);
+                  page.type("f-debug", input.text);
+                  await page.pressDebug();
+                  %s;
+                  return { view: page.view(), banner: page.visible("debug-error") && page.$("debug-error-title").textContent, focus: document.activeElement.id,
+                           field: page.visible("e-debug"), kept: page.$("f-debug").value === input.text, busy: page.$("debug-button").getAttribute("aria-disabled"),
+                           locked: page.go(3), shown: page.$("debug-error-text").textContent };
+                }""" % end,
+                text=pasted.FULL,
+            )  # fmt: skip
+            with self.subTest(check_ends_with=name):
+                shown = got.pop("shown")
+                self.assertEqual(got, {"view": "step-2", "banner": title, "focus": "debug-error", "field": False, "kept": True, "busy": None, "locked": "step-2"})
+                self.assertNotIn(pasted.MARK, shown)
+
+    def test_step_five_says_how_much_the_run_decided_and_what_each_missing_source_would_add(self):
+        # A run that was given the debug information and a Redis that could not be read.
+        with mock.patch("n8n_healthcheck.collectors.collect", return_value=Snapshot(debug_info=READ)):
+            with mock.patch("sys.stderr"):
+                sent = cli.json_safe(web.run_check({"redis_url": "redis://cache.example:6379", "debug_info_text": READ}))
+        coverage = sent["coverage"]
+        self.assertEqual(coverage, web.coverage(sent["profile"]["check"]["checks"]))
+        self.assertGreater(coverage["failed"]["redis"], 0)
+        scenario = """async (page, input) => {
+          await page.run(input.response);
+          page.go(5);
+          const lines = page.walk(page.$("coverage-list")).filter((node) => node.tagName === "li").map((node) => node.textContent);
+          const seen = { view: page.view(), block: page.visible("coverage-block"), decided: page.$("coverage-decided").textContent, rest: page.$("coverage-rest").textContent,
+                         list: page.visible("coverage-list"), lines, note: page.visible("coverage-note"), action: page.visible("coverage-action") };
+          page.$("coverage-back").click();
+          return { ...seen, back: page.view() };
+        }"""
+        got = run_page(scenario, response=json.dumps(sent, allow_nan=False))
+        plural = lambda count: f"{count} check{'' if count == 1 else 's'}"  # noqa: E731
+        expected = [
+            f"{plural(coverage['waiting'][source])} can be decided with {label}, which was not given."
+            for source, label in (("url", "the n8n URL"), ("env", "the env file"), ("postgres", "Postgres"), ("kubernetes", "Kubernetes"))
+        ]
+        expected.append(f"{plural(coverage['failed']['redis'])} need{'s' if coverage['failed']['redis'] == 1 else ''} Redis, which was asked for and could not be read.")
+        expected.append(f"{plural(coverage['unstated'])} need{'s' if coverage['unstated'] == 1 else ''} a source that states a setting none of the sources of this run shows, or a value that could not be read.")
+        self.assertEqual(coverage["waiting"]["redis"], 0)
+        self.assertEqual(got, {"view": "step-5", "block": True, "decided": f"This run decided {coverage['decided']} of 24 checks.", "rest": "What the others need:",
+                               "list": True, "lines": expected, "note": True, "action": True, "back": "step-3"})  # fmt: skip
+        # The labels are the ones the profile's own review uses for a source.
+        self.assertEqual(js_constant("NEED_LABELS"), profile.NEED_LABELS)
+        # Every check decided: no list, and no way back is offered because none is needed.
+        everything = {**coverage, "decided": 24, "waiting": dict.fromkeys(coverage["waiting"], 0), "failed": dict.fromkeys(coverage["failed"], 0), "unstated": 0}
+        got = run_page(scenario, response=json.dumps({**sent, "coverage": everything}, allow_nan=False))
+        self.assertEqual((got["decided"], got["rest"], got["list"], got["note"], got["action"]), ("This run decided all 24 checks.", "No source would add a check.", False, False, False))
+        # The other reasons a rule can give, each in its own line.
+        odd = {**everything, "decided": 21, "disagree": 2, "errors": 1}
+        got = run_page(scenario, response=json.dumps({**sent, "coverage": odd}, allow_nan=False))
+        self.assertEqual(got["lines"], ["2 checks: two sources of this run disagree on what the check reads.", "1 check failed to run, which is a bug in n8n-healthcheck."])
+        self.assertEqual((got["note"], got["action"]), (False, False))
+        # An answer without the numbers (an older server): the block is not shown, the review works.
+        got = run_page(scenario, response=json.dumps({key: value for key, value in sent.items() if key != "coverage"}, allow_nan=False))
+        self.assertEqual((got["view"], got["block"]), ("step-5", False))
+
+    def test_back_never_loses_what_was_entered(self):
+        got = run_page(
+            """async (page, input) => {
+              await page.passDebug();
+              page.type("f-url", "https://n8n.example.test");
+              page.type("f-kube-ns", "n8n");
+              await page.continueSources();
+              const values = () => [page.$("f-debug").value === input.text, page.$("f-url").value, page.$("f-kube-ns").value];
+              const seen = { sources: page.$("run-sources").textContent };
+              // The buttons of the page.
+              page.$("back-4").click(); seen.back4 = [page.view(), ...values()];
+              page.$("back-3").click(); seen.back3 = [page.view(), ...values(), page.visible("debug-read"), page.$("debug-button-label").textContent];
+              page.$("back-2").click(); seen.back2 = [page.view(), ...values()];
+              // The browser's own Back and Forward, through the entries the page wrote.
+              seen.forward = [2, 3, 4].map((n) => page.popstate({ step: n }));
+              seen.kept = values();
+              seen.closed = page.popstate({ step: 6 });  // an entry for a step that cannot be opened: the page stays
+              seen.unknown = page.popstate(null);  // an entry that is not the page's: the first step
+              const entries = page.history.length;
+              page.popstate({ step: 3 });
+              seen.pushed = page.history.length - entries;  // moving through the history writes no new entry
+              return seen;
+            }""",
+            text=pasted.FULL,
+        )
+        kept = [True, "https://n8n.example.test", "n8n"]
+        # Named by the label GET /api/meta gives a source; the stand-in for the server lists none, so the ids show.
+        self.assertEqual(got["sources"], "the debug information, url, kubernetes.")
+        self.assertEqual(got["back4"], ["step-3", *kept])
+        self.assertEqual(got["back3"], ["step-2", *kept, True, "Continue"])  # still the checked text: no second check is asked
+        self.assertEqual(got["back2"], ["step-1", *kept])
+        self.assertEqual((got["forward"], got["kept"]), (["step-2", "step-3", "step-4"], kept))
+        self.assertEqual((got["closed"], got["unknown"], got["pushed"]), ("step-4", "step-1", 0))
+
+    def test_no_step_can_be_left_while_a_run_is_under_way(self):
+        got = run_page(
+            """async (page, input) => {
+              await page.startRun();
+              const during = { stepper: [1, 2, 3, 5, 6].map((n) => page.go(n)), back: (page.$("back-4").click(), page.view()), history: page.popstate({ step: 1 }),
+                               off: ["go-1", "go-3", "back-4", "next-4"].map((id) => page.$(id).disabled) };
+              await page.submit();  // a second press of the button
+              const runs = page.sent.length;
+              await page.finishRun(input.response);
+              return { during, runs, after: ["go-1", "go-3", "go-5", "go-6", "back-4", "next-4"].map((id) => page.$(id).disabled), next: (page.$("next-4").click(), page.view()),
+                       label: page.$("run-button-label").textContent };
+            }""",
+            response=run_response(),
+        )  # fmt: skip
+        self.assertEqual(got["during"], {"stepper": ["step-4"] * 5, "back": "step-4", "history": "step-4", "off": [True] * 4})
+        self.assertEqual((got["runs"], got["after"], got["next"], got["label"]), (1, [False] * 6, "step-5", "Run again"))
+
+    def test_an_opened_profile_is_outside_the_steps_and_closing_it_returns_to_them(self):
+        got = run_page(
+            """async (page, input) => {
+              await page.passDebug();
+              const opened = await page.open(input.file);
+              const during = { view: opened.view, focus: document.activeElement.id };
+              page.$("profile-close").click();
+              return { during, view: page.view(), focus: document.activeElement.id, left: page.walk(page.$("profile-body")).length, kept: page.$("f-debug").value === input.text };
+            }""",
+            file=profile.to_json(built()), text=pasted.FULL,
+        )
+        self.assertEqual(got, {"during": {"view": "profile", "focus": "profile-title"}, "view": "step-3", "focus": "step-3-title", "left": 0, "kept": True})
 
     def test_a_400_about_something_else_is_still_the_banner(self):
         got = run_page(
             """async (page, input) => {
-              page.type("f-debug", input.text);
-              await page.submit();
+              await page.startRun();
               await page.finishRun(JSON.stringify({ error: "url must be an http:// or https:// URL with a host" }), 400);
-              return { field: page.visible("e-debug"), banner: page.visible("form-error") && page.$("form-error-title").textContent };
+              return { view: page.view(), field: page.visible("e-debug"), banner: page.visible("form-error") && page.$("form-error-title").textContent };
             }""",
-            text=pasted.FULL,
         )
-        self.assertEqual(got, {"field": False, "banner": "The server did not accept the request."})
+        self.assertEqual(got, {"view": "step-4", "field": False, "banner": "The server did not accept the request."})
 
     def test_a_paste_over_64_kb_is_stopped_in_the_page_next_to_its_field(self):
         got = run_page(
             """async (page, input) => {
-              page.$("f-env").value = "EXECUTIONS_MODE=queue";
+              page.go(2);
               page.type("f-debug", input.text + "\\n".repeat(input.room + 1));
-              await page.submit();
-              const over = { sent: page.sent.length, error: page.visible("e-debug") && page.$("e-debug").textContent,
-                             other: page.visible("e-env"), focus: document.activeElement.id };
+              await page.pressDebug();
+              const over = { sent: page.sentChecks.length, error: page.visible("e-debug") && page.$("e-debug").textContent,
+                             view: page.view(), focus: document.activeElement.id };
               page.type("f-debug", input.text + "\\n".repeat(input.room));
-              await page.submit();
-              return { over, sent: page.sent.length, bytes: new TextEncoder().encode(JSON.parse(page.sent[0]).debug_info_text).length };
+              await page.pressDebug();
+              return { over, sent: page.sentChecks.length, bytes: new TextEncoder().encode(JSON.parse(page.sentChecks[0]).debug_info_text).length };
             }""",
             text=pasted.FULL, room=debug_info.MAX_BYTES - len(pasted.FULL.encode()),
         )  # fmt: skip
-        self.assertEqual((got["over"]["sent"], got["over"]["other"], got["over"]["focus"]), (0, False, "f-debug"))
+        self.assertEqual((got["over"]["sent"], got["over"]["view"], got["over"]["focus"]), (0, "step-2", "f-debug"))
         self.assertIn("the limit is 64 KB", got["over"]["error"])
         self.assertNotIn(pasted.MARK, got["over"]["error"])
         self.assertEqual((got["sent"], got["bytes"]), (1, debug_info.MAX_BYTES))
@@ -944,14 +1240,12 @@ class PageBehaviourTest(unittest.TestCase):
         ]
         got = run_page(
             """async (page, input) => {
-              page.type("f-debug", input.text);
-              await page.submit();
+              await page.startRun();
               await page.finishRun(input.response);
               const read = () => ({ scores: page.$("scores").children.map((card) => [card.className, card.textContent]), stats: page.$("stats").children.map((item) => item.className),
                                     findings: page.walk(page.$("findings")).filter((node) => node.tagName === "li").map((node) => [node.className, node.attributes["data-severity"]]) });
               const first = read();
-              page.$("act-again").click();
-              await page.submit();
+              await page.submit();  // "Run again", on the same step
               await page.finishRun(input.withoutInfo);
               return { ...first, withoutInfo: read().stats };
             }""",
@@ -982,11 +1276,14 @@ class PageBehaviourTest(unittest.TestCase):
         for raw in PATHS:
             got = run_page(
                 """async (page, input) => {
-                  page.type("f-debug", input.text);
+                  await page.passDebug(input.text);
+                  await page.continueSources();  // no other source
                   await page.submit();
                   await page.finishRun(input.response);
+                  const view = page.view();
+                  const next = page.visible("next-4");
                   const saved = await page.download();
-                  const first = { view: page.view(), label: page.$("status-label").textContent, partial: page.visible("status-partial"),
+                  const first = { view, next, sent: JSON.parse(page.sent[0]), label: page.$("status-label").textContent, partial: page.visible("status-partial"),
                            summary: page.$("summary").textContent, stats: page.$("stats").textContent,
                            points: page.visible("summary-points") && page.$("summary-points").textContent,
                            urgent: page.visible("urgent") && [page.$("urgent-title").textContent, page.$("urgent-text").textContent],
@@ -994,7 +1291,7 @@ class PageBehaviourTest(unittest.TestCase):
                            scores: page.$("scores").textContent, scoresNote: page.$("scores-note").textContent,
                            assessed: page.$("not-assessed").textContent, share: page.$("share-body").textContent, saved,
                            report: page.$("view-report").textContent };
-                  page.$("act-again").click();
+                  page.$("back-4").click();
                   const again = { view: page.view(), kept: page.$("f-debug").value === input.text };
                   const opened = await page.open(saved);
                   return { ...first, again, opened };
@@ -1002,7 +1299,8 @@ class PageBehaviourTest(unittest.TestCase):
                 raw=raw, response=response, text=pasted.FULL,
             )  # fmt: skip
             with self.subTest(rawJSON=raw):
-                self.assertEqual(got["view"], "report")
+                self.assertEqual((got["view"], got["next"]), ("step-4", True))  # the report is on step 4, and step 5 is open
+                self.assertEqual(got["sent"], {"debug_info_text": pasted.FULL})
                 self.assertNotIn("could not run", got["label"])
                 self.assertTrue(got["partial"])
                 # The Summary of the report in parts: the counts, the first fix, then every other
@@ -1028,8 +1326,8 @@ class PageBehaviourTest(unittest.TestCase):
                     self.assertIn("main.concurrency_limitunlimitedmeasuredfrom debug_infodebug information generated on 2026-11-19", shown)
                 self.assertEqual((got["opened"]["view"], got["opened"]["error"]), ("profile", ""))
                 self.assert_saved(got["saved"], sent["profile"], raw)
-                # "Run again" goes back to the form with the text still in its field, like the other sources.
-                self.assertEqual(got["again"], {"view": "form", "kept": True})
+                # "Back" goes to the sources with the text still in its field, like the other sources.
+                self.assertEqual(got["again"], {"view": "step-3", "kept": True})
                 for text in (got["report"], got["saved"], got["opened"]["shown"], response):
                     self.assertNotIn(pasted.MARK, text)
 
@@ -1041,11 +1339,14 @@ class PageBehaviourTest(unittest.TestCase):
             """async (page, input) => {
               await page.run(input.response);
               return { label: page.$("status-label").textContent, summary: page.$("summary").textContent,
-                       parts: ["stats", "urgent", "summary-points"].map((id) => [page.visible(id), page.$(id).textContent]) };
+                       parts: ["stats", "urgent", "summary-points"].map((id) => [page.visible(id), page.$(id).textContent]),
+                       next: page.visible("next-4"), locked: [5, 6].map((n) => page.go(n)), saved: await page.download() };
             }""",
             response=response,
         )
         self.assertEqual(got["label"], "The check could not run")
+        # An answer without a profile (the server gives none without a debug information): nothing to review or save.
+        self.assertEqual((got["next"], got["locked"], got["saved"]), (False, ["step-4", "step-4"], None))
         self.assertEqual(got["summary"], sent["summary"])
         # "urgent" is the title and the text the page fills; its static label is not in the harness.
         self.assertEqual(got["parts"], [[False, ""]] * 3)
@@ -1062,22 +1363,29 @@ class PageBehaviourTest(unittest.TestCase):
                   page.$("f-reason").value = "incident";
                   page.type("f-reference", "  ticket 4711 <b>x</b> ");
                   const first = await page.download();
-                  const status = page.$("share-status").textContent;
+                  const status = page.$("download-status").textContent;
+                  const named = [page.$("file-name").textContent, page.$("file-holds").textContent];
                   page.toggle(page.boxes()[input.ids[0]]);  // changed my mind about the first one
-                  return { rawJSON: page.rawJSON, view: page.view(), boxes, first, status, second: await page.download(),
+                  return { rawJSON: page.rawJSON, view: page.view(), boxes, first, status, named, version: page.$("always-shared").textContent, second: await page.download(),
                            summary: page.$("share-summary").textContent };
                 }""",
-                raw=raw, response=response, ids=WITHHELD,
+                raw=raw, response=response, ids=PAGE_WITHHELD,
             )  # fmt: skip
             with self.subTest(rawJSON=raw):
                 self.assertEqual(got["rawJSON"], raw)
-                self.assertEqual(got["view"], "report")
-                self.assertEqual(sorted(got["boxes"]), sorted(all_ids(sent)))  # one box per entry, none missing
+                self.assertEqual(got["view"], "step-6")
+                # One box per entry, none missing, except the n8n version, whose row says why it has none.
+                self.assertEqual(sorted(got["boxes"]), sorted(set(all_ids(sent)) - {"n8n.version"}))
+                self.assertEqual(got["version"], "Always in the file")
                 run = {"reason": "incident", "reference": "ticket 4711 <b>x</b>"}
-                self.assert_saved(got["first"], profile.apply_withholding({**sent, "run": run}, WITHHELD), raw)
-                self.assert_saved(got["second"], profile.apply_withholding({**sent, "run": run}, WITHHELD[1:]), raw)
-                self.assertNotIn("2.40.1", got["first"])
-                self.assertEqual(got["status"], f"Download started: n8n-profile-{sent['created_at'][:10]}.json")
+                self.assert_saved(got["first"], profile.apply_withholding({**sent, "run": run}, PAGE_WITHHELD), raw)
+                self.assert_saved(got["second"], profile.apply_withholding({**sent, "run": run}, PAGE_WITHHELD[1:]), raw)
+                for saved in (got["first"], got["second"]):
+                    self.assertEqual(json.loads(saved)["facts"][0], {"id": "n8n.version", "value": "2.40.1", "provenance": "measured", "source": "metrics", "detail": ""})
+                name = f"n8n-profile-{sent['created_at'][:10]}.json"
+                self.assertEqual(got["status"], f"Download started: {name}")
+                self.assertEqual(got["named"][0], name)
+                self.assertIn("2 of 67 facts, 2 of ", got["named"][1])  # step 6 says what the file holds, as step 5 left it
                 self.assertIn("1 of 67 facts, 2 of ", got["summary"])
 
     def test_answers_are_saved_as_profile_py_writes_them(self):
@@ -1113,7 +1421,7 @@ class PageBehaviourTest(unittest.TestCase):
                   const notes = () => page.walk(page.$("questions-list")).filter((node) => node.className === "question__note" && !node.hidden).length;
                   seen.notesBefore = notes();
                   page.toggle(page.boxes()["worker.autoscaling"]);  // an answer, then withheld
-                  page.toggle(page.boxes()["n8n.version"]);
+                  page.toggle(page.boxes()["executions.mode"]);
                   seen.notesAfter = notes();
                   seen.second = await page.download();
                   seen.tableAfter = page.$("share-body").textContent;
@@ -1145,14 +1453,14 @@ class PageBehaviourTest(unittest.TestCase):
                 self.assertIn("proxy.kindunknownnot answered", got["table"])
                 self.assertIn("orchestratorkubernetesmeasured", got["table"])
                 self.assertIn("Answered: 4 of 14 questions. Withheld: 0 of 67 facts", got["summary"])
-                self.assertEqual(got["boxes"], len(all_ids(sent)))
+                self.assertEqual(got["boxes"], len(all_ids(sent)) - 1)  # the n8n version has none
                 self.assertEqual((got["notesBefore"], got["notesAfter"]), (0, 1))
-                self.assert_saved(got["second"], profile.apply_withholding(declared, ["worker.autoscaling", "n8n.version"]), raw)
+                self.assert_saved(got["second"], profile.apply_withholding(declared, ["worker.autoscaling", "executions.mode"]), raw)
                 self.assertIn("worker.autoscalingwithheld", got["tableAfter"])
                 only_none = profile.apply_answers(sent, {**answers, MULTI: ["none"]})[0]
-                self.assert_saved(got["third"], profile.apply_withholding(only_none, ["worker.autoscaling", "n8n.version"]), raw)
+                self.assert_saved(got["third"], profile.apply_withholding(only_none, ["worker.autoscaling", "executions.mode"]), raw)
                 unanswered = profile.apply_answers(sent, {k: v for k, v in answers.items() if k != MULTI})[0]
-                self.assert_saved(got["fourth"], profile.apply_withholding(unanswered, ["worker.autoscaling", "n8n.version"]), raw)
+                self.assert_saved(got["fourth"], profile.apply_withholding(unanswered, ["worker.autoscaling", "executions.mode"]), raw)
 
     def test_every_question_can_be_answered_and_a_measured_fact_is_not_asked(self):
         without_kubernetes = dataclasses.replace(PLAIN, kubernetes=None)
@@ -1248,9 +1556,9 @@ class PageBehaviourTest(unittest.TestCase):
             }""",
             raw=PATHS[0], response=response,
         )  # fmt: skip
-        facts = [f["id"] for f in sent["facts"]]
+        facts = [f["id"] for f in sent["facts"] if f["id"] != "n8n.version"]  # "all facts" leaves the version in the file
         settings = [profile.setting_id(s) for s in sent["settings"]]
-        self.assertEqual(len(facts), 67)
+        self.assertEqual(len(facts), 66)
         self.assertGreater(len(settings), 3)
         for name, ids in (
             ("Withhold all facts", facts),
@@ -1266,8 +1574,9 @@ class PageBehaviourTest(unittest.TestCase):
             """async (page, input) => {
               await page.run(input.response);
               page.type("f-reference", "x".repeat(201));
+              page.go(5);
               const refused = { saved: await page.download(), error: page.visible("e-reference") && page.$("e-reference").textContent,
-                                invalid: page.$("f-reference").getAttribute("aria-invalid") };
+                                invalid: page.$("f-reference").getAttribute("aria-invalid"), view: page.view(), focus: document.activeElement.id };
               page.type("f-reference", "x".repeat(200));
               return { refused, errorAfter: page.visible("e-reference"), saved: JSON.parse(await page.download()).run.reference.length };
             }""",
@@ -1276,32 +1585,57 @@ class PageBehaviourTest(unittest.TestCase):
         self.assertIsNone(got["refused"]["saved"])
         self.assertIn("201 characters", got["refused"]["error"])
         self.assertEqual(got["refused"]["invalid"], "true")
+        self.assertEqual((got["refused"]["view"], got["refused"]["focus"]), ("step-5", "f-reference"))  # step 6 does not open
         self.assertFalse(got["errorAfter"])
         self.assertEqual(got["saved"], 200)
 
-    def test_a_new_run_keeps_nothing_of_the_one_before(self):
-        first, second = run_response(), run_response(dataclasses.replace(PLAIN, n8n_version="2.41.0"))
+    def test_a_new_run_keeps_what_the_operator_chose(self):
+        # Until 0.6.0 a new run started from nothing. Since 0.7.0 an entry that was withheld stays withheld
+        # when the new run still has it, and the answers, the reason and the reference are kept.
+        first = run_response()
+        without_kubernetes = run_response(dataclasses.replace(PLAIN, kubernetes=None, n8n_version="2.41.0"))  # no setting of "main"
+        third = run_response(dataclasses.replace(PLAIN, n8n_version="2.41.0"))
+        answers = {"hosting.model": "hybrid", MULTI: ["grafana"]}
+        run = {"reason": "incident", "reference": "ticket of the first run"}
         for raw in PATHS:
             got = run_page(
                 """async (page, input) => {
                   await page.run(input.first);
+                  const keptNote = [page.visible("share-kept")];
                   for (const id of input.ids) page.toggle(page.boxes()[id]);
                   page.$("f-reason").value = "incident";
                   page.type("f-reference", "ticket of the first run");
                   page.choose(page.questions()["hosting.model"]["hybrid"]);
                   page.toggle(page.questions()["observability.tools"]["grafana"]);
-                  page.$("act-again").click();
-                  await page.run(input.second);
-                  const chosen = Object.values(page.questions()).flatMap((group) => Object.values(group)).filter((input) => input.checked && input.value);
-                  return { ticked: Object.values(page.boxes()).filter((box) => box.checked).length + chosen.length, reason: page.$("f-reason").value,
-                           reference: page.$("f-reference").value, saved: await page.download() };
+                  const seen = [];
+                  for (const response of [input.second, input.third]) {
+                    page.$("back-4").click();  // back to the sources, then a new run
+                    await page.continueSources();
+                    await page.run(response);
+                    const chosen = Object.values(page.questions()).flatMap((group) => Object.values(group)).filter((input) => input.checked && input.value);
+                    keptNote.push(page.visible("share-kept"));
+                    seen.push({ ticked: Object.entries(page.boxes()).filter(([, box]) => box.checked).map(([id]) => id), chosen: chosen.map((input) => input.value),
+                                reason: page.$("f-reason").value, reference: page.$("f-reference").value, summary: page.$("share-summary").textContent,
+                                saved: await page.download() });
+                  }
+                  return { seen, keptNote };
                 }""",
-                raw=raw, first=first, second=second, ids=WITHHELD,
+                raw=raw, first=first, second=without_kubernetes, third=third, ids=PAGE_WITHHELD,
             )  # fmt: skip
             with self.subTest(rawJSON=raw):
-                self.assertEqual((got["ticked"], got["reason"], got["reference"]), (0, "baseline", ""))
-                self.assert_saved(got["saved"], json.loads(second)["profile"], raw)
-                self.assertNotIn("first run", got["saved"])
+                self.assertEqual(got["keptNote"], [False, True, True])
+                for seen, response in zip(got["seen"], (without_kubernetes, third)):
+                    sent = json.loads(response)["profile"]
+                    still_there = [item for item in PAGE_WITHHELD if item in all_ids(sent)]
+                    self.assertEqual(sorted(seen["ticked"]), sorted(still_there))
+                    self.assertEqual((seen["chosen"], seen["reason"], seen["reference"]), (["hybrid", "grafana"], "incident", "ticket of the first run"))
+                    self.assertIn("Answered: 2 of ", seen["summary"])
+                    expected = profile.apply_withholding({**profile.apply_answers(sent, answers)[0], "run": run}, still_there)
+                    self.assert_saved(seen["saved"], expected, raw)
+                    self.assertIn('"2.41.0"', seen["saved"])  # the new run's values, the operator's choices
+                # The setting of the main container is not in the second run, and is withheld again when the third brings it back.
+                self.assertNotIn("setting:main:N8N_HOST", got["seen"][0]["ticked"])
+                self.assertIn("setting:main:N8N_HOST", got["seen"][1]["ticked"])
 
     def test_open_a_profile_is_off_during_a_run_and_back_on_after_it_however_it_ends(self):
         saved_file = profile.to_json(built())
@@ -1324,26 +1658,25 @@ class PageBehaviourTest(unittest.TestCase):
                 during.opened = await page.open(input.file);  // a file that arrives all the same
                 await end();
                 seen[name] = { during, after: state() };
-                if (page.view() === "report") page.$("act-again").click();
               }
               seen.openedAfter = await page.open(input.file);
               return seen;
             }""",
             raw=PATHS[0], response=run_response(), file=saved_file,
         )  # fmt: skip
-        idle = {"view": "form", "off": False, "why": False, "stale": False, "error": False}
-        self.assertEqual(got.pop("before"), idle)
+        idle = {"view": "step-4", "off": False, "why": False, "stale": False, "error": False}  # a run and its result are on step 4
+        self.assertEqual(got.pop("before"), {**idle, "view": "step-1"})
         self.assertEqual(got.pop("openedAfter")["view"], "profile")
         self.assertEqual(len(got), 5)
         for name, seen in got.items():
             with self.subTest(run_ends_with=name):
                 opened = seen["during"].pop("opened")
                 self.assertEqual(seen["during"], {**idle, "off": True, "why": True})
-                self.assertEqual((opened["view"], opened["elements"]), ("form", 0))
+                self.assertEqual((opened["view"], opened["elements"]), ("step-4", 0))
                 self.assertIn("A health check is running", opened["error"])
                 # Afterwards the field is usable again, and the result or the error is on screen.
                 if name == "a report":
-                    self.assertEqual(seen["after"], {**idle, "view": "report"})
+                    self.assertEqual(seen["after"], idle)
                 else:
                     self.assertEqual(seen["after"], {**idle, "error": True})
 
@@ -1379,7 +1712,7 @@ class PageBehaviourTest(unittest.TestCase):
                         self.assertIn("n8n-profile.json", opened["meta"])
                     else:
                         # Refused: a message, and nothing of the file anywhere on the page.
-                        self.assertEqual((opened["view"], opened["elements"], opened["shown"], opened["meta"]), ("form", 0, "", ""))
+                        self.assertEqual((opened["view"], opened["elements"], opened["shown"], opened["meta"]), ("step-1", 0, "", ""))
                         self.assertNotEqual(opened["error"], "")
                     self.assertEqual(opened["left"], 0)  # and nothing is kept after "Back to start"
 
