@@ -1,4 +1,4 @@
-"""HTTP server for `n8n-healthcheck serve`: static page plus /api/meta and /api/run.
+"""HTTP server for `n8n-healthcheck serve`: static page plus /api/meta, /api/debug-info and /api/run.
 
 The server has no authentication and can be told to connect to arbitrary hosts
 and databases, so every request is checked against the Host header (DNS
@@ -9,6 +9,11 @@ of the run. An n8n API key goes to the collector and nowhere else: it is not in 
 response, a log line or an error. A pasted debug information is read in memory by debug_info.parse()
 and only what the parser kept goes on: the text is never written, logged or
 returned.
+
+A profile is built only for a run that was given a debug information: without one the
+answer of /api/run holds the report and no profile (the same rule as --save-profile on
+the command line). /api/debug-info reads a pasted debug information before the run,
+collects nothing, and says what was read and what the rules decide from it alone.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import tempfile
 import threading
 import webbrowser
 from dataclasses import asdict
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -34,7 +40,7 @@ from urllib.parse import unquote, urlsplit
 import n8n_healthcheck
 
 from .. import cli, debug_info, engine, profile, questions, report, usage
-from ..models import Target
+from ..models import SOURCE_IDS, Snapshot, Target
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_BYTES = 1024 * 1024
@@ -68,6 +74,10 @@ CONTENT_TYPES = {
     ".json": "application/json; charset=utf-8",
     ".svg": "image/svg+xml",
 }
+
+
+# The two requests that take a body. Both pass the same checks before it is read.
+POST_ROUTES = ("/api/run", "/api/debug-info")
 
 
 class BadRequest(Exception):
@@ -128,6 +138,36 @@ def meta() -> dict:
     }
 
 
+def _json_object(body: bytes, known) -> dict:
+    """The JSON object of a request body, with no field other than those in `known`."""
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):  # ValueError includes UnicodeDecodeError; RecursionError: deep nesting
+        raise BadRequest("the request body is not valid JSON") from None
+    if not isinstance(data, dict):
+        raise BadRequest("the request body must be a JSON object")
+    unknown = sorted(set(data) - set(known))
+    if unknown:
+        # Names only, cut short: an unknown field is still client input.
+        raise BadRequest("unknown field: " + ", ".join(name[:40] for name in unknown[:5]))
+    return data
+
+
+def parse_debug_info_request(body: bytes) -> dict:
+    """Validate the JSON body of POST /api/debug-info; return what debug_info.parse() kept.
+
+    The body holds `debug_info_text` and nothing else. As in parse_run_request(), the text
+    does not leave this function, and a refusal is the parser's fixed sentence.
+    """
+    text = _json_object(body, ("debug_info_text",)).get("debug_info_text")
+    if not isinstance(text, str) or not text.strip():
+        raise BadRequest("debug_info_text must be a text that is not empty", "debug_info_text")
+    try:
+        return debug_info.parse(text)
+    except debug_info.DebugInfoError as exc:
+        raise BadRequest(str(exc), "debug_info_text") from None
+
+
 def parse_run_request(body: bytes) -> dict:
     """Validate the JSON body of POST /api/run; return only the fields that are set.
 
@@ -135,16 +175,7 @@ def parse_run_request(body: bytes) -> dict:
     itself does not leave this function. A text the parser refuses is a BadRequest with
     the parser's fixed sentence, which holds nothing of the text.
     """
-    try:
-        data = json.loads(body)
-    except (ValueError, RecursionError):  # ValueError includes UnicodeDecodeError; RecursionError: deep nesting
-        raise BadRequest("the request body is not valid JSON") from None
-    if not isinstance(data, dict):
-        raise BadRequest("the request body must be a JSON object")
-    unknown = sorted(set(data) - set(RUN_FIELDS))
-    if unknown:
-        # Names only, cut short: an unknown field is still client input.
-        raise BadRequest("unknown field: " + ", ".join(name[:40] for name in unknown[:5]))
+    data = _json_object(body, RUN_FIELDS)
     fields = {}
     for name, value in data.items():
         if value is None:
@@ -192,8 +223,85 @@ class _Tee:
         return getattr(self._real, name)
 
 
+def coverage(checks: list) -> dict:
+    """How much of the check a run decided, counted from the `check.checks` of its profile.
+
+    Nothing here is a prediction or a table: every number is a count of what the rules
+    stated in that run. `decided` are the checks that ended as a finding, passed or not
+    applicable. `waiting` counts, per source, the checks that were not assessed because no
+    source that states what they read was given and that name the source among their
+    `needs`; `failed` does the same for a source that was asked for and could not be
+    collected. A check that names several sources is counted under each of them, so
+    these numbers are not a sum. `unstated` are the checks for which a source was read
+    and does not state the value, or holds it unreadable: no rule names a source for
+    those. `disagree` and `errors` are two sources contradicting each other and a rule
+    that failed to run.
+    """
+    waiting, failed = dict.fromkeys(SOURCE_IDS, 0), dict.fromkeys(SOURCE_IDS, 0)
+    reasons = dict.fromkeys(("not_stated", "value_unreadable", "sources_disagree", "rule_error"), 0)
+    decided = 0
+    for entry in checks:
+        if entry["outcome"] != "not_assessed":
+            decided += 1
+        elif entry["reason"] in ("source_missing", "source_failed"):
+            counted = waiting if entry["reason"] == "source_missing" else failed
+            for need in entry["needs"]:
+                counted[need] += 1
+        else:
+            reasons[entry["reason"]] += 1
+    return {
+        "total": len(checks),
+        "decided": decided,
+        "waiting": waiting,
+        "failed": failed,
+        "unstated": reasons["not_stated"] + reasons["value_unreadable"],
+        "disagree": reasons["sources_disagree"],
+        "errors": reasons["rule_error"],
+    }
+
+
+def check_debug_info(read: dict) -> dict:
+    """The response for POST /api/debug-info: what was read, and what it decides alone.
+
+    `read` is what debug_info.parse() kept. Nothing is collected: the rules run on a
+    snapshot that holds the debug information and nothing else, as in a run that is given
+    no other source. `notes` are the sentences the report gives about the text (its age,
+    a missing cluster section), from the report's own rule.
+    """
+    from ..rules import ALL_RULES  # read at run time, as in run_check()
+
+    snapshot = Snapshot(debug_info=read)
+    section = debug_info.of(snapshot)
+    mode, multi_main, cluster = section["execution_mode"], section["multi_main"], section["cluster"]
+    if cluster is None:
+        instances = "not stated"
+    else:
+        counted = [f"{count} {name}" for name, count in cluster["instances"].items() if count]
+        instances = f"{sum(cluster['instances'].values())} ({', '.join(counted)})" if counted else "none listed"
+    built = profile.build_profile(snapshot, [], (), checks=engine.assess(snapshot, ALL_RULES))
+    today = datetime.now(timezone.utc).date()
+    return {
+        "read": [
+            {"label": "n8n version", "value": section["n8n_version"]},
+            {
+                "label": "Execution mode",
+                "value": "not stated" if mode is None else mode + {True: " (multi-main)", False: " (single main)", None: ""}[multi_main],
+            },
+            {"label": "Instances", "value": instances},
+            {"label": "Generated on", "value": section["generated_on"] or "date unknown"},
+        ],
+        # Without the first sentence, which only says that the text was read.
+        "notes": report._debug_info_summary(section, False, (), today)[1:],
+        "coverage": coverage(built["check"]["checks"]),
+    }
+
+
 def run_check(fields: dict) -> dict:
-    """Collect, run the rules and build the response for POST /api/run."""
+    """Collect, run the rules and build the response for POST /api/run.
+
+    `profile` and `coverage` are None for a run without a debug information: the report
+    needs none, a profile does.
+    """
     # Imported here for the same reasons as in cli.main().
     from ..collectors import collect
     from ..rules import ALL_RULES
@@ -224,14 +332,16 @@ def run_check(fields: dict) -> dict:
     report_args = (snapshot, findings, tuple(failed), tuple(warnings) if nothing_collected else None)
     data = report.build_report(*report_args)
     data["findings"] = [asdict(finding) for finding in data["findings"]]
+    # Default reason, no reference, nothing withheld: the page blanks entries itself.
+    built = profile.build_profile(snapshot, findings, tuple(failed), checks=checks) if "debug_info_text" in fields else None
     return {
         **data,
         "exit_code": cli.EXIT_ERROR if nothing_collected else cli.result_code(findings, len(ALL_RULES)),
         "warnings": warnings,
         "markdown": report.render_markdown(*report_args),
         "snapshot": asdict(snapshot),
-        # Default reason, no reference, nothing withheld: the page blanks entries itself.
-        "profile": profile.build_profile(snapshot, findings, tuple(failed), checks=checks),
+        "profile": built,
+        "coverage": coverage(built["check"]["checks"]) if built else None,
     }
 
 
@@ -264,8 +374,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/api/meta":
             self._send_json(200, meta())
-        elif path == "/api/run":
-            self._send_json(405, {"error": "use POST for /api/run"})
+        elif path in POST_ROUTES:
+            self._send_json(405, {"error": f"use POST for {path}"})
         elif path == "/":
             self._send_static("index.html")
         elif path.startswith("/static/"):
@@ -278,7 +388,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._host_allowed():
             return
-        if urlsplit(self.path).path != "/api/run":
+        path = urlsplit(self.path).path
+        if path not in POST_ROUTES:
             return self._send_json(404, {"error": "not found"})
         origin = self.headers.get("Origin")
         # Host was checked above, so an Origin on the same host and port is this page
@@ -307,10 +418,19 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 remaining -= len(chunk)
             return self._send_json(413, {"error": f"the request body is larger than {MAX_BODY_BYTES} bytes"})
+        body = self.rfile.read(length)
         try:
-            fields = parse_run_request(self.rfile.read(length))
+            fields = parse_debug_info_request(body) if path == "/api/debug-info" else parse_run_request(body)
         except BadRequest as exc:
             return self._send_json(400, {"error": str(exc), **({"field": exc.field} if exc.field else {})})
+        if path == "/api/debug-info":
+            # Nothing is collected and nothing of the process is redirected: no lock is needed.
+            try:
+                return self._send_json(200, check_debug_info(fields))
+            except Exception as exc:
+                name = type(exc).__name__
+                print(f"reading the debug information failed: {name}", file=sys.stderr)
+                return self._send_json(500, {"error": f"the debug information could not be read ({name})"})
         if not self.server.run_lock.acquire(blocking=False):
             return self._send_json(409, {"error": "a health check is already running; wait for it to finish"})
         try:

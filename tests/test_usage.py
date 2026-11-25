@@ -1162,7 +1162,8 @@ class RunTest(Base):
                 self.assertEqual({key for _, path, key in fake.requests if path.startswith("/api/")}, {KEY})
                 self.assert_clean(raw, log.getvalue())
         fake = self.leaky(insights=(200, summary(27, 5)))
-        result = json.loads(post({"url": fake.url, "api_key": KEY})[1])
+        # With a debug information, which a profile needs since 0.7.0.
+        result = json.loads(post({"url": fake.url, "api_key": KEY, "debug_info_text": pasted.FULL})[1])
         self.assertEqual([row["value"] for row in result["usage"]["rows"]], ["3.86", "18.5%", "4", "2"])
         self.assertEqual(result["profile"]["sources"]["api"], "collected")
         self.assertEqual(result["summary_notes"][-1], "Usage numbers were read through the n8n API.")

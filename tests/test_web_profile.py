@@ -813,11 +813,17 @@ PLAIN = dataclasses.replace(SNAPSHOT, postgres={**SNAPSHOT.postgres, "execution_
 PATHS = (True, False) if EXACT else (False,)
 
 
-def run_response(snapshot=PLAIN):
+READ = debug_info.parse(pasted.FULL)  # what the server keeps of the pasted text
+
+
+def run_response(snapshot=PLAIN, debug=True):
     """The text POST /api/run answers with, from the real server code and a synthetic snapshot."""
     with mock.patch("n8n_healthcheck.collectors.collect", return_value=snapshot):
         with mock.patch("n8n_healthcheck.rules.ALL_RULES", [lambda _snapshot: FINDING]):
-            return json.dumps(cli.json_safe(web.run_check({"url": "https://n8n.example.com"})), allow_nan=False)
+            # Since 0.7.0 a profile needs a debug information in the request. collect() is replaced here, so
+            # the snapshot, and with it the profile, is still exactly the one given.
+            fields = {"url": "https://n8n.example.com", **({"debug_info_text": READ} if debug else {})}
+            return json.dumps(cli.json_safe(web.run_check(fields)), allow_nan=False)
 
 
 def run_page(scenario, raw=True, **data):
@@ -1028,7 +1034,7 @@ class PageBehaviourTest(unittest.TestCase):
                     self.assertNotIn(pasted.MARK, text)
 
     def test_a_check_that_could_not_run_shows_its_summary_whole_without_the_parts(self):
-        response = run_response(Snapshot())
+        response = run_response(Snapshot(), debug=False)  # with a debug information something was read, and the check runs
         sent = json.loads(response)
         self.assertEqual((sent["exit_code"], sent["summary_notes"]), (3, None))
         got = run_page(

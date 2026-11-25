@@ -1074,7 +1074,8 @@ class CliTest(unittest.TestCase):
 def run_response(snapshot=RICH):
     """The text POST /api/run answers with, from the real server code and the real rules."""
     with mock.patch("n8n_healthcheck.collectors.collect", return_value=snapshot):
-        return json.dumps(cli.json_safe(web.run_check({"url": "https://n8n.example.com"})), allow_nan=False)
+        # Since 0.7.0 a profile needs a debug information in the request; collect() is replaced, so the snapshot is the one given.
+        return json.dumps(cli.json_safe(web.run_check({"url": "https://n8n.example.com", "debug_info_text": page.READ})), allow_nan=False)
 
 
 class PageStyleTest(unittest.TestCase):

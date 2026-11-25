@@ -21,6 +21,9 @@ SNAPSHOT = Snapshot(health={"healthz": True, "readiness": True}, metrics={}, env
 PASSWORD = "s3cr3t-pw"
 DSN = f"postgresql://n8n:{PASSWORD}@db.internal:5432/n8n"
 REDIS_URL = f"redis://:{PASSWORD}@redis.internal:6379/0"
+# Since 0.7.0 a run answers with a profile only when it was given a debug information: the
+# tests that read the profile give this one. It states the version and nothing else.
+DEBUG_TEXT = "# Debug info\n\n## core\n\n- n8nVersion: 1.70.0\n"
 
 
 def rule(severity, area="scalability"):
@@ -162,8 +165,10 @@ class WebTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             set(result),
-            {"n8n_version", "exit_code", "summary", "summary_notes", "sources", "partial", "scores", "not_assessed", "findings", "warnings", "markdown", "snapshot", "profile", "usage"},
+            {"n8n_version", "exit_code", "summary", "summary_notes", "sources", "partial", "scores", "not_assessed", "findings", "warnings", "markdown", "snapshot", "profile", "coverage", "usage"},
         )
+        # No debug information was given: the report is there, a profile is not.
+        self.assertEqual((result["profile"], result["coverage"]), (None, None))
         self.assertEqual(result["n8n_version"], "1.70.0")
         self.assertEqual(result["exit_code"], 2)
         self.assertTrue(result["partial"])  # postgres, redis and kubernetes were not provided
@@ -190,7 +195,7 @@ class WebTest(unittest.TestCase):
         self.assertIsNone(target.postgres_dsn)
 
     def test_profile_is_the_one_profile_py_builds_with_nothing_withheld(self):
-        _, result, _ = self.run_api({"url": "http://n8n.internal:5678"})
+        _, result, _ = self.run_api({"url": "http://n8n.internal:5678", "debug_info_text": DEBUG_TEXT})
         built = result["profile"]
         self.assertIs(profile.validate(built), built)
         expected = profile.build_profile(SNAPSHOT, [], (), checks=engine.assess(SNAPSHOT, RULES))
@@ -203,7 +208,7 @@ class WebTest(unittest.TestCase):
     def test_profile_marks_a_source_that_failed(self):
         with mock.patch("n8n_healthcheck.collectors.redis.collect", side_effect=RuntimeError("connection refused")):
             with mock.patch("n8n_healthcheck.rules.ALL_RULES", RULES):
-                _, _, raw = self.request("POST", "/api/run", {"env_text": "EXECUTIONS_MODE=queue\n", "redis_url": REDIS_URL})
+                _, _, raw = self.request("POST", "/api/run", {"env_text": "EXECUTIONS_MODE=queue\n", "redis_url": REDIS_URL, "debug_info_text": DEBUG_TEXT})
         built = json.loads(raw)["profile"]
         self.assertEqual(built["sources"]["redis"], "failed")
         self.assertEqual(built["sources"]["env"], "collected")
@@ -228,6 +233,7 @@ class WebTest(unittest.TestCase):
             "redis_url": REDIS_URL.replace("redis.internal", f"{mark}-redis.internal"),
             "kube_namespace": f"{mark}-namespace",
             "kube_context": f"{mark}-context",
+            "debug_info_text": DEBUG_TEXT + f"- consumerId: {mark}-consumer\n",
         }
         status, result, _ = self.run_api(body, snapshot=snapshot)
         self.assertEqual(status, 200)
@@ -243,7 +249,7 @@ class WebTest(unittest.TestCase):
     def test_profile_from_the_real_env_collector_has_no_secret(self):
         text = f"EXECUTIONS_MODE=regular\nN8N_ENCRYPTION_KEY={PASSWORD}\nN8N_HOST=n8n.internal\n"
         with mock.patch("n8n_healthcheck.rules.ALL_RULES", RULES):
-            _, _, raw = self.request("POST", "/api/run", {"env_text": text})
+            _, _, raw = self.request("POST", "/api/run", {"env_text": text, "debug_info_text": DEBUG_TEXT})
         built = json.loads(raw)["profile"]
         self.assertNotIn(PASSWORD, json.dumps(built))
         self.assertNotIn("internal", json.dumps(built))
