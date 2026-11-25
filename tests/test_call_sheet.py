@@ -87,7 +87,7 @@ class ChecksTest(unittest.TestCase):
                 "rule_id": "SEC-001", "area": "security", "outcome": "finding", "severity": "warning",
                 "text": "Session cookie is not restricted to HTTPS",
                 "impact": ALL_RULES[-3].info.variants[0].impact, "remedy": ALL_RULES[-3].info.variants[0].remedy,
-                "rests_on": ["security.secure_cookie", "setting:instance:N8N_SECURE_COOKIE"],
+                "rests_on": ["setting:instance:N8N_SECURE_COOKIE"],
             },
         )  # fmt: skip
         self.assertEqual(
@@ -101,7 +101,9 @@ class ChecksTest(unittest.TestCase):
         self.assertEqual(got["PERF-001"]["basis"], "default")
         self.assertEqual(
             got["SCAL-001"],
-            {"rule_id": "SCAL-001", "area": "scalability", "outcome": "not_applicable", "rests_on": [],
+            {"rule_id": "SCAL-001", "area": "scalability", "outcome": "not_applicable",
+             # What made it not apply: the mode, and what the rule read on the way.
+             "rests_on": ["executions.mode", "database.engine", "setting:instance:EXECUTIONS_MODE", "setting:instance:DB_TYPE", "setting:instance:N8N_CONCURRENCY_PRODUCTION_LIMIT"],
              "text": "Limit on concurrent production executions in regular mode"},
         )  # fmt: skip
         self.assertEqual(
@@ -166,10 +168,13 @@ class ChecksTest(unittest.TestCase):
     def test_rests_on_names_entries_of_the_file_in_the_scope_that_was_read(self):
         for snapshot in snapshots():
             made = built(snapshot)
-            ids = {fact["id"] for fact in made["facts"]} | {profile.setting_id(s) for s in made["settings"]}
+            # A fact is named only when the file holds a value for it.
+            ids = {fact["id"] for fact in made["facts"] if fact["provenance"] != "unknown"} | {profile.setting_id(s) for s in made["settings"]}
             for entry in made["check"]["checks"]:
                 self.assertLessEqual(set(entry["rests_on"]), ids, entry["rule_id"])
-                if entry["outcome"] not in ("finding", "passed"):
+                self.assertEqual(len(set(entry["rests_on"])), len(entry["rests_on"]), entry["rule_id"])
+                # A check that read nothing rests on nothing.
+                if entry.get("reason") in ("source_missing", "source_failed", "rule_error"):
                     self.assertEqual(entry["rests_on"], [])
             # Every id is one `--withhold` takes.
             profile.apply_withholding(made, {item for entry in made["check"]["checks"] for item in entry["rests_on"]})
@@ -187,6 +192,51 @@ class ChecksTest(unittest.TestCase):
         )
         # A rule that judges the webhook containers too names no fact about main and worker only.
         self.assertEqual((got["REL-007"]["outcome"], got["REL-007"]["rests_on"]), ("passed", []))
+
+    def test_rests_on_names_a_fact_only_when_the_rule_read_the_source_the_fact_reads(self):
+        # Three facts are filled by a debug information only; the rules that rest on them read the environment too.
+        from_env = entries(built(Snapshot(env={"DB_TYPE": "postgresdb", "N8N_SECURE_COOKIE": "false", "N8N_CONCURRENCY_PRODUCTION_LIMIT": "20"}), failed=()))
+        self.assertEqual((from_env["SEC-001"]["outcome"], from_env["SEC-001"]["rests_on"]), ("finding", ["setting:instance:N8N_SECURE_COOKIE"]))
+        self.assertEqual(from_env["SCAL-001"]["outcome"], "passed")
+        self.assertEqual(
+            from_env["SCAL-001"]["rests_on"],
+            ["executions.mode", "database.engine", "setting:instance:DB_TYPE", "setting:instance:N8N_CONCURRENCY_PRODUCTION_LIMIT"],
+        )
+        sheet = profile.render_sheet(built(Snapshot(env={"N8N_SECURE_COOKIE": "false"}), failed=()), TODAY)
+        self.assertIn("Rests on: `setting:instance:N8N_SECURE_COOKIE` = false\n", sheet)
+        self.assertNotIn("`security.secure_cookie`", sheet.split("## What does not")[1].split("## What to improve")[0])
+        # From the text alone, the same rules rest on those facts.
+        from_text = entries(built(pasted.snapshot(pasted.REGULAR), failed=()))
+        self.assertEqual((from_text["SEC-001"]["outcome"], from_text["SEC-001"]["rests_on"]), ("finding", ["security.secure_cookie"]))
+        self.assertEqual((from_text["SEC-003"]["outcome"], from_text["SEC-003"]["rests_on"]), ("finding", ["security.file_access_blocked"]))
+        self.assertEqual(
+            (from_text["SCAL-001"]["outcome"], from_text["SCAL-001"]["rests_on"]),
+            ("finding", ["executions.mode", "database.engine", "main.concurrency_limit"]),
+        )
+
+    def test_a_withheld_mode_names_the_checks_that_do_not_apply_because_of_it(self):
+        regular = Snapshot(env={"EXECUTIONS_MODE": "regular", "DB_TYPE": "postgresdb"})
+        made = built(regular, failed=(), withhold=("executions.mode", "setting:instance:EXECUTIONS_MODE"))
+        left_out = [entry["rule_id"] for entry in made["check"]["checks"] if entry["outcome"] == "not_applicable"]
+        self.assertEqual(left_out, ["SCAL-002", "SCAL-003", "SCAL-004", "REL-001", "REL-002", "REL-003", "REL-004", "REL-006"])
+        rested = profile.rested_on_withheld(made)
+        for item in ("executions.mode", "setting:instance:EXECUTIONS_MODE"):
+            # Together these checks tell that the mode is regular: each one is named.
+            self.assertLessEqual(set(left_out), set(rested[item]), item)
+        self.assertLessEqual({"SCAL-001", "PERF-002", "MAINT-001", "SEC-002"}, set(rested["setting:instance:EXECUTIONS_MODE"]))  # as before
+        shown = profile.render_markdown(made)
+        self.assertIn("- `executions.mode`: " + ", ".join(rested["executions.mode"]) + "\n", shown)
+        for rule_id in left_out:
+            self.assertIn(rule_id, shown.split("still rests on:")[1])
+        # With Redis given, a Redis rule that does not apply for its own reason did not read the mode.
+        no_limit = entries(built(Snapshot(env={}, redis={"maxmemory_policy": "noeviction", "maxmemory_bytes": 0, "used_memory_bytes": 1}), failed=()))
+        self.assertEqual((no_limit["REL-003"]["outcome"], no_limit["REL-003"]["rests_on"]), ("not_applicable", ["queue.maxmemory_bytes", "queue.maxmemory_policy"]))
+        self.assertEqual((no_limit["REL-002"]["outcome"], no_limit["REL-002"]["rests_on"]), ("passed", ["queue.maxmemory_policy", "queue.maxmemory_bytes"]))
+        # A check that could not decide after it read a value rests on what it read.
+        disabled = entries(built(Snapshot(env={"N8N_RUNNERS_MODE": "external", "N8N_RUNNERS_ENABLED": "false"}), failed=()))
+        self.assertEqual((disabled["SEC-002"]["outcome"], disabled["SEC-002"]["reason"]), ("not_assessed", "not_stated"))
+        self.assertEqual(disabled["SEC-002"]["rests_on"], ["executions.mode", "setting:instance:N8N_RUNNERS_MODE", "setting:instance:N8N_RUNNERS_ENABLED"])
+        self.assertEqual(entries(built(Snapshot(), failed=()))["SEC-002"]["rests_on"], [])
 
 
 class ValidateTest(unittest.TestCase):
@@ -291,11 +341,11 @@ class WithholdCheckTest(unittest.TestCase):
         self.assertNotIn("withheld", [entry["outcome"] for entry in blanked["check"]["checks"]])
         rested = profile.rested_on_withheld(blanked)
         self.assertEqual(list(rested), ["executions.mode", "setting:instance:DB_TYPE"])  # nothing rests on n8n.version
-        self.assertEqual(rested["setting:instance:DB_TYPE"], ["REL-001"])
+        self.assertEqual(rested["setting:instance:DB_TYPE"], ["SCAL-001", "REL-001"])  # SCAL-001 does not apply in queue mode and read it
         self.assertIn("REL-001", rested["executions.mode"])
         shown = profile.render_markdown(blanked)
         self.assertIn("Withheld entries that a check in the file still rests on:", shown)
-        self.assertIn("- `setting:instance:DB_TYPE`: REL-001\n", shown)
+        self.assertIn("- `setting:instance:DB_TYPE`: SCAL-001, REL-001\n", shown)
         self.assertIn("`--withhold check:RULE-ID`", shown)
         # Once those checks are withheld too, nothing rests on the entry any more.
         gone = profile.apply_withholding(blanked, [f"check:{rule_id}" for rules in rested.values() for rule_id in rules])
@@ -646,7 +696,7 @@ def sheet_files():
                 entry[key] = hostile_text + entry[key]
         if "needs" in entry:
             entry["needs"] = [hostile_text, "postgres", "redis", "url"]
-        entry["rests_on"] = [hostile_text, f"setting:{hostile_text}:{hostile_text}", "worker.replicas", "setting:instance:DB_TYPE", "setting:instance:N8N_HOST", "nowhere.at.all"]
+        entry["rests_on"] = [hostile_text, f"setting:{hostile_text}:{hostile_text}", "worker.replicas", "database.version", "setting:instance:DB_TYPE", "setting:instance:N8N_HOST", "nowhere.at.all"]
     later = copy.deepcopy(made)
     later["check"]["checks"] += [
         {"rule_id": "NEW-001", "area": "upgrade", "outcome": "will_break", "text": "A later outcome"},
@@ -677,6 +727,7 @@ def sheet_files():
         ("written by 0.5.0, 84 days old", older),
         ("written by 0.2.0, no finding", oldest),
         ("nothing collected", nothing),
+        ("sources that disagree", built(pasted.snapshot(env={"N8N_SECURE_COOKIE": "true"}), failed=())),
         ("only passed checks", clean),
         ("no check at all", {**made, "check": {**made["check"], "checks": [], "findings": []}}),
         ("usage numbers, an estimate", with_facts(made, usage__estimate=True, **usage)),
@@ -712,7 +763,7 @@ class SheetTest(unittest.TestCase):
         passed = [entry for entry in made["check"]["checks"] if entry["outcome"] == "passed"]
         self.assertEqual(re.findall(r"^- ([A-Z]+-\d+) ", works, re.M), [entry["rule_id"] for entry in passed])
         self.assertEqual(re.findall(r"^### (.*)$", works, re.M), [area.capitalize() for area in dict.fromkeys(e["area"] for e in passed)])
-        self.assertIn("- SCAL-002 Queue-mode workers run with at least 2 replicas.\n", works)
+        self.assertIn(f"- SCAL-002 {outcomes.RULES['SCAL-002'].info.passed}\n", works)
         # A pass that rests on a default says so.
         self.assertIn("- PERF-001 Execution data pruning is enabled. (by n8n's default, not set explicitly)", works)
         self.assertEqual(works.count("by n8n's default"), sum(entry["basis"] == "default" for entry in passed))
@@ -951,6 +1002,19 @@ def run_response(snapshot=RICH):
         return json.dumps(cli.json_safe(web.run_check({"url": "https://n8n.example.com"})), allow_nan=False)
 
 
+class PageStyleTest(unittest.TestCase):
+    def test_a_long_text_without_spaces_wraps_in_the_findings_of_the_sheet(self):
+        # The impact and the remedy of a finding are paragraphs inside these list items.
+        css = (web.STATIC_DIR / "app.css").read_text(encoding="utf-8")
+        for selector in (r"\.pfindings li", r"\.sheet li"):
+            (rule,) = re.findall(rf"^{selector} \{{([^}}]*)\}}", css, re.M)
+            self.assertIn("overflow-wrap: anywhere", rule, selector)
+        # Every ordered list of the call sheet is one of the two.
+        script = (web.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertEqual(set(re.findall(r'el\("ol", \{ class: "([a-z]+)" \}', script)), {"pfindings", "sheet"})
+        self.assertEqual(len(re.findall(r'el\("ol",', script)), len(re.findall(r'el\("ol", \{ class: "(?:pfindings|sheet)" \}', script)))
+
+
 @unittest.skipUnless(page.NODE, page.NO_NODE)
 class PageCodeTest(unittest.TestCase):
     def test_the_sheet_is_the_one_show_sheet_prints(self):
@@ -971,6 +1035,7 @@ class PageCodeTest(unittest.TestCase):
             "Nothing to improve was found.", "Every check that applies was assessed.", "No check was left out", "Checks withheld by the operator: 1.",
             "The operator withheld the check outcome", "does not record what passed", "**With any one of", "**Asked for and not collected: Redis",
             "**A source was read and does not say", "**Not known to this version", "**With a source that states it:** ODD-005",
+            "**Two sources given in the run disagree on what the check reads:** SCAL-001",
         ):  # fmt: skip
             self.assertIn(text, printed)
 
@@ -1066,7 +1131,8 @@ class PageBehaviourTest(unittest.TestCase):
             await page.settle();
             const box = page.$("call-text");
             seen.push({ view: opened.view, shown: opened.shown, text: page.copied[page.copied.length - 1], status: status.textContent,
-                        boxShown: !box.hidden, box: box.value, headings: page.walk(page.$("profile-body")).filter((node) => ["h3", "h4"].includes(node.tagName)).map((node) => node.textContent) });
+                        boxShown: !box.hidden, box: box.value, headings: page.walk(page.$("profile-body")).filter((node) => ["h3", "h4"].includes(node.tagName)).map((node) => node.textContent),
+                        ...Object.fromEntries(["h3", "h4", "h5"].map((tag) => [tag, page.walk(page.$("profile-body")).filter((node) => node.tagName === tag).map((node) => node.textContent)])) });
             page.$("profile-close").click();
           }
           return seen;
@@ -1083,6 +1149,9 @@ class PageBehaviourTest(unittest.TestCase):
                     # The page opens on the sheet, before the profile itself.
                     self.assertEqual(seen["headings"][:2], ["Call sheet", "The environment in brief"])
                     self.assertLess(seen["headings"].index("Call sheet"), seen["headings"].index("Run details"))
+                    # "Checks (n)" is one level under "Check outcome", an h3 here: no level is skipped.
+                    self.assertEqual("Check outcome" in seen["h3"] and file["check"].get("checks") is not None, any(title.startswith("Checks (") for title in seen["h4"]))
+                    self.assertEqual([title for title in seen["h5"] if title.startswith("Checks (")], [])
                     listed = profile.check_entries(file)
                     for entry in listed or []:
                         if entry["known"] and entry["outcome"] != "withheld":
@@ -1110,7 +1179,7 @@ class PageBehaviourTest(unittest.TestCase):
         info = outcomes.RULES["SEC-001"].info.variants[0]
         self.assertIn(f"Impact: {info.impact}", shown)
         self.assertIn(info.remedy, shown)
-        self.assertIn("Rests on: security.secure_cookie unknown; setting:instance:N8N_SECURE_COOKIE = false", shown)
+        self.assertIn("Rests on: setting:instance:N8N_SECURE_COOKIE = false", shown)
         self.assertIn("By n8n's default, not set explicitly.", shown)
         self.assertIn("With the debug information", shown)
         self.assertIn("The operator withheld the check outcome", got["the check outcome withheld"])

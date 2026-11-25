@@ -79,15 +79,34 @@ RUNNERS_NOT_EXTERNAL = Variant(
 )
 
 
+def _external_verified(env: dict) -> Outcome:
+    """The outcome for one process whose runner mode raised no finding.
+
+    External mode says where the runners are, not that they are on: on n8n 1.x they run
+    only with N8N_RUNNERS_ENABLED=true, and this tool cannot tell from the code it has
+    whether n8n 2.x still reads that variable. So `false` there never passes, and where
+    the variable is not set the sentence of the pass says no more than what was read.
+    """
+    why = undecided(env, "N8N_RUNNERS_MODE")
+    if why is not None:
+        return why
+    if env_flag(env, "N8N_RUNNERS_ENABLED") is False:
+        return NOT_STATED
+    return undecided(env, "N8N_RUNNERS_ENABLED") or PASSED
+
+
 # https://docs.n8n.io/deploy/host-n8n/configure-n8n/set-up-task-runners
 @rule(
     "SEC-002",
     "security",
     subject="Task runners for the Code node",
-    passed="Every process that runs Code nodes uses external task runners.",
+    passed=(
+        "N8N_RUNNERS_MODE is external, and N8N_RUNNERS_ENABLED is not false, on every process "
+        "that was read and runs Code nodes."
+    ),
     variants=(RUNNERS_NOT_EXTERNAL,),
     facts=("executions.mode",),
-    settings=("N8N_RUNNERS_MODE", "EXECUTIONS_MODE", "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS"),
+    settings=("N8N_RUNNERS_MODE", "N8N_RUNNERS_ENABLED", "EXECUTIONS_MODE", "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS"),
     scopes=("instance", "main", "worker"),
 )
 def task_runners_not_external(snapshot: Snapshot) -> Finding | Outcome:
@@ -115,7 +134,7 @@ def task_runners_not_external(snapshot: Snapshot) -> Finding | Outcome:
     ]
     if not internal:
         # External is not the default: it passes only where it was read, on every process judged.
-        outcomes = [undecided(each, mode) or PASSED for each in judged] + ([main_unknown] if main_unknown else [])
+        outcomes = [_external_verified(each) for each in judged] + ([main_unknown] if main_unknown else [])
         if not judged:
             return main_unknown or NOT_STATED  # no worker was found, and main does not run Code nodes
         for outcome in (UNREADABLE, NOT_STATED):

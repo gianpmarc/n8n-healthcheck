@@ -6,6 +6,7 @@ from .. import debug_info
 from ..models import Finding, Outcome, Snapshot, Variant
 from ._helpers import (
     NOT_APPLICABLE,
+    NOT_QUEUE,
     NOT_STATED,
     PASSED,
     UNREADABLE,
@@ -42,8 +43,8 @@ BACKLOG_MIN_WAITING = 100
 def _no_redis(snapshot: Snapshot) -> Outcome:
     """Redis was not given: it holds the queue, which an instance known to run in regular mode does not have."""
     env = with_debug_info(snapshot, "EXECUTIONS_MODE")
-    if env is not None and queue_only(env) is NOT_APPLICABLE:
-        return NOT_APPLICABLE
+    if env is not None and queue_only(env) is NOT_QUEUE:
+        return NOT_QUEUE
     return source_missing("redis")
 
 
@@ -219,7 +220,10 @@ QUEUE_BACKLOG = Variant(
     "REL-004",
     "reliability",
     subject="Execution queue backlog",
-    passed="The execution queue is being consumed and has no backlog.",
+    passed=(
+        f"Fewer than {BACKLOG_MIN_WAITING} jobs wait in the queue, and it is not the case that "
+        f"{STALLED_QUEUE_MIN_WAITING} or more wait while none is active."
+    ),
     variants=(QUEUE_STALLED, QUEUE_BACKLOG),
     facts=("queue.waiting_jobs", "queue.active_jobs"),
 )
@@ -298,7 +302,7 @@ ONE_MAIN = Variant(
     "REL-006",
     "reliability",
     subject="Multi-main setup in queue mode",
-    passed="The multi-main setup is enabled.",
+    passed="The multi-main setup is switched on (N8N_MULTI_MAIN_SETUP_ENABLED); how many main processes run is not checked.",
     variants=(ONE_MAIN,),
     facts=("executions.mode", "multi_main.enabled"),
     settings=("EXECUTIONS_MODE", "N8N_MULTI_MAIN_SETUP_ENABLED"),

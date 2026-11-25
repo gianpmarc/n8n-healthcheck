@@ -99,7 +99,10 @@ SAVING_PROGRESS = Variant(
     "PERF-002",
     "performance",
     subject="Saving of execution progress after every node",
-    passed="Execution progress is not saved after every node.",
+    passed=(
+        "Saving execution progress after every node is off instance-wide "
+        "(EXECUTIONS_DATA_SAVE_ON_PROGRESS); a workflow can still turn it on for itself."
+    ),
     variants=(SAVING_PROGRESS,),
     facts=("executions.mode",),
     settings=("EXECUTIONS_MODE", "EXECUTIONS_DATA_SAVE_ON_PROGRESS"),
@@ -177,7 +180,10 @@ BINARY_MODES_OUT_OF_MEMORY = ("filesystem", "s3", "azure", "database")
     "PERF-003",
     "performance",
     subject="Where binary data is kept",
-    passed="Binary data is set to be kept out of the process memory.",
+    passed=(
+        f"N8N_DEFAULT_BINARY_DATA_MODE is set to one of {', '.join(BINARY_MODES_OUT_OF_MEMORY)}, not to the "
+        "in-memory mode; whether every process can reach that storage is not checked."
+    ),
     variants=(BINARY_MODE_UNKNOWN, BINARY_MODE_QUEUE, BINARY_MODE_REGULAR),
     facts=("binary_data.mode", "executions.mode"),
     settings=("N8N_DEFAULT_BINARY_DATA_MODE", "EXECUTIONS_MODE"),

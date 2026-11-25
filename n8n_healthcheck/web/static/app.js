@@ -908,6 +908,7 @@
     source_failed: "a source that states it was asked for and could not be collected",
     not_stated: "a source was read and does not say",
     value_unreadable: "a source holds the value, which could not be read",
+    sources_disagree: "two sources given in the run disagree on what it reads",
     rule_error: "the rule failed to run",
   };
   const NOT_KNOWN = "not known to this version of n8n-healthcheck";
@@ -1103,6 +1104,7 @@
     noChecks: "This file was written by a version of n8n-healthcheck that does not record what passed, the impact and the remedy of a finding, what was not assessed or what does not apply.",
     notStated: "A source was read and does not say",
     unreadable: "The value could not be read (a Secret, a file, a redacted value or an incomplete environment)",
+    disagree: "Two sources given in the run disagree on what the check reads",
     ruleError: "The rule failed to run, which is a bug in n8n-healthcheck",
   };
 
@@ -1184,7 +1186,7 @@
     for (const [reason, heading] of [["source_missing", "With "], ["source_failed", "Asked for and not collected: "]]) {
       for (const entry of notAssessed) if (entry.reason === reason) add(heading + (anyOf(entry.needs, escape) || "a source that states it"), entry);
     }
-    for (const [reason, heading] of [["not_stated", CALL.notStated], ["value_unreadable", CALL.unreadable], ["rule_error", CALL.ruleError]]) {
+    for (const [reason, heading] of [["not_stated", CALL.notStated], ["value_unreadable", CALL.unreadable], ["sources_disagree", CALL.disagree], ["rule_error", CALL.ruleError]]) {
       for (const entry of notAssessed) if (entry.reason === reason) add(heading, entry);
     }
     for (const entry of entries) if (!entry.known) add(NOT_KNOWN.charAt(0).toUpperCase() + NOT_KNOWN.slice(1), entry);
@@ -1379,7 +1381,8 @@
             edit ? el("td", { class: "ptable__withhold" }, tick(`w-check-${index}`, checkKey(entry), `the check ${entry.rule_id}`)) : null);
         });
         outcome.push(
-          el("h5", { class: "pchecks__title" }, `Checks (${entries.length})`),
+          // One level under the title of this part, which is an h4 in the review and an h3 in an opened profile.
+          edit ? el("h5", { class: "pchecks__title" }, `Checks (${entries.length})`) : el("h4", { class: "pchecks__title" }, `Checks (${entries.length})`),
           el("p", { class: "block__note" }, lead("What every rule stated, with every text written to the file."), " Each text is a fixed sentence of the rule, never a value of this instance.",
             edit ? " A check can be withheld on its own: it stays in the file with its rule id only, its finding leaves the list above, and the score of its area is withheld with it, whatever the check says." : ""),
           entries.length ? table("Check", rows, true) : el("p", { class: "block__note" }, "No check is listed."));

@@ -559,21 +559,22 @@ in rule order. A file written by an earlier version has no such key and still
 opens. Every rule states exactly one outcome per run:
 
 ```json
-{"rule_id": "SCAL-002", "area": "scalability", "outcome": "passed",
- "basis": "read", "text": "Queue-mode workers run with at least 2 replicas.",
- "rests_on": ["worker.replicas", "executions.mode"]}
+{"rule_id": "SCAL-005", "area": "scalability", "outcome": "passed",
+ "basis": "read", "text": "Postgres connections in use are below 80% of max_connections.",
+ "rests_on": ["database.max_connections"]}
 
 {"rule_id": "REL-001", "area": "reliability", "outcome": "finding",
  "severity": "critical", "text": "Queue mode on SQLite", "impact": "...",
  "remedy": "...", "rests_on": ["executions.mode", "database.engine",
                                "setting:instance:EXECUTIONS_MODE"]}
 
-{"rule_id": "SCAL-005", "area": "scalability", "outcome": "not_assessed",
- "text": "Postgres connections in use", "reason": "source_missing",
- "needs": ["postgres"], "rests_on": []}
+{"rule_id": "REL-003", "area": "reliability", "outcome": "not_assessed",
+ "text": "Redis memory in use against its limit", "reason": "source_missing",
+ "needs": ["redis"], "rests_on": []}
 
 {"rule_id": "REL-006", "area": "reliability", "outcome": "not_applicable",
- "text": "Multi-main setup in queue mode", "rests_on": []}
+ "text": "Multi-main setup in queue mode",
+ "rests_on": ["executions.mode", "setting:instance:EXECUTIONS_MODE"]}
 
 {"rule_id": "SEC-002", "area": "security", "outcome": "withheld", "text": ""}
 ```
@@ -582,11 +583,11 @@ opens. Every rule states exactly one outcome per run:
 |---|---|---|
 | `rule_id`, `area` | every entry | The rule and its area. |
 | `outcome` | every entry | `finding`, `passed`, `not_applicable`, `not_assessed`, or `withheld` when the sender left this check out. |
-| `text` | every entry | For a finding its title, for a passed check the sentence that states the good condition, otherwise the subject of the rule. Empty for a withheld check. |
+| `text` | every entry | For a finding its title, for a passed check the sentence that states the condition the rule checked and nothing stronger, otherwise the subject of the rule. Empty for a withheld check. |
 | `severity`, `impact`, `remedy` | `finding` | The severity, what goes wrong if left as is, and the fix. |
 | `basis` | `passed` | `read`: the rule read the good value. `default`: the variable is not set in an environment that was read in full, and the n8n default is the good value. |
 | `reason`, `needs` | `not_assessed` | Why the rule could not decide, and the sources of which any one would let it. See below. |
-| `rests_on` | all but `withheld` | The ids of the facts and settings of this file that hold what the rule read. Ids only, the ones `--withhold` takes: their values are the ones already in the file, withheld or not. Empty when the rule reads something the profile does not hold; the values are then in the health report. |
+| `rests_on` | all but `withheld` | The ids of the facts and settings of this file that hold what the rule read. Ids only, the ones `--withhold` takes: their values are the ones already in the file, withheld or not. A fact is listed only when the file holds a value for it. A check that does not apply lists what made it so (the execution mode, for a queue-mode check on an instance in regular mode), and a check that could not decide after reading a value (`not_stated`, `value_unreadable`, `sources_disagree`) lists what it read. Empty when the rule read nothing, or reads something the profile does not hold; the values are then in the health report. |
 
 | `reason` | Meaning | `needs` |
 |---|---|---|
@@ -594,6 +595,7 @@ opens. Every rule states exactly one outcome per run:
 | `source_failed` | Such a source was asked for and could not be collected. | Those sources. |
 | `not_stated` | A source where the rule looks was given and read, and does not say it. | empty |
 | `value_unreadable` | A source holds the value, which could not be read (a Secret, a `_FILE` variable, a redacted value, an environment read in part). | empty |
+| `sources_disagree` | Two sources given in the run state different things about what the rule reads: an env file and a Kubernetes container, a probe and the debug information, a variable and the answer of an endpoint. The rule has no finding, and it does not pass or "not apply" against a source that says otherwise. `docs/rules.md` says what is compared. | empty |
 | `rule_error` | The rule itself failed to run. | empty |
 
 The ids in `needs` name what the operator gives, not the keys of `sources`:
@@ -638,7 +640,7 @@ nothing and holds nothing the file does not.
 5. **What to improve.** The remedies of those findings, in the same order.
 6. **Not assessed.** The `not_assessed` checks, grouped by what would have to
    be given, then those a source did not state, those whose value could not be
-   read, and rules that failed.
+   read, those on which two sources disagree, and rules that failed.
 7. **Does not apply.** One line, and a count of the checks that were withheld.
 8. **Questions still open.** The question sheet above.
 
@@ -678,7 +680,9 @@ a fact or a setting that was withheld: "workers run with at least 2 replicas"
 bounds `worker.replicas`. So the review names, for every withheld fact and
 setting, the checks in the file that rest on it (`--show-profile`, a note on
 stderr when the file is saved, and the share step of the web page), and the
-sender decides whether to withhold those checks as well.
+sender decides whether to withhold those checks as well. A check that does
+not apply is named too: eight queue-mode checks marked "does not apply" tell
+that the mode is regular, so withholding `executions.mode` names each of them.
 
 Withholding applies to the profile only. The health report is a separate
 document that quotes raw values as evidence; share it or not as before.

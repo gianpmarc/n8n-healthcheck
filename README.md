@@ -108,7 +108,7 @@ The profile never contains a secret, a host name, a URL, an IP address, a file p
 
 From version 0.6.0 the profile also holds the outcome of every rule: a finding with its impact and its remedy, a check that passed, one that does not apply, or one that could not be assessed and why. Every such text is a fixed sentence of the rule, never a value of your instance; [docs/rules.md](docs/rules.md) lists what each rule reads and every sentence it can write. The evidence of a finding, which quotes what was read, stays in the report.
 
-Withholding a fact does not remove the setting it was read from, or a check that rests on it: `--withhold executions.mode` leaves the `EXECUTIONS_MODE` setting and any check about queue mode in the file. Nothing is withheld for you: when the file is saved, a note on stderr names the checks that rest on a withheld entry, and `--show-profile` lists them. Withhold those too (`setting:instance:EXECUTIONS_MODE`, `check:REL-001`, or `check` for the whole outcome) if you want the datum gone. A withheld check stays in the file with its rule id only, and the score of its area is withheld with it, whatever the check said: a score left in the file would tell whether the check was a finding.
+Withholding a fact does not remove the setting it was read from, or a check that rests on it: `--withhold executions.mode` leaves the `EXECUTIONS_MODE` setting and any check about queue mode in the file. Nothing is withheld for you: when the file is saved, a note on stderr names the checks that rest on a withheld entry, and `--show-profile` lists them, the checks that "do not apply" because of it included. Withhold those too (`setting:instance:EXECUTIONS_MODE`, `check:REL-001`, or `check` for the whole outcome) if you want the datum gone. A withheld check stays in the file with its rule id only, and the score of its area is withheld with it, whatever the check said: a score left in the file would tell whether the check was a finding.
 
 Withholding applies to the profile only. The report is a separate document and quotes raw values as evidence.
 
@@ -125,7 +125,7 @@ To read a profile someone sent you, use "Open a profile" on the start page. The 
 The person who supports an instance often receives only the profile. `--show-sheet FILE` turns it into an outline for the call with whoever runs the instance:
 
 1. the run and the environment in brief (version, mode, replicas, database, usage numbers);
-2. **what works well**: the checks that read what they need and found it good ("by n8n's default" when the variable is simply not set);
+2. **what works well**: the checks that read what they need and found it good ("by n8n's default" when the variable is simply not set). Each sentence states the condition the rule checked and nothing stronger, and a check never passes when two sources given in the same run disagree on what it reads: it is then listed as not assessed;
 3. **what does not**: the findings, most severe first, with their impact and the values of the profile they rest on;
 4. **what to improve**: the remedy of each finding;
 5. **not assessed**: the checks that could not decide, grouped by what would have to be provided ("With Postgres: ..."), and those that do not apply;

@@ -6,9 +6,11 @@ from .. import debug_info
 from ..models import Finding, Outcome, Snapshot, Variant
 from ._helpers import (
     NOT_APPLICABLE,
+    NOT_QUEUE,
     NOT_STATED,
     PASSED,
     PASSED_BY_DEFAULT,
+    SOURCES_DISAGREE,
     UNREADABLE,
     command_words,
     concurrency_flag,
@@ -135,7 +137,10 @@ ONE_WORKER = Variant(
     "SCAL-002",
     "scalability",
     subject="Number of queue-mode workers",
-    passed=f"Queue-mode workers run with at least {MIN_WORKER_REPLICAS} replicas.",
+    passed=(
+        f"There are at least {MIN_WORKER_REPLICAS} workers: replicas that the worker Deployments ask for, "
+        "or worker instances that n8n lists as registered."
+    ),
     variants=(ONE_WORKER,),
     facts=("worker.replicas", "executions.mode"),
 )
@@ -152,7 +157,10 @@ def single_worker(snapshot: Snapshot) -> Finding | Outcome:
         if total == 0:
             return NOT_STATED
         if total >= MIN_WORKER_REPLICAS:
-            return PASSED
+            # Kubernetes asks for enough replicas while n8n itself lists fewer workers.
+            listed = (((debug_info.of(snapshot) or {}).get("cluster") or {}).get("instances") or {}).get("worker")
+            fewer = isinstance(listed, int) and not isinstance(listed, bool) and 1 <= listed < MIN_WORKER_REPLICAS
+            return SOURCES_DISAGREE if fewer else PASSED
         names = ", ".join(f"{name} (replicas: {count})" for name, count in workers.items())
         evidence = f"Worker Deployments: {names}; {total} worker replica in total."
     else:
@@ -162,8 +170,8 @@ def single_worker(snapshot: Snapshot) -> Finding | Outcome:
         env = with_debug_info(snapshot, "EXECUTIONS_MODE", rests_on_text=True)
         count = (cluster.get("instances") or {}).get("worker")
         if count != 1 or env is None or not is_queue_mode(env):
-            if env is not None and queue_only(env) is NOT_APPLICABLE:
-                return NOT_APPLICABLE
+            if env is not None and queue_only(env) is NOT_QUEUE:
+                return NOT_QUEUE
             if snapshot.kubernetes is None and debug_info.of(snapshot) is None:
                 return source_missing("kubernetes", "debug_info")
             # No worker listed is not zero workers: only Deployments and registered instances are seen.
@@ -200,7 +208,7 @@ MANUAL_ON_MAIN = Variant(
     "SCAL-003",
     "scalability",
     subject="Where manual executions run in queue mode",
-    passed="Manual executions are offloaded to the workers.",
+    passed="Manual executions are set to be offloaded to the workers (OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS is true).",
     variants=(MANUAL_ON_MAIN,),
     facts=("executions.mode",),
     settings=("EXECUTIONS_MODE", "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS"),
@@ -238,6 +246,25 @@ LOW_CONCURRENCY = Variant(
 )
 
 
+def _low_concurrency(deployment: dict, container: dict, own_env: dict):
+    """The evidence of one worker set below the minimum; None when it is not, or cannot be told."""
+    # A limit that is set but unreadable, or possibly set in a Secret, may
+    # override the flag: nothing can be said about this worker.
+    if unknown(own_env, CONCURRENCY_LIMIT):
+        return None
+    own_limit = env_int(own_env, CONCURRENCY_LIMIT)
+    flag = concurrency_flag(container)
+    if own_limit is not None and own_limit >= 1:
+        value, source = own_limit, f"N8N_CONCURRENCY_PRODUCTION_LIMIT={own_limit}"
+    elif flag is not None:
+        value, source = flag, f"--concurrency={flag}"
+    else:
+        return None
+    if 1 <= value < MIN_WORKER_CONCURRENCY:
+        return f"{deployment['name']}/{container['name']}: {source}"
+    return None
+
+
 def _worker_concurrency_verified(own_env: dict, container: dict) -> Outcome:
     """The outcome for one worker that raised no finding: only a number that is known passes."""
     why = undecided(own_env, CONCURRENCY_LIMIT)
@@ -263,9 +290,9 @@ def _worker_concurrency_verified(own_env: dict, container: dict) -> Outcome:
     "SCAL-004",
     "scalability",
     subject="Worker concurrency",
-    passed=f"Every worker runs with a concurrency of {MIN_WORKER_CONCURRENCY} or higher.",
+    passed=f"The concurrency set for every worker that was read is {MIN_WORKER_CONCURRENCY} or higher.",
     variants=(LOW_CONCURRENCY,),
-    facts=("worker.concurrency",),
+    facts=("worker.concurrency", "executions.mode"),
     settings=("EXECUTIONS_MODE", CONCURRENCY_LIMIT),
     scopes=("instance", "worker"),
 )
@@ -294,21 +321,18 @@ def low_worker_concurrency(snapshot: Snapshot) -> Finding | Outcome:
                 continue
             own_env = container_env(deployment, container)
             verified.append(_worker_concurrency_verified(own_env, container))
-            # A limit that is set but unreadable, or possibly set in a Secret, may
-            # override the flag: nothing can be said about this worker.
-            if unknown(own_env, "N8N_CONCURRENCY_PRODUCTION_LIMIT"):
-                continue
-            own_limit = env_int(own_env, "N8N_CONCURRENCY_PRODUCTION_LIMIT")
-            flag = concurrency_flag(container)
-            if own_limit is not None and own_limit >= 1:
-                value, source = own_limit, f"N8N_CONCURRENCY_PRODUCTION_LIMIT={own_limit}"
-            elif flag is not None:
-                value, source = flag, f"--concurrency={flag}"
-            else:
-                continue
-            if 1 <= value < MIN_WORKER_CONCURRENCY:
-                observed.append(f"{deployment['name']}/{container['name']}: {source}")
+            low = _low_concurrency(deployment, container, own_env)
+            if low is not None:
+                observed.append(low)
     if not observed:
+        # The env file gives every worker a limit, and a worker container of Kubernetes,
+        # which is not read then, is set below the minimum by itself.
+        if limit is not None and limit >= 1 and any(
+            _low_concurrency(deployment, container, container_env(deployment, container))
+            for deployment, container, role in n8n_containers(snapshot.kubernetes or {})
+            if role == "worker"
+        ):
+            return SOURCES_DISAGREE
         if env is not None:
             # The file describes every process: its mode and its limit come first.
             why = undecided(env, "EXECUTIONS_MODE") or (undecided(env, CONCURRENCY_LIMIT) if is_queue_mode(env) else None)
@@ -319,8 +343,8 @@ def low_worker_concurrency(snapshot: Snapshot) -> Finding | Outcome:
                 return NOT_STATED
         if not verified:
             main = effective_env(snapshot)
-            if main is not None and queue_only(main) is NOT_APPLICABLE:
-                return NOT_APPLICABLE
+            if main is not None and queue_only(main) is NOT_QUEUE:
+                return NOT_QUEUE
             # An env file does not show the --concurrency flag; Kubernetes showed no worker.
             return source_missing("kubernetes") if snapshot.kubernetes is None else NOT_STATED
         for reason in (UNREADABLE, NOT_STATED):

@@ -7,6 +7,7 @@ from ..models import Finding, Outcome, Snapshot, Variant
 from ._helpers import (
     NOT_STATED,
     PASSED,
+    SOURCES_DISAGREE,
     effective_env,
     env_flag,
     image_tag,
@@ -62,6 +63,9 @@ def metrics_disabled(snapshot: Snapshot) -> Finding | Outcome:
     if env is None or env_flag(env, "N8N_METRICS") is True or unknown(env, "N8N_METRICS"):
         # Samples were scraped, so /metrics is on whatever else is known.
         if snapshot.metrics or (env is not None and env_flag(env, "N8N_METRICS") is True):
+            # The variable says on, and the URL answered 404 on /metrics.
+            if not snapshot.metrics and (snapshot.health or {}).get("metrics_disabled") is True:
+                return SOURCES_DISAGREE
             return PASSED
         if env is not None:
             return undecided(env, "N8N_METRICS") or NOT_STATED
@@ -69,9 +73,10 @@ def metrics_disabled(snapshot: Snapshot) -> Finding | Outcome:
             return NOT_STATED  # no main container, or mains that disagree
         # The rule reads the variable; a URL alone decides only when the scrape answers.
         return source_missing("env", "kubernetes", *(("url",) if snapshot.health is None else ()))
-    # Samples were scraped, so /metrics is on whatever the env file says.
+    # Samples were scraped, so /metrics is on and there is no finding, while the
+    # environment says it is off: the two do not describe the same thing.
     if snapshot.metrics:
-        return PASSED
+        return SOURCES_DISAGREE
     # n8n's config marks queue metrics as "Not supported in multi-main setup".
     multi_main = "N8N_MULTI_MAIN_SETUP_ENABLED"
     single_main = env_flag(env, multi_main) is not True and not unknown(env, multi_main)
@@ -102,7 +107,10 @@ MUTABLE_TAG = Variant(
     "MAINT-002",
     "maintainability",
     subject="Tag of the n8n image",
-    passed=f"No n8n image is untagged or uses a tag that moves ({', '.join(MUTABLE_IMAGE_TAGS)}).",
+    passed=(
+        f"No n8n image is untagged or uses one of the tags {', '.join(MUTABLE_IMAGE_TAGS)}. Only these "
+        "are compared: another tag may move as well."
+    ),
     variants=(MUTABLE_TAG,),
 )
 def mutable_image_tag(snapshot: Snapshot) -> Finding | Outcome:
@@ -137,7 +145,10 @@ VERSION_SKEW = Variant(
     "MAINT-003",
     "maintainability",
     subject="n8n version of every process",
-    passed="Every n8n process runs the same version.",
+    passed=(
+        "Every n8n process that was read is on the same version: the image tags in Kubernetes, "
+        "or the instances that n8n lists."
+    ),
     variants=(VERSION_SKEW,),
     facts=("cluster.versions_aligned",),
 )
@@ -162,7 +173,11 @@ def version_skew(snapshot: Snapshot) -> Finding | Outcome:
         # One version among the images: the same on every process only when each names one
         # (a digest or a custom tag may well be another release).
         named = [image_version(c.get("image")) is not None for _, c, _ in n8n_containers(snapshot.kubernetes or {})]
-        return PASSED if not from_images or all(named) else NOT_STATED
+        if from_images and all(named):
+            # The images name one version while n8n itself lists other ones.
+            listed = ((debug_info.of(snapshot) or {}).get("cluster") or {}).get("versions") or []
+            return SOURCES_DISAGREE if listed and set(listed) != set(by_tag) else PASSED
+        return PASSED if not from_images else NOT_STATED
     return version_skew.info.finding(VERSION_SKEW, "warning", evidence)
 
 

@@ -121,7 +121,7 @@ OUTCOMES = ("finding", "passed", "not_applicable", "not_assessed")
 # environment read in full and the n8n default is the good value.
 BASES = ("read", "default")
 # Why a rule could not decide. `rule_error` is set by the engine, never by a rule.
-NOT_ASSESSED_REASONS = ("source_missing", "value_unreadable", "source_failed", "not_stated", "rule_error")
+NOT_ASSESSED_REASONS = ("source_missing", "value_unreadable", "source_failed", "not_stated", "sources_disagree", "rule_error")
 # What the operator can give, as `needs` names it. "url" covers the health and metrics endpoints.
 SOURCE_IDS = ("url", "env", "postgres", "redis", "kubernetes", "debug_info")
 
@@ -134,6 +134,9 @@ class Outcome:
     basis: str = ""  # passed: one of BASES
     reason: str = ""  # not_assessed: one of NOT_ASSESSED_REASONS
     needs: tuple = ()  # not_assessed, source_missing: the SOURCE_IDS of which any one would let the rule decide
+    # not_applicable: True when it is the execution mode that says so, whether or not the
+    # mode is among the rule's own facts and settings (see profile.rests_on()).
+    by_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -191,6 +194,7 @@ class Check:
     basis: str = ""
     reason: str = ""
     needs: tuple = field(default_factory=tuple)
+    by_mode: bool = False
 
 
 Rule = Callable[[Snapshot], "Finding | Outcome"]

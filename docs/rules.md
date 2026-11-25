@@ -21,11 +21,14 @@ Every rule states exactly one outcome per run.
 | Outcome | Meaning |
 |---|---|
 | `finding` | The rule found a problem. It has a severity, a title, an impact and a remedy. |
-| `passed` | The rule read the values it needs and they are good. |
+| `passed` | The rule read the values it needs and they are good. The sentence it writes states the condition it checked, and nothing stronger. |
 | `not_applicable` | The rule does not apply to this setup, or stays silent on purpose. |
 | `not_assessed` | The rule could not decide. It says why. |
 
-A rule never passes on something it did not read. One case needs a word: a variable
+A rule never passes on something it did not read, and its passed sentence says what
+was read: "fewer than 100 jobs wait", not "the queue has no backlog"; "the variable is
+set to", not "every process does". Where a rule compares against a short list or reads
+a setting whose effect depends on something it does not read, the sentence says so. One case needs a word: a variable
 that is **not set**, in an environment that was read in full, has the n8n default. The
 rules already raise findings on that basis, and they pass on it too; the outcome then says
 `"basis": "default"` instead of `"read"`, and the call sheet prints "by n8n's default, not
@@ -39,22 +42,65 @@ set explicitly".
 | `source_failed` | Such a source was asked for and could not be collected. | Those sources. |
 | `not_stated` | A source where the rule looks was given and read, and does not say it. | empty |
 | `value_unreadable` | A source holds the value, which could not be read: a Kubernetes Secret, a `_FILE` variable, a redacted value, an environment read in part. | empty |
+| `sources_disagree` | Two sources given in the run state different things about what the rule reads. See below. | empty |
 | `rule_error` | The rule itself failed. That is a bug in the tool; the report lists it under "Not assessed". | empty |
 
 `url` stands for the n8n URL (health endpoints and `/metrics`), `env` for the env file.
+
+### When two sources disagree
+
+Several sources can state the same thing: an env file and the containers of Kubernetes,
+a probe and the debug information, a variable and the answer of an endpoint. The rules
+have an order between them (the env file describes every process, a probe wins over the
+debug information), and that order decides when a **finding** is raised: it is unchanged.
+It never decides a pass. When a rule has no finding and two sources given in the run
+disagree on what it reads, the rule is `not_assessed` for the reason `sources_disagree`:
+it neither passes nor "does not apply" against a source that says otherwise.
+
+For the variables a rule declares (the settings under "Rests on"), two comparisons are
+made, each between sources that describe the same process:
+
+- **The env file and a Kubernetes container** of a role the rule judges: they disagree
+  when both set the variable to a readable value and the values differ. Two containers
+  are two processes, never two sources.
+- **The debug information and a probe** (the env file, or a main container): the text
+  reports effective values of the main process, so a variable that is not set in an
+  environment read in full counts as its n8n default (`EXECUTIONS_MODE` regular,
+  `DB_TYPE` sqlite, `N8N_MULTI_MAIN_SETUP_ENABLED` false,
+  `N8N_CONCURRENCY_PRODUCTION_LIMIT` -1, `EXECUTIONS_DATA_PRUNE` true,
+  `EXECUTIONS_DATA_SAVE_ON_PROGRESS` false). The two security settings are in the text
+  only when they are insecure, and are compared only with a variable that is set.
+
+A value that cannot be read (a Secret, a `_FILE` variable, a redacted value, an
+environment read in part) is compared with nothing. The comparison is on every variable
+the rule declares, also one the outcome did not turn on: the rule then says less than it
+could, never more. Four rules also compare what is not a variable; their sections say so
+(SCAL-002, SCAL-004, MAINT-001, MAINT-003).
 
 ## What a check rests on
 
 Each rule lists the profile entries that hold what it read: fact ids, and settings by the
 name of the variable. In a profile they are written as ids only (`rests_on`), the same ids
 `--withhold` takes; the values are the ones already in the file. An entry is listed only
-when the rule and the entry read the same thing. What a rule reads that no entry of the
+when the rule and the entry read the same thing: a fact is named only when the file
+holds a value for it, so a fact that only a debug information fills
+(`security.secure_cookie`, `security.file_access_blocked`, `main.concurrency_limit`) is
+not named when the rule read the environment. What a rule reads that no entry of the
 profile holds (connections in use, memory in use, image tags, the readiness answer, the
 probes and resources of webhook containers) is not listed: for those, the values are in
 the report.
 
 A setting is named in the scope the rule read it in: `instance` with an env file, else
 the Kubernetes roles given below. A variable that is not set has no entry.
+
+Every outcome that read something carries the list: a finding, a pass, a rule that does
+not apply, and a rule that could not decide for the reason `not_stated`,
+`value_unreadable` or `sources_disagree`. A rule that does not apply because the instance
+is not in queue mode also names `executions.mode` and `EXECUTIONS_MODE`, whether or not
+they are in its own list (REL-002, REL-003 and REL-004 read the mode only when Redis was
+not given). So a withheld fact or setting names every check that tells something about
+it. A rule left without its source (`source_missing`, `source_failed`) or that failed
+(`rule_error`) read nothing and rests on nothing.
 
 ## Every rule
 
@@ -113,10 +159,10 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): Number of queue-mode workers
 - **Reads:** The replicas of the worker Deployments in Kubernetes; when Kubernetes shows no worker, the worker instances and the execution mode of the debug information.
-- **Passed when:** Kubernetes shows worker Deployments with 2 replicas or more in total; or the debug information lists 2 workers or more and the mode is known to be queue.
-- **Passed text:** Queue-mode workers run with at least 2 replicas.
+- **Passed when:** Kubernetes shows worker Deployments that ask for 2 replicas or more in total (what they ask for, not what is running); or the debug information lists 2 workers or more and the mode is known to be queue.
+- **Passed text:** There are at least 2 workers: replicas that the worker Deployments ask for, or worker instances that n8n lists as registered.
 - **Not applicable when:** The mode is known to be regular and Kubernetes shows no worker.
-- **Not assessed when:** Neither Kubernetes nor a debug information was given; the workers are scaled to zero (they may run elsewhere, so nothing is said); no worker is listed; the mode cannot be told.
+- **Not assessed when:** Neither Kubernetes nor a debug information was given; the workers are scaled to zero (they may run elsewhere, so nothing is said); no worker is listed; the mode cannot be told. Sources disagree: Kubernetes asks for 2 replicas or more and the debug information lists 1 worker.
 - **Rests on:** `worker.replicas`, `executions.mode`
 
 **Finding**
@@ -130,7 +176,7 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 - **Subject** (written when the rule does not apply or could not decide): Where manual executions run in queue mode
 - **Reads:** `EXECUTIONS_MODE` and `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS` of the main process: env file, else the main container in Kubernetes.
 - **Passed when:** Queue mode, with `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS` read as true.
-- **Passed text:** Manual executions are offloaded to the workers.
+- **Passed text:** Manual executions are set to be offloaded to the workers (OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS is true).
 - **Not applicable when:** Regular mode.
 - **Not assessed when:** No env file and no Kubernetes; Kubernetes has no main container or mains that disagree; a value is in a Secret or a file, or the environment was read in part.
 - **Rests on:** `executions.mode`, `EXECUTIONS_MODE` (instance, main), `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS` (instance, main)
@@ -145,11 +191,11 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): Worker concurrency
 - **Reads:** `N8N_CONCURRENCY_PRODUCTION_LIMIT` of an env file in queue mode; else, for each worker container in Kubernetes, that variable and the `--concurrency` flag.
-- **Passed when:** The limit of the env file, or the limit or the flag of every worker, is 5 or higher; by default when a worker sets neither (the worker default is 10).
-- **Passed text:** Every worker runs with a concurrency of 5 or higher.
+- **Passed when:** The limit of the env file, or the limit or the flag of every worker that was read, is 5 or higher; by default when a worker sets neither (the worker default is 10).
+- **Passed text:** The concurrency set for every worker that was read is 5 or higher.
 - **Not applicable when:** The mode is known to be regular and there is no worker to read.
-- **Not assessed when:** No env file and no Kubernetes; an env file in queue mode without a limit and no Kubernetes (the flag is only visible there); Kubernetes shows no worker; a limit in a Secret or a file; a flag that is not a plain number.
-- **Rests on:** `worker.concurrency`, `EXECUTIONS_MODE` (instance, worker), `N8N_CONCURRENCY_PRODUCTION_LIMIT` (instance, worker)
+- **Not assessed when:** No env file and no Kubernetes; an env file in queue mode without a limit and no Kubernetes (the flag is only visible there); Kubernetes shows no worker; a limit in a Secret or a file; a flag that is not a plain number. Sources disagree: the env file gives a limit of 5 or higher and a worker container of Kubernetes sets its own limit to another value, or is set below 5 by its limit or its flag.
+- **Rests on:** `worker.concurrency`, `executions.mode`, `EXECUTIONS_MODE` (instance, worker), `N8N_CONCURRENCY_PRODUCTION_LIMIT` (instance, worker)
 
 **Finding**
 
@@ -233,8 +279,8 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): Execution queue backlog
 - **Reads:** The waiting and active jobs of the Bull queue in Redis.
-- **Passed when:** Fewer than 100 jobs wait, and not 10 or more with none active.
-- **Passed text:** The execution queue is being consumed and has no backlog.
+- **Passed when:** Fewer than 100 jobs wait, and not 10 or more with none active. Nine jobs waiting with none active pass: the sentence says only this.
+- **Passed text:** Fewer than 100 jobs wait in the queue, and it is not the case that 10 or more wait while none is active.
 - **Not applicable when:** Redis was not given and the mode is known to be regular.
 - **Not assessed when:** Redis was not given; the queue key was not found in Redis.
 - **Rests on:** `queue.waiting_jobs`, `queue.active_jobs`
@@ -271,8 +317,8 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): Multi-main setup in queue mode
 - **Reads:** The execution mode and `N8N_MULTI_MAIN_SETUP_ENABLED` of the main process: env file, else the main container in Kubernetes, else the debug information.
-- **Passed when:** Queue mode, with the multi-main setup read as enabled.
-- **Passed text:** The multi-main setup is enabled.
+- **Passed when:** Queue mode, with the multi-main setup read as enabled. The number of main processes is not read.
+- **Passed text:** The multi-main setup is switched on (N8N_MULTI_MAIN_SETUP_ENABLED); how many main processes run is not checked.
 - **Not applicable when:** Regular mode.
 - **Not assessed when:** None of the three sources was given; a value is in a Secret or a file, was read in part, or is not stated by the debug information.
 - **Rests on:** `executions.mode`, `multi_main.enabled`, `EXECUTIONS_MODE` (instance, main), `N8N_MULTI_MAIN_SETUP_ENABLED` (instance, main)
@@ -353,8 +399,8 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): Saving of execution progress after every node
 - **Reads:** `EXECUTIONS_DATA_SAVE_ON_PROGRESS`: of the env file; else of the main container in regular mode and of every worker container in queue mode; in regular mode, else the debug information.
-- **Passed when:** Read as false on every process judged; by default when it is not set there.
-- **Passed text:** Execution progress is not saved after every node.
+- **Passed when:** Read as false on every process judged; by default when it is not set there. This is the instance-wide setting: the setting of a single workflow is not read.
+- **Passed text:** Saving execution progress after every node is off instance-wide (EXECUTIONS_DATA_SAVE_ON_PROGRESS); a workflow can still turn it on for itself.
 - **Not applicable when:** Never.
 - **Not assessed when:** No source was given; queue mode with no worker in Kubernetes; queue mode known from the debug information alone (the text describes the main process, not the workers); a value in a Secret or a file, or read in part.
 - **Rests on:** `executions.mode`, `EXECUTIONS_MODE` (instance, main, worker), `EXECUTIONS_DATA_SAVE_ON_PROGRESS` (instance, main, worker)
@@ -369,8 +415,8 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): Where binary data is kept
 - **Reads:** `N8N_DEFAULT_BINARY_DATA_MODE` and `EXECUTIONS_MODE` of the main process: env file, else the main container in Kubernetes.
-- **Passed when:** The mode is read as `filesystem`, `s3`, `azure` or `database`.
-- **Passed text:** Binary data is set to be kept out of the process memory.
+- **Passed when:** The mode is read as `filesystem`, `s3`, `azure` or `database`. Whether every process can reach that storage (in queue mode, a volume shared by main, workers and webhook processors) is not read.
+- **Passed text:** N8N_DEFAULT_BINARY_DATA_MODE is set to one of filesystem, s3, azure, database, not to the in-memory mode; whether every process can reach that storage is not checked.
 - **Not applicable when:** Never.
 - **Not assessed when:** No env file and no Kubernetes; the variable is not set (the mode n8n then uses depends on its version and on the execution mode, so nothing is said); the value is in a Secret or a file, or was read in part.
 - **Rests on:** `binary_data.mode`, `executions.mode`, `N8N_DEFAULT_BINARY_DATA_MODE` (instance, main), `EXECUTIONS_MODE` (instance, main)
@@ -399,10 +445,10 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): Prometheus metrics endpoint
 - **Reads:** `N8N_METRICS` of the main process (env file, else the main container in Kubernetes) and whether `/metrics` answered with samples.
-- **Passed when:** `/metrics` was scraped, or `N8N_METRICS` is read as true.
+- **Passed when:** `/metrics` was scraped and no environment says otherwise, or `N8N_METRICS` is read as true and the URL did not answer 404 on `/metrics`.
 - **Passed text:** The Prometheus metrics endpoint is enabled.
 - **Not applicable when:** Never.
-- **Not assessed when:** No env file and no Kubernetes (the rule raises its finding on the variable, so a URL whose `/metrics` does not answer is not enough); the value is in a Secret or a file, or was read in part.
+- **Not assessed when:** No env file and no Kubernetes (the rule raises its finding on the variable, so a URL whose `/metrics` does not answer is not enough); the value is in a Secret or a file, or was read in part. Sources disagree: `N8N_METRICS` is true and the URL answered 404 on `/metrics`; or `/metrics` was scraped and the environment does not have `N8N_METRICS` as true (no finding is raised then, as before).
 - **Rests on:** `N8N_METRICS` (instance, main), `EXECUTIONS_MODE` (instance, main), `N8N_MULTI_MAIN_SETUP_ENABLED` (instance, main)
 
 **Finding, variant 1**
@@ -421,8 +467,8 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): Tag of the n8n image
 - **Reads:** The image tag of every n8n container in Kubernetes.
-- **Passed when:** No n8n image is untagged or tagged `latest`, `stable`, `beta`, `next` or `nightly`.
-- **Passed text:** No n8n image is untagged or uses a tag that moves (latest, stable, beta, next, nightly).
+- **Passed when:** No n8n image is untagged or tagged `latest`, `stable`, `beta`, `next` or `nightly`. Only these five are compared: a tag such as `prod`, `main` or `1` passes, and may move as well.
+- **Passed text:** No n8n image is untagged or uses one of the tags latest, stable, beta, next, nightly. Only these are compared: another tag may move as well.
 - **Not applicable when:** Never.
 - **Not assessed when:** Kubernetes was not given, or shows no n8n container.
 - **Rests on:** nothing the profile holds; the values are in the report.
@@ -437,10 +483,10 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): n8n version of every process
 - **Reads:** The versions named by the image tags of the n8n containers in Kubernetes; when no tag names a version, the versions of the instances listed in the debug information.
-- **Passed when:** Every n8n container names a version in its tag and they are one version; or the debug information lists the instances on one version.
-- **Passed text:** Every n8n process runs the same version.
+- **Passed when:** Every n8n container names a version in its tag and they are one version (the tags, not what is running); or the debug information lists the instances on one version.
+- **Passed text:** Every n8n process that was read is on the same version: the image tags in Kubernetes, or the instances that n8n lists.
 - **Not applicable when:** Never.
-- **Not assessed when:** Neither source was given; an image is pinned by digest or carries a tag that names no version; the debug information has no cluster section or lists no version.
+- **Not assessed when:** Neither source was given; an image is pinned by digest or carries a tag that names no version; the debug information has no cluster section or lists no version. Sources disagree: the images name one version and the debug information lists other versions than that one.
 - **Rests on:** `cluster.versions_aligned`
 
 **Finding**
@@ -474,7 +520,7 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 - **Passed when:** Read as true; by default when the variable is not set in an environment read in full.
 - **Passed text:** The session cookie is restricted to HTTPS.
 - **Not applicable when:** Never.
-- **Not assessed when:** No env file and no Kubernetes (a debug information that does not flag the setting proves nothing, so it is never a pass); the value is in a Secret or a file, or was read in part.
+- **Not assessed when:** No env file and no Kubernetes (a debug information that does not flag the setting proves nothing, so it is never a pass); the value is in a Secret or a file, or was read in part. Sources disagree: a probe states the variable as true and the debug information flags the setting.
 - **Rests on:** `security.secure_cookie`, `N8N_SECURE_COOKIE` (instance, main)
 
 **Finding**
@@ -487,11 +533,11 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): Task runners for the Code node
 - **Reads:** `N8N_RUNNERS_MODE` of every process that runs Code nodes: the env file; else, in Kubernetes, the main container (unless it offloads manual executions) and every worker container.
-- **Passed when:** Read as `external` on every process judged. Never by default: the default is `internal`.
-- **Passed text:** Every process that runs Code nodes uses external task runners.
+- **Passed when:** `N8N_RUNNERS_MODE` read as `external` on every process judged, and `N8N_RUNNERS_ENABLED` not false there. Never by default: the default is `internal`. The pass says what the two variables are, not that the runners run: on n8n 1.x they run only with `N8N_RUNNERS_ENABLED=true`, and the tool does not know whether n8n 2.x still reads that variable.
+- **Passed text:** N8N_RUNNERS_MODE is external, and N8N_RUNNERS_ENABLED is not false, on every process that was read and runs Code nodes.
 - **Not applicable when:** Never.
-- **Not assessed when:** No env file and no Kubernetes; the mode, the offloading or the runners mode is in a Secret or a file, or was read in part; queue mode with no process to judge.
-- **Rests on:** `executions.mode`, `N8N_RUNNERS_MODE` (instance, main, worker), `EXECUTIONS_MODE` (instance, main, worker), `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS` (instance, main, worker)
+- **Not assessed when:** No env file and no Kubernetes; the mode, the offloading or the runners mode is in a Secret or a file, or was read in part; queue mode with no process to judge; `external` with `N8N_RUNNERS_ENABLED` false (not stated), or possibly set where it could not be read.
+- **Rests on:** `executions.mode`, `N8N_RUNNERS_MODE` (instance, main, worker), `N8N_RUNNERS_ENABLED` (instance, main, worker), `EXECUTIONS_MODE` (instance, main, worker), `OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS` (instance, main, worker)
 
 **Finding**
 
@@ -503,10 +549,10 @@ the Kubernetes roles given below. A variable that is not set has no entry.
 
 - **Subject** (written when the rule does not apply or could not decide): Access to n8n's own files from the nodes
 - **Reads:** What the debug information flags as insecure, then `N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES` of the main process, which wins when a probe states it.
-- **Passed when:** A probe (env file or Kubernetes) states the variable as true. Never by default, and never from a debug information that merely does not flag it.
+- **Passed when:** A probe (env file or Kubernetes) states the variable as true and no debug information flags the setting. Never by default, and never from a debug information that merely does not flag it.
 - **Passed text:** Access to n8n's own files is set to be blocked.
 - **Not applicable when:** Never.
-- **Not assessed when:** The debug information was not given; it was given and does not flag the setting; it flags it and the variable is in a Secret.
+- **Not assessed when:** The debug information was not given; it was given and does not flag the setting; it flags it and the variable is in a Secret. Sources disagree: it flags it and a probe states the variable as true.
 - **Rests on:** `security.file_access_blocked`, `N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES` (instance, main)
 
 **Finding**

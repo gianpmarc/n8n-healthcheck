@@ -27,6 +27,7 @@ DEFAULT = ("passed", "default")
 NOT_APPLICABLE_ = ("not_applicable",)
 NOT_STATED = ("not_assessed", "not_stated", ())
 UNREADABLE = ("not_assessed", "value_unreadable", ())
+DISAGREE = ("not_assessed", "sources_disagree", ())
 
 
 def missing(*needs):
@@ -51,6 +52,13 @@ def main(env, **overrides):
 def with_workers(main_env, *worker_envs, **overrides):
     workers = [(f"worker-{i}", 1, container(**{"command": ["worker"], "env": env, **overrides})) for i, env in enumerate(worker_envs)]
     return kube(("n8n-main", 1, container(env=main_env)), *workers)
+
+
+def text_listing(*versions, **sections):
+    """A debug information whose cluster section lists these versions."""
+    snapshot = TEXT(**sections)
+    snapshot.debug_info["cluster"]["versions"] = list(versions)
+    return snapshot
 
 
 def text_without(*keys, **sections):
@@ -80,6 +88,8 @@ CASES = {
         ("mains that disagree", Snapshot(kubernetes=kube(("a", 1, container(env=QUEUE)), ("b", 1, container(env={})))), NOT_STATED),
         ("a text that does not state the mode", text_without("execution_mode"), NOT_STATED),
         ("a text in regular mode without a limit", TEXT(pasted.REGULAR), FINDING),
+        ("queue mode in the env file, regular in a text", TEXT(pasted.REGULAR, env=dict(QUEUE)), DISAGREE),
+        ("a limit in a text that the env file does not set", TEXT(pasted.REGULAR, ("concurrency: -1", "concurrency: 20"), env=dict(PRODUCTION)), DISAGREE),
     ],
     "SCAL-002": [
         ("nothing given", Snapshot(), missing("kubernetes", "debug_info")),
@@ -96,12 +106,16 @@ CASES = {
         ("a text with two workers that does not state the mode", text_without("execution_mode"), NOT_STATED),
         ("a text with two workers, the mode in a Secret", TEXT(kubernetes=main({"EXECUTIONS_MODE": SECRET})), UNREADABLE),
         ("a text in regular mode", TEXT(pasted.REGULAR), NOT_APPLICABLE_),
+        ("two replicas in Kubernetes, one worker listed by n8n", TEXT(pasted.ONE_WORKER, kubernetes=healthy_kube()), DISAGREE),
+        ("two replicas in Kubernetes, two workers listed by n8n", TEXT(kubernetes=healthy_kube()), READ),
     ],
     "SCAL-003": [
         ("nothing given", Snapshot(), ENV_OR_KUBE),
         ("a text alone", TEXT(), ENV_OR_KUBE),
         ("queue mode", Snapshot(env=dict(QUEUE)), FINDING),
         ("offloading on", Snapshot(env={**QUEUE, "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": "true"}), READ),
+        ("regular mode by default in the env file, queue in a text", TEXT(env={}), DISAGREE),
+        ("queue mode in the env file and in a text", TEXT(env={**QUEUE, "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": "true"}), READ),
         ("regular mode", Snapshot(env={}), NOT_APPLICABLE_),
         ("offloading in a Secret", Snapshot(kubernetes=main({**QUEUE, "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": SECRET})), UNREADABLE),
         ("the mode read in part", Snapshot(kubernetes=main({}, env_complete=False)), UNREADABLE),
@@ -122,6 +136,9 @@ CASES = {
         ("a flag that is not a number", Snapshot(kubernetes=with_workers(QUEUE, {}, command=["worker", "--concurrency=$N"])), NOT_STATED),
         ("no worker, queue mode", Snapshot(kubernetes=main(QUEUE)), NOT_STATED),
         ("no worker, regular mode", Snapshot(kubernetes=main({})), NOT_APPLICABLE_),
+        ("an env file with a limit of 10, a worker set to 2", Snapshot(env={**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "10"}, kubernetes=with_workers(QUEUE, {"N8N_CONCURRENCY_PRODUCTION_LIMIT": "2"})), DISAGREE),
+        ("an env file with a limit of 10, a worker with a flag of 2", Snapshot(env={**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "10"}, kubernetes=with_workers(QUEUE, {}, command=["worker", "--concurrency=2"])), DISAGREE),
+        ("an env file with a limit of 10, workers that set neither", Snapshot(env={**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "10"}, kubernetes=with_workers(QUEUE, {})), READ),
     ],
     "SCAL-005": [
         ("nothing given", Snapshot(), missing("postgres")),
@@ -166,6 +183,7 @@ CASES = {
         ("50 waiting, none active", Snapshot(redis={**REDIS, "waiting_jobs": 50, "active_jobs": 0}), FINDING),
         ("500 waiting", Snapshot(redis={**REDIS, "waiting_jobs": 500, "active_jobs": 10}), FINDING),
         ("a queue that moves", Snapshot(redis=dict(REDIS)), READ),
+        ("nine waiting, none active", Snapshot(redis={**REDIS, "waiting_jobs": 9, "active_jobs": 0}), READ),  # what the sentence says, no more
         ("no queue key", Snapshot(redis={"waiting_jobs": None, "active_jobs": None}), NOT_STATED),
     ],
     "REL-005": [
@@ -247,7 +265,10 @@ CASES = {
         ("not set", Snapshot(env={}), FINDING),
         ("not set, queue mode", Snapshot(env=dict(QUEUE)), FINDING),
         ("set", Snapshot(env={"N8N_METRICS": "true"}), READ),
-        ("not set but scraped", Snapshot(env={}, metrics={"n8n_version_info": 1}), READ),
+        ("set and scraped", Snapshot(env={"N8N_METRICS": "true"}, metrics={"n8n_version_info": 1}), READ),
+        ("not set but scraped", Snapshot(env={}, metrics={"n8n_version_info": 1}), DISAGREE),
+        ("set to false but scraped", Snapshot(env={"N8N_METRICS": "false"}, metrics={"n8n_version_info": 1}), DISAGREE),
+        ("set, and the URL answers 404 on /metrics", Snapshot(env={"N8N_METRICS": "true"}, health={"healthz": True, "readiness": True, "metrics_disabled": True}), DISAGREE),
         ("in a Secret", Snapshot(kubernetes=main({"N8N_METRICS": SECRET})), UNREADABLE),
         ("Kubernetes without a main container", Snapshot(kubernetes=kube()), NOT_STATED),
     ],
@@ -255,6 +276,7 @@ CASES = {
         ("nothing given", Snapshot(), missing("kubernetes")),
         ("latest", Snapshot(kubernetes=main({}, image="n8nio/n8n:latest")), FINDING),
         ("a version", Snapshot(kubernetes=healthy_kube()), READ),
+        ("a tag that is none of the five compared", Snapshot(kubernetes=main({}, image="registry.example/n8n:prod")), READ),  # what the sentence says, no more
         ("no n8n container", Snapshot(kubernetes=kube()), NOT_STATED),
     ],
     "MAINT-003": [
@@ -264,6 +286,9 @@ CASES = {
         ("one image pinned by digest", Snapshot(kubernetes=kube(("a", 1, container()), ("b", 1, container(image="n8nio/n8n@sha256:abc", command=["worker"])))), NOT_STATED),
         ("no tag names a version", Snapshot(kubernetes=main({}, image="n8nio/n8n:latest")), NOT_STATED),
         ("a text with one version", TEXT(), READ),
+        ("one version in the images, two listed by n8n", text_listing("1.2.3", "1.3.0", kubernetes=main({}, image="n8nio/n8n:1.2.3")), DISAGREE),
+        ("one version in the images, another listed by n8n", text_listing("1.3.0", kubernetes=main({}, image="n8nio/n8n:1.2.3")), DISAGREE),
+        ("one version in the images, the same listed by n8n", text_listing("1.2.3", kubernetes=main({}, image="n8nio/n8n:1.2.3")), READ),
         ("a text with two versions", TEXT(pasted.TWO_VERSIONS), FINDING),
         ("a text without a cluster section", TEXT(base=pasted.NO_CLUSTER), NOT_STATED),
     ],
@@ -283,11 +308,17 @@ CASES = {
         ("a text that flags it", TEXT(), FINDING),
         # The text reports it only when it is insecure: its silence is never a pass.
         ("a text that does not flag it", TEXT(pasted.SECURE), NOT_STATED),
+        ("set to true, a text that flags it", TEXT(env={**QUEUE, "N8N_SECURE_COOKIE": "true"}), DISAGREE),
     ],
     "SEC-002": [
         ("nothing given", Snapshot(), ENV_OR_KUBE),
         ("not set", Snapshot(env={}), FINDING),
         ("external", Snapshot(env={"N8N_RUNNERS_MODE": "external"}), READ),
+        ("external, runners enabled", Snapshot(env={"N8N_RUNNERS_MODE": "external", "N8N_RUNNERS_ENABLED": "true"}), READ),
+        ("external, runners disabled", Snapshot(env={"N8N_RUNNERS_MODE": "external", "N8N_RUNNERS_ENABLED": "false"}), NOT_STATED),
+        ("external on every process, runners disabled on a worker", Snapshot(kubernetes=with_workers({**QUEUE, "N8N_RUNNERS_MODE": "external"}, {"N8N_RUNNERS_MODE": "external", "N8N_RUNNERS_ENABLED": "0"})), NOT_STATED),
+        ("external, runners enabled in a Secret", Snapshot(kubernetes=main({"N8N_RUNNERS_MODE": "external", "N8N_RUNNERS_ENABLED": SECRET})), UNREADABLE),
+        ("external in an env file, internal on a worker of Kubernetes", Snapshot(env={**QUEUE, "N8N_RUNNERS_MODE": "external"}, kubernetes=with_workers(QUEUE, {"N8N_RUNNERS_MODE": "internal"})), DISAGREE),
         ("external on main, internal on a worker", Snapshot(kubernetes=with_workers({**QUEUE, "N8N_RUNNERS_MODE": "external"}, {})), FINDING),
         ("external on main and on every worker", Snapshot(kubernetes=with_workers({**QUEUE, "N8N_RUNNERS_MODE": "external"}, {"N8N_RUNNERS_MODE": "external"})), READ),
         ("in a Secret", Snapshot(kubernetes=main({"N8N_RUNNERS_MODE": SECRET})), UNREADABLE),
@@ -302,7 +333,7 @@ CASES = {
         ("not set, no text", Snapshot(env={}), missing("debug_info")),  # never on the default
         ("a text that flags it", TEXT(), FINDING),
         ("a text that does not flag it", TEXT(pasted.SECURE), NOT_STATED),
-        ("a text that flags it, a probe that says true", TEXT(env={"N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES": "true"}), READ),
+        ("a text that flags it, a probe that says true", TEXT(env={**QUEUE, "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES": "true"}), DISAGREE),
         ("a text that flags it, the variable in a Secret", TEXT(kubernetes=main({"N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES": SECRET})), UNREADABLE),
     ],
 }
@@ -449,6 +480,92 @@ class AssessTest(unittest.TestCase):
                 [stated(check) for check in engine.assess(again, ALL_RULES)],
                 [stated(check) for check in engine.assess(snapshot, ALL_RULES)],
             )
+
+class ReviewTest(unittest.TestCase):
+    """What the review of 0.6.0 found: a pass says no more than what was read, and never against a source."""
+
+    def test_a_passed_sentence_states_only_the_condition_that_was_checked(self):
+        said = {rule_id: rule.info.passed for rule_id, rule in RULES.items()}
+        # REL-004 passes with nine jobs waiting and none active: the sentence gives the two thresholds, nothing more.
+        self.assertIn("Fewer than 100 jobs wait", said["REL-004"])
+        self.assertIn("10 or more wait while none is active", said["REL-004"])
+        # MAINT-002 passes on a tag such as `prod`: the sentence names the five it compares, and says so.
+        for tag in ("latest", "stable", "beta", "next", "nightly"):
+            self.assertIn(tag, said["MAINT-002"])
+        self.assertIn("Only these are compared", said["MAINT-002"])
+        # PERF-003 passes on filesystem in queue mode: whether the volume is shared is not read.
+        self.assertTrue(said["PERF-003"].startswith("N8N_DEFAULT_BINARY_DATA_MODE is set to one of filesystem, s3, azure, database"))
+        self.assertIn("is not checked", said["PERF-003"])
+        # SEC-002 passes on the two variables it read, on the processes it read.
+        self.assertIn("N8N_RUNNERS_ENABLED is not false", said["SEC-002"])
+        self.assertIn("that was read", said["SEC-002"])
+        for rule_id, stronger in (
+            ("REL-004", "is being consumed"), ("REL-004", "no backlog"), ("MAINT-002", "a tag that moves ("), ("PERF-003", "kept out of the process memory"),
+            ("SEC-002", "uses external task runners"), ("SCAL-002", "run with at least"), ("SCAL-004", "Every worker runs"), ("MAINT-003", "Every n8n process runs"),
+            ("PERF-002", "is not saved after every node."), ("REL-006", "setup is enabled."), ("SCAL-003", "are offloaded"),
+        ):  # fmt: skip
+            self.assertNotIn(stronger, said[rule_id], rule_id)
+
+    def test_two_sources_that_disagree_never_pass_and_never_hide_a_finding(self):
+        seen = set()
+        for rule_id, cases in CASES.items():
+            for label, snapshot, expected in cases:
+                if expected == DISAGREE:
+                    seen.add(rule_id)
+                    # Only an outcome without a finding changes: the rule called alone is silent, as in 0.5.0.
+                    self.assertIsNone(RULES[rule_id](snapshot), (rule_id, label))
+        self.assertLessEqual({"MAINT-003", "MAINT-001", "SEC-001", "SEC-003", "SCAL-004"}, seen)  # the five of the review
+        # Where 0.5.0 raises a finding, the finding stays, whatever the other source says.
+        for rule_id, snapshot in (
+            ("SEC-001", TEXT(pasted.SECURE, env={**QUEUE, "N8N_SECURE_COOKIE": "false"})),
+            ("REL-001", TEXT(env={"EXECUTIONS_MODE": "queue", "DB_TYPE": "sqlite"})),
+            ("SCAL-004", Snapshot(env={**QUEUE, "N8N_CONCURRENCY_PRODUCTION_LIMIT": "2"}, kubernetes=with_workers(QUEUE, {"N8N_CONCURRENCY_PRODUCTION_LIMIT": "10"}))),
+            ("MAINT-001", Snapshot(env={"N8N_METRICS": "false"}, health={"healthz": True, "readiness": True, "metrics_disabled": True})),
+        ):
+            (check,) = engine.assess(snapshot, [RULES[rule_id]])
+            self.assertEqual(check.outcome, "finding", rule_id)
+
+    def test_what_counts_as_two_sources_that_disagree(self):
+        from n8n_healthcheck.rules._helpers import sources_disagree
+
+        both = ("instance", "main", "worker")
+        limit = "N8N_CONCURRENCY_PRODUCTION_LIMIT"
+        cases = [
+            # The env file and a container are compared where both set the variable to a readable value.
+            (Snapshot(env={limit: "10"}, kubernetes=with_workers({}, {limit: "2"})), (limit,), both, True),
+            (Snapshot(env={limit: "10"}, kubernetes=with_workers({}, {limit: " 10 "})), (limit,), both, False),
+            (Snapshot(env={limit: "10"}, kubernetes=with_workers({}, {limit: "2"})), (limit,), ("instance", "main"), False),  # a role the rule does not judge
+            (Snapshot(env={limit: "10"}, kubernetes=with_workers({}, {})), (limit,), both, False),  # not set there
+            (Snapshot(env={limit: "10"}, kubernetes=with_workers({}, {limit: SECRET})), (limit,), both, False),
+            (Snapshot(env={"N8N_METRICS": "1"}, kubernetes=main({"N8N_METRICS": "TRUE"})), ("N8N_METRICS",), both, False),
+            # Two containers are two processes, not two sources.
+            (Snapshot(kubernetes=with_workers({limit: "10"}, {limit: "2"})), (limit,), both, False),
+            # The text states effective values: a variable not set in an environment read in full is its default.
+            (TEXT(env={}), ("EXECUTIONS_MODE",), both, True),  # the text says queue
+            (TEXT(pasted.REGULAR, env={}), ("EXECUTIONS_MODE",), both, False),
+            (TEXT(env=dict(QUEUE)), ("EXECUTIONS_MODE", "DB_TYPE"), both, False),
+            (TEXT(kubernetes=main({})), ("EXECUTIONS_MODE",), both, True),
+            (TEXT(kubernetes=main({}, env_complete=False)), ("EXECUTIONS_MODE",), both, False),  # may be set where it was not read
+            (TEXT(env={"EXECUTIONS_MODE_FILE": "x"}), ("EXECUTIONS_MODE",), both, False),
+            (TEXT(kubernetes=main({"EXECUTIONS_MODE": SECRET})), ("EXECUTIONS_MODE",), both, False),
+            (TEXT(kubernetes=with_workers(QUEUE, {})), ("EXECUTIONS_MODE",), both, False),  # the text describes main, not a worker
+            (TEXT(env={}), ("N8N_RUNNERS_MODE",), both, False),  # the text does not state it
+            (TEXT(env={}), (), both, False),
+            # The two security settings are in the text only as false, and have no default here.
+            (TEXT(env={}), ("N8N_SECURE_COOKIE",), both, False),
+            (TEXT(env={"N8N_SECURE_COOKIE": "false"}), ("N8N_SECURE_COOKIE",), both, False),
+            (TEXT(pasted.SECURE, env={"N8N_SECURE_COOKIE": "true"}), ("N8N_SECURE_COOKIE",), both, False),
+        ]
+        for number, (snapshot, names, scopes, expected) in enumerate(cases):
+            with self.subTest(case=number):
+                self.assertIs(sources_disagree(snapshot, names, scopes), expected)
+
+    def test_what_makes_a_rule_not_apply_is_carried_to_the_profile(self):
+        by_mode = lambda snapshot, rule_id: engine.assess(snapshot, [RULES[rule_id]])[0].by_mode
+        self.assertTrue(by_mode(Snapshot(env={}), "REL-002"))  # no Redis, and the mode is regular
+        self.assertTrue(by_mode(Snapshot(env={}), "SCAL-003"))
+        self.assertFalse(by_mode(Snapshot(redis={**REDIS, "maxmemory_bytes": 0}), "REL-003"))  # no memory limit: the mode was not read
+        self.assertFalse(by_mode(Snapshot(env=dict(QUEUE)), "REL-001"))
 
 
 if __name__ == "__main__":

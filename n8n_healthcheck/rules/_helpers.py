@@ -27,11 +27,17 @@ PASSED = Outcome("passed", basis="read")
 # The variable is not set in an environment read in full, and the n8n default is the good value.
 PASSED_BY_DEFAULT = Outcome("passed", basis="default")
 NOT_APPLICABLE = Outcome("not_applicable")
+# Not applicable because the instance is known not to run in queue mode.
+NOT_QUEUE = Outcome("not_applicable", by_mode=True)
 # A source the rule reads was given and read, and does not say what the rule needs.
 NOT_STATED = Outcome("not_assessed", reason="not_stated")
 # A source holds the value, but it could not be read: a Secret, a file, a redacted value,
 # or an environment of which a part is missing.
 UNREADABLE = Outcome("not_assessed", reason="value_unreadable")
+# Two sources given in the run state different things about what the rule reads. The
+# order between sources decides when a finding is raised; it never makes a rule pass,
+# or not apply, against a source that says otherwise.
+SOURCES_DISAGREE = Outcome("not_assessed", reason="sources_disagree")
 
 
 def source_missing(*needs: str) -> Outcome:
@@ -54,7 +60,18 @@ def rule(rule_id: str, area: str, *, subject: str, passed: str, variants=(), fac
             result = function(snapshot)
             return None if isinstance(result, Outcome) else result
 
-        finding_or_none.assess = function
+        @functools.wraps(function)
+        def assess(snapshot: Snapshot):
+            result = function(snapshot)
+            if (
+                isinstance(result, Outcome)
+                and result.outcome in ("passed", "not_applicable")
+                and sources_disagree(snapshot, settings, scopes)
+            ):
+                return SOURCES_DISAGREE
+            return result
+
+        finding_or_none.assess = assess
         finding_or_none.info = RuleInfo(rule_id, area, subject, passed, tuple(variants), tuple(facts), tuple(settings), tuple(scopes))
         return finding_or_none
 
@@ -151,6 +168,72 @@ def debug_info_env(section: dict) -> dict:
         "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES": False if insecure.get("file_access_blocked") else None,
     }
     return {name: str(value).lower() for name, value in values.items() if value is not None}
+
+
+# The n8n default of the variables a debug information states, as debug_info_env() writes
+# them. The two security variables are left out: the text states them only as `false`.
+DEFAULTS = {
+    "EXECUTIONS_MODE": "regular",
+    "DB_TYPE": "sqlite",
+    "N8N_MULTI_MAIN_SETUP_ENABLED": "false",
+    "N8N_CONCURRENCY_PRODUCTION_LIMIT": "-1",
+    "EXECUTIONS_DATA_PRUNE": "true",
+    "EXECUTIONS_DATA_SAVE_ON_PROGRESS": "false",
+}
+
+
+def _same(one, other) -> bool:
+    """True when two values of one n8n variable mean the same: `1` and `true`, `10` and ` 10`."""
+    one, other = str(one).strip().lower(), str(other).strip().lower()
+    if one == other:
+        return True
+    flags = {"true": True, "1": True, "false": False, "0": False}
+    if one in flags and other in flags:
+        return flags[one] is flags[other]
+    try:
+        return int(one) == int(other)
+    except ValueError:
+        return False
+
+
+def sources_disagree(snapshot: Snapshot, names: tuple, scopes: tuple) -> bool:
+    """True when two sources given in the run state different values for one of `names`.
+
+    Two comparisons, each between sources that describe the same process. The env file
+    describes every process: it is compared with each Kubernetes container of the roles
+    in `scopes`, where both set the variable to a readable value. The debug information
+    reports the effective values of the main process: it is compared with the env file
+    and with each main container, where a variable that is not set in an environment
+    read in full counts as its n8n default. A value that cannot be read (a Secret, a
+    file, a redacted value, an environment read in part) is compared with nothing.
+    """
+
+    def readable(env: dict, name: str) -> bool:
+        return name in env and env[name] not in (VALUE_FROM, REDACTED)
+
+    containers = [
+        (container.get("env") or {}, container.get("env_complete") is True, role)
+        for _, container, role in n8n_containers(snapshot.kubernetes or {})
+    ]
+    text = debug_info_env(debug_info.of(snapshot) or {})
+    for name in names:
+        if snapshot.env is not None and readable(snapshot.env, name):
+            for env, _complete, role in containers:
+                if role in scopes and readable(env, name) and not _same(env[name], snapshot.env[name]):
+                    return True
+        if name not in text:
+            continue
+        mains = [(env, complete) for env, complete, role in containers if role == "main"]
+        for env, complete in ([(snapshot.env, True)] if snapshot.env is not None else []) + mains:
+            if readable(env, name):
+                value = env[name]
+            elif name not in env and name + "_FILE" not in env and complete and name in DEFAULTS:
+                value = DEFAULTS[name]
+            else:
+                continue
+            if not _same(value, text[name]):
+                return True
+    return False
 
 
 def stated(snapshot: Snapshot, name: str) -> bool:
@@ -261,7 +344,7 @@ def no_environment(snapshot: Snapshot, text: bool = False, needs: tuple = ()) ->
 
 def queue_only(env: dict) -> Optional[Outcome]:
     """For a rule about queue mode: why it says nothing, or None when the mode is queue."""
-    return undecided(env, "EXECUTIONS_MODE") or (None if is_queue_mode(env) else NOT_APPLICABLE)
+    return undecided(env, "EXECUTIONS_MODE") or (None if is_queue_mode(env) else NOT_QUEUE)
 
 
 def flag_is(env: dict, name: str, good: bool, default: bool) -> Outcome:

@@ -832,20 +832,33 @@ def check_reference(reference: str) -> str:
     return reference
 
 
-def rests_on(info, snapshot: Snapshot, settings: list) -> list:
+def rests_on(info, snapshot: Snapshot, settings: list, facts: list, by_mode: bool = False) -> list:
     """The ids of the profile entries a rule rests on: facts, then settings that are listed.
 
     Ids only, the ones `--withhold` takes; the values are those already in the file. A
-    variable is named in the scope the rule read it in: the env file when one was given,
-    else the Kubernetes roles the rule judges. A variable that is not set has no entry.
+    fact is named only when the file holds a value for it: a fact that is unknown reads
+    another source than the rule did (the facts only a debug information fills, when the
+    rule read the environment), or nothing at all. A variable is named in the scope the
+    rule read it in: the env file when one was given, else the Kubernetes roles the rule
+    judges. A variable that is not set has no entry. `by_mode` adds the execution mode,
+    for a rule that does not apply because of it.
     """
+    known = {fact["id"] for fact in facts if fact["provenance"] != "unknown"}
     listed = {setting_id(setting) for setting in settings}
     scopes = [scope for scope in info.scopes if (scope == "instance") == (snapshot.env is not None)]
-    ids = [f"setting:{scope}:{name}" for name in info.settings for scope in scopes]
-    return list(info.facts) + [item for item in ids if item in listed]
+    mode = by_mode and "EXECUTIONS_MODE" not in info.settings
+    names = info.settings + (("EXECUTIONS_MODE",) if mode else ())
+    ids = [f"setting:{scope}:{name}" for name in names for scope in scopes]
+    wanted = info.facts + (("executions.mode",) if by_mode and "executions.mode" not in info.facts else ())
+    return [item for item in wanted if item in known] + [item for item in ids if item in listed]
 
 
-def _check_entries(checks: list, snapshot: Snapshot, failed: tuple, settings: list) -> list:
+# The reasons of a check that could not decide after it read a value: such an entry rests
+# on what it read, like one that decided. The other reasons read nothing.
+READ_REASONS = ("not_stated", "value_unreadable", "sources_disagree")
+
+
+def _check_entries(checks: list, snapshot: Snapshot, failed: tuple, settings: list, facts: list) -> list:
     """`check.checks`: one entry per declared rule, in rule order. Every text is a literal of the rule."""
     entries = []
     for check in checks:
@@ -856,9 +869,8 @@ def _check_entries(checks: list, snapshot: Snapshot, failed: tuple, settings: li
         if check.outcome == "finding":
             found = check.finding
             entry.update(severity=found.severity, text=found.title, impact=found.impact, remedy=found.recommendation)
-            entry["rests_on"] = rests_on(info, snapshot, settings)
         elif check.outcome == "passed":
-            entry.update(basis=check.basis, text=info.passed, rests_on=rests_on(info, snapshot, settings))
+            entry.update(basis=check.basis, text=info.passed)
         else:
             entry["text"] = info.subject
             if check.outcome == "not_assessed":
@@ -868,7 +880,10 @@ def _check_entries(checks: list, snapshot: Snapshot, failed: tuple, settings: li
                 if reason == "source_missing" and asked:
                     reason, needs = "source_failed", asked
                 entry.update(reason=reason, needs=needs)
-            entry["rests_on"] = []
+        # What made a rule not apply is named too, so that a withheld fact or setting
+        # names every check that tells something about it.
+        read = check.outcome != "not_assessed" or check.reason in READ_REASONS
+        entry["rests_on"] = rests_on(info, snapshot, settings, facts, check.by_mode) if read else []
         entries.append(entry)
     return entries
 
@@ -920,7 +935,7 @@ def build_profile(
     }
     if checks is not None:
         # The fixed texts of the rules, never the evidence. See docs/rules.md.
-        profile["check"]["checks"] = _check_entries(checks, snapshot, failed, settings)
+        profile["check"]["checks"] = _check_entries(checks, snapshot, failed, settings, profile["facts"])
     return apply_withholding(profile, withhold)
 
 
@@ -1252,6 +1267,7 @@ REASON_LABELS = {
     "source_failed": "a source that states it was asked for and could not be collected",
     "not_stated": "a source was read and does not say",
     "value_unreadable": "a source holds the value, which could not be read",
+    "sources_disagree": "two sources given in the run disagree on what it reads",
     "rule_error": "the rule failed to run",
 }
 NOT_KNOWN = "not known to this version of n8n-healthcheck"
@@ -1629,6 +1645,7 @@ def _sheet_checks(entries: list, partial: bool, facts: dict, settings: dict, sco
     for reason, heading in (
         ("not_stated", "A source was read and does not say"),
         ("value_unreadable", "The value could not be read (a Secret, a file, a redacted value or an incomplete environment)"),
+        ("sources_disagree", "Two sources given in the run disagree on what the check reads"),
         ("rule_error", "The rule failed to run, which is a bug in n8n-healthcheck"),
     ):
         for entry in not_assessed:

@@ -285,6 +285,33 @@ for the operator.
   rules, for snapshots with different values: no text depends on the instance.
 - The collectors do not change. Nothing new is read from the instance.
 
+## Amendments after review
+
+Decided by the owner on 2026-11-25, after the review of the build. They follow from the
+first anti-goal: "works well" is never said of something the tool did not positively
+verify.
+
+- **A passed sentence states the condition the rule checked, and nothing stronger.**
+  "Fewer than 100 jobs wait in the queue", not "the queue has no backlog"; "the variable
+  is set to", not "every process does". Where a rule compares against a short list, or
+  reads a setting whose effect depends on something it does not read, the sentence says
+  so. SEC-002 does not pass on external runners when `N8N_RUNNERS_ENABLED` is false.
+- **Two sources that disagree never give a pass.** The order between sources (the env
+  file describes every process, a probe wins over the debug information) decides when a
+  finding is raised, and is unchanged. When a rule has no finding and two sources given
+  in the run disagree on what it reads, the outcome is `not_assessed` with the new reason
+  `sources_disagree`. `not_stated` was not reused: it says that a source does not say,
+  which is not true here. The same holds for "does not apply": a queue-mode check is
+  not left out as not applying when one source says regular and another says queue.
+  What is compared is in `docs/rules.md`, "When two sources disagree".
+- **`rests_on` on more outcomes.** A check that does not apply lists what made it so,
+  and a check that could not decide after reading a value lists what it read, so that
+  a withheld fact or setting names every check that tells something about it.
+- **`rests_on` names a fact only when the file holds a value for it**, which is when the
+  rule and the fact read the same source.
+
+Findings, scores and the health report are unchanged by these.
+
 ## Left to the builder
 
 - How rules state their outcome, and the internal names.

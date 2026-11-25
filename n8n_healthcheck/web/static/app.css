@@ -1026,7 +1026,7 @@ p.pdetail { margin-top: var(--space-1); }
 .prested { color: var(--text); }
 
 .pfindings { margin-top: var(--space-3); border-bottom: 1px solid var(--border); }
-.pfindings li { padding-block: var(--space-3); border-top: 1px solid var(--border); }
+.pfindings li { padding-block: var(--space-3); border-top: 1px solid var(--border); overflow-wrap: anywhere; }
 
 @media (max-width: 30rem) {
   .ptable th, .ptable td { padding: var(--space-2) var(--space-3); }

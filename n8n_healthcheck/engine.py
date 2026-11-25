@@ -47,7 +47,7 @@ def assess(snapshot: Snapshot, rules: list[Rule]) -> list[Check]:
                     or not all(need in SOURCE_IDS for need in result.needs)
                 ):
                     raise ValueError("returned an Outcome that is not valid")
-                check = Check(info, result.outcome, None, result.basis, result.reason, tuple(result.needs))
+                check = Check(info, result.outcome, None, result.basis, result.reason, tuple(result.needs), result.by_mode)
             elif result is None and info is None:
                 check = Check(None, "not_applicable")
             else:
