@@ -125,7 +125,7 @@ To read a profile someone sent you, use "Open a profile" on the start page. The 
 The person who supports an instance often receives only the profile. `--show-sheet FILE` turns it into an outline for the call with whoever runs the instance:
 
 1. the run and the environment in brief (version, mode, replicas, database, usage numbers);
-2. **what works well**: the checks that read what they need and found it good ("by n8n's default" when the variable is simply not set). Each sentence states the condition the rule checked and nothing stronger, and a check never passes when two sources given in the same run disagree on what it reads: it is then listed as not assessed;
+2. **what works well**: the checks that read what they need and found it good ("by n8n's default" when the variable is simply not set). Each sentence states the condition the rule checked and nothing stronger, and a check never passes when two sources given in the same run disagree on what it reads: it is then listed as not assessed. A variable that is not set counts as its n8n default there, so an env file given together with Kubernetes has to match the containers variable by variable;
 3. **what does not**: the findings, most severe first, with their impact and the values of the profile they rest on;
 4. **what to improve**: the remedy of each finding;
 5. **not assessed**: the checks that could not decide, grouped by what would have to be provided ("With Postgres: ..."), and those that do not apply;

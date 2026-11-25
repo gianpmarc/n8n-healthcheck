@@ -134,8 +134,11 @@ class Outcome:
     basis: str = ""  # passed: one of BASES
     reason: str = ""  # not_assessed: one of NOT_ASSESSED_REASONS
     needs: tuple = ()  # not_assessed, source_missing: the SOURCE_IDS of which any one would let the rule decide
-    # not_applicable: True when it is the execution mode that says so, whether or not the
-    # mode is among the rule's own facts and settings (see profile.rests_on()).
+    # True when the rule read the execution mode to state this, whether or not the mode is
+    # among its own facts and settings (see profile.rests_on()): a rule that does not apply
+    # because of the mode, the not_assessed that replaces it when another source of the run
+    # says otherwise, and a queue rule that lacks its source on an instance not known to be
+    # in regular mode.
     by_mode: bool = False
 
 

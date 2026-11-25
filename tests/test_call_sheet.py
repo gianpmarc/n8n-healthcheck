@@ -33,11 +33,19 @@ for _rule in ALL_RULES:
         LITERALS |= {_variant.title, _variant.impact, _variant.remedy}
 
 # Queue mode on Postgres, with findings, passed checks, checks that lack a source and one that does not apply.
+# The env file describes every process, and the containers of Kubernetes are set as it says:
+# a container that says otherwise, or leaves a variable to its default, would be a second
+# source that disagrees (see test_outcomes).
+RICH_ENV = {**QUEUE, "N8N_SECURE_COOKIE": "false", "N8N_RUNNERS_MODE": "external", "N8N_CONCURRENCY_PRODUCTION_LIMIT": "10"}
 RICH = Snapshot(
     health={"healthz": True, "readiness": True},
-    env={**QUEUE, "N8N_SECURE_COOKIE": "false", "N8N_RUNNERS_MODE": "external", "N8N_CONCURRENCY_PRODUCTION_LIMIT": "10"},
+    env=dict(RICH_ENV),
     redis={"version": "7.2.4", "maxmemory_policy": "allkeys-lru", "maxmemory_bytes": 1000, "used_memory_bytes": 100, "waiting_jobs": 0, "active_jobs": 1},
-    kubernetes=healthy_kube(),
+    kubernetes=kube(
+        ("n8n-main", 1, container(env=dict(RICH_ENV))),
+        ("n8n-worker", 2, container(command=["worker"], env=dict(RICH_ENV))),
+        ("n8n-webhook", 2, container(command=["n8n", "webhook"], env=dict(RICH_ENV))),
+    ),
 )
 
 
@@ -87,7 +95,8 @@ class ChecksTest(unittest.TestCase):
                 "rule_id": "SEC-001", "area": "security", "outcome": "finding", "severity": "warning",
                 "text": "Session cookie is not restricted to HTTPS",
                 "impact": ALL_RULES[-3].info.variants[0].impact, "remedy": ALL_RULES[-3].info.variants[0].remedy,
-                "rests_on": ["setting:instance:N8N_SECURE_COOKIE"],
+                # The env file, and the main container it was compared with.
+                "rests_on": ["setting:instance:N8N_SECURE_COOKIE", "setting:main:N8N_SECURE_COOKIE"],
             },
         )  # fmt: skip
         self.assertEqual(
@@ -95,7 +104,7 @@ class ChecksTest(unittest.TestCase):
             {
                 "rule_id": "REL-001", "area": "reliability", "outcome": "passed", "basis": "read",
                 "text": "Queue mode runs on a database that every process can share, not on SQLite.",
-                "rests_on": ["executions.mode", "database.engine", "setting:instance:EXECUTIONS_MODE", "setting:instance:DB_TYPE"],
+                "rests_on": ["executions.mode", "database.engine", "setting:instance:EXECUTIONS_MODE", "setting:main:EXECUTIONS_MODE", "setting:instance:DB_TYPE", "setting:main:DB_TYPE"],
             },
         )  # fmt: skip
         self.assertEqual(got["PERF-001"]["basis"], "default")
@@ -103,7 +112,10 @@ class ChecksTest(unittest.TestCase):
             got["SCAL-001"],
             {"rule_id": "SCAL-001", "area": "scalability", "outcome": "not_applicable",
              # What made it not apply: the mode, and what the rule read on the way.
-             "rests_on": ["executions.mode", "database.engine", "setting:instance:EXECUTIONS_MODE", "setting:instance:DB_TYPE", "setting:instance:N8N_CONCURRENCY_PRODUCTION_LIMIT"],
+             "rests_on": [
+                 "executions.mode", "database.engine", "setting:instance:EXECUTIONS_MODE", "setting:main:EXECUTIONS_MODE", "setting:instance:DB_TYPE",
+                 "setting:main:DB_TYPE", "setting:instance:N8N_CONCURRENCY_PRODUCTION_LIMIT", "setting:main:N8N_CONCURRENCY_PRODUCTION_LIMIT",
+             ],
              "text": "Limit on concurrent production executions in regular mode"},
         )  # fmt: skip
         self.assertEqual(
@@ -173,8 +185,8 @@ class ChecksTest(unittest.TestCase):
             for entry in made["check"]["checks"]:
                 self.assertLessEqual(set(entry["rests_on"]), ids, entry["rule_id"])
                 self.assertEqual(len(set(entry["rests_on"])), len(entry["rests_on"]), entry["rule_id"])
-                # A check that read nothing rests on nothing.
-                if entry.get("reason") in ("source_missing", "source_failed", "rule_error"):
+                # A check that lacks every source it reads rests on nothing: no entry of the file is about it.
+                if entry.get("reason") == "source_missing" and snapshot.env is None and snapshot.kubernetes is None and snapshot.debug_info is None:
                     self.assertEqual(entry["rests_on"], [])
             # Every id is one `--withhold` takes.
             profile.apply_withholding(made, {item for entry in made["check"]["checks"] for item in entry["rests_on"]})
@@ -188,10 +200,52 @@ class ChecksTest(unittest.TestCase):
         self.assertEqual(got["SEC-002"]["outcome"], "passed")
         self.assertEqual(
             got["SEC-002"]["rests_on"],
-            ["executions.mode", "setting:main:N8N_RUNNERS_MODE", "setting:worker:N8N_RUNNERS_MODE", "setting:main:EXECUTIONS_MODE"],
+            # The version: external passes without N8N_RUNNERS_ENABLED only on n8n 2.x or later. DB_TYPE: the severity of the finding.
+            ["executions.mode", "n8n.version", "setting:main:N8N_RUNNERS_MODE", "setting:worker:N8N_RUNNERS_MODE", "setting:main:EXECUTIONS_MODE", "setting:main:DB_TYPE"],
         )
         # A rule that judges the webhook containers too names no fact about main and worker only.
         self.assertEqual((got["REL-007"]["outcome"], got["REL-007"]["rests_on"]), ("passed", []))
+
+    def test_a_withheld_setting_of_a_container_names_the_checks_that_tell_something_about_it(self):
+        # The three inputs of the second review: an env file, and a container it is compared with.
+        limit = "N8N_CONCURRENCY_PRODUCTION_LIMIT"
+        for env, containers, withheld, named in (
+            (
+                {"EXECUTIONS_MODE": "queue", "DB_TYPE": "postgresdb", "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": "true"},
+                [("main", 1, container(env={"EXECUTIONS_MODE": "regular"}))],
+                "setting:main:EXECUTIONS_MODE",
+                {"SCAL-001", "SCAL-003", "REL-001", "PERF-002"},
+            ),
+            (
+                {"EXECUTIONS_MODE": "queue", limit: "10"},
+                [("worker", 1, container(command=["worker"], env={limit: "2"}))],
+                f"setting:worker:{limit}",
+                {"SCAL-004"},
+            ),
+            ({"DB_TYPE": "postgresdb"}, [("main", 1, container(env={"N8N_SECURE_COOKIE": "false"}))], "setting:main:N8N_SECURE_COOKIE", {"SEC-001"}),
+        ):
+            with self.subTest(withheld=withheld):
+                made = built(Snapshot(env=env, kubernetes=kube(*containers)), failed=(), withhold=(withheld,))
+                self.assertLessEqual(named, set(profile.rested_on_withheld(made).get(withheld, ())))
+                for rule_id in named:
+                    self.assertEqual(entries(made)[rule_id]["reason"], "sources_disagree", rule_id)
+                self.assertIn(f"- `{withheld}`: ", profile.render_markdown(made))
+        # A pass by default that the setting of a container bears on: it says the container agrees.
+        made = built(Snapshot(env={"DB_TYPE": "postgresdb"}, kubernetes=kube(("main", 1, container(env={"DB_TYPE": "postgresdb", "N8N_SECURE_COOKIE": "true"})))), failed=())
+        self.assertEqual((entries(made)["SEC-001"]["basis"], entries(made)["SEC-001"]["rests_on"]), ("default", ["setting:main:N8N_SECURE_COOKIE"]))
+        # Without an env file nothing changes: the roles the rule judges, and main for the mode.
+        alone = entries(built(Snapshot(kubernetes=kube(("main", 1, container(env=dict(QUEUE))), ("worker", 2, container(command=["worker"], env={limit: "10"})))), failed=()))
+        self.assertEqual(alone["SCAL-004"]["rests_on"], ["worker.concurrency", "executions.mode", "setting:main:EXECUTIONS_MODE", f"setting:worker:{limit}"])
+
+    def test_a_check_that_lacks_a_source_names_what_it_read_on_the_way(self):
+        # Redis was not given: on an instance in regular mode the check would not apply, so the entry says the mode is not regular.
+        got = entries(built(Snapshot(env=dict(QUEUE)), failed=()))
+        self.assertEqual((got["REL-002"]["reason"], got["REL-002"]["rests_on"]), ("source_missing", ["executions.mode", "setting:instance:EXECUTIONS_MODE"]))
+        # The worker flag is in Kubernetes only: the mode and the limit of the env file were read first.
+        self.assertEqual((got["SCAL-004"]["reason"], got["SCAL-004"]["rests_on"]), ("source_missing", ["executions.mode", "setting:instance:EXECUTIONS_MODE"]))
+        self.assertEqual(profile.rested_on_withheld(built(Snapshot(env=dict(QUEUE)), failed=(), withhold=("setting:instance:EXECUTIONS_MODE",)))["setting:instance:EXECUTIONS_MODE"][:3], ["SCAL-001", "SCAL-002", "SCAL-003"])
+        # Nothing given: nothing read, nothing named.
+        self.assertEqual({tuple(entry["rests_on"]) for entry in built(Snapshot(), failed=())["check"]["checks"]}, {()})
 
     def test_rests_on_names_a_fact_only_when_the_rule_read_the_source_the_fact_reads(self):
         # Three facts are filled by a debug information only; the rules that rest on them read the environment too.
@@ -337,15 +391,16 @@ class WithholdCheckTest(unittest.TestCase):
             self.assertEqual(profile.apply_withholding(built(), ids)["check"], {"withheld": True})
 
     def test_nothing_is_withheld_automatically_and_the_review_names_what_rests_on_a_withheld_entry(self):
-        blanked = built(withhold=("executions.mode", "setting:instance:DB_TYPE", "n8n.version"))
+        blanked = built(withhold=("executions.mode", "setting:instance:DB_TYPE", "main.replicas"))
         self.assertNotIn("withheld", [entry["outcome"] for entry in blanked["check"]["checks"]])
         rested = profile.rested_on_withheld(blanked)
-        self.assertEqual(list(rested), ["executions.mode", "setting:instance:DB_TYPE"])  # nothing rests on n8n.version
-        self.assertEqual(rested["setting:instance:DB_TYPE"], ["SCAL-001", "REL-001"])  # SCAL-001 does not apply in queue mode and read it
+        self.assertEqual(list(rested), ["executions.mode", "setting:instance:DB_TYPE"])  # nothing rests on main.replicas
+        # SCAL-001 does not apply in queue mode and read it; for SEC-002 it decides the severity of a finding.
+        self.assertEqual(rested["setting:instance:DB_TYPE"], ["SCAL-001", "REL-001", "SEC-002"])
         self.assertIn("REL-001", rested["executions.mode"])
         shown = profile.render_markdown(blanked)
         self.assertIn("Withheld entries that a check in the file still rests on:", shown)
-        self.assertIn("- `setting:instance:DB_TYPE`: SCAL-001, REL-001\n", shown)
+        self.assertIn("- `setting:instance:DB_TYPE`: SCAL-001, REL-001, SEC-002\n", shown)
         self.assertIn("`--withhold check:RULE-ID`", shown)
         # Once those checks are withheld too, nothing rests on the entry any more.
         gone = profile.apply_withholding(blanked, [f"check:{rule_id}" for rules in rested.values() for rule_id in rules])
@@ -622,9 +677,14 @@ class ZeroLeakTest(unittest.TestCase):
         self.assertIn("`setting:instance:N8N_SECURE_COOKIE` = false", sheet)
         self.assertIn("`queue.maxmemory_policy` = allkeys-lru", sheet)
         self.assertIn("- **Execution mode:** queue (measured)", sheet)
-        blanked = profile.apply_withholding(made, ["setting:instance:N8N_SECURE_COOKIE", "queue.maxmemory_policy", "executions.mode", "worker.replicas"])
+        # The same variable on the main container is an entry of its own, which the check names as well.
+        self.assertIn("`setting:main:N8N_SECURE_COOKIE` = false", sheet)
+        blanked = profile.apply_withholding(
+            made, ["setting:instance:N8N_SECURE_COOKIE", "setting:main:N8N_SECURE_COOKIE", "queue.maxmemory_policy", "executions.mode", "worker.replicas"]
+        )
         sheet = profile.render_sheet(blanked, TODAY)
         self.assertIn("`setting:instance:N8N_SECURE_COOKIE` withheld", sheet)
+        self.assertIn("`setting:main:N8N_SECURE_COOKIE` withheld", sheet)
         self.assertIn("`queue.maxmemory_policy` withheld", sheet)
         self.assertIn("- **Execution mode:** withheld", sheet)
         self.assertIn("- **Worker replicas:** withheld", sheet)

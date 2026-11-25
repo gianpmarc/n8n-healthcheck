@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from .. import debug_info
 from ..models import Finding, Outcome, Snapshot, Variant
 from ._helpers import (
@@ -45,7 +47,8 @@ def _no_redis(snapshot: Snapshot) -> Outcome:
     env = with_debug_info(snapshot, "EXECUTIONS_MODE")
     if env is not None and queue_only(env) is NOT_QUEUE:
         return NOT_QUEUE
-    return source_missing("redis")
+    # With an environment the mode was read on the way, and the entry of the file names it.
+    return dataclasses.replace(source_missing("redis"), by_mode=env is not None)
 
 
 QUEUE_ON_SQLITE = Variant(

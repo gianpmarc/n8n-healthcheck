@@ -312,6 +312,36 @@ verify.
 
 Findings, scores and the health report are unchanged by these.
 
+### After the second review
+
+Decided by the owner on 2026-11-25. The second amendment above was held only where both
+sources set the variable; these close it.
+
+- **Not set states the default, on either side.** Between an env file and a Kubernetes
+  container read in full, a variable that is not set counts as its n8n default, as it
+  already did against the debug information. A container that cannot be told for the
+  variable (a Secret, a `_FILE` variable, an environment read in part) cannot be said to
+  agree with the file: the check is then `not_assessed` for the reason
+  `value_unreadable`. That reason was chosen over `sources_disagree` because nothing was
+  read that differs: a value could not be read, which is what the reason says.
+- **Two more comparisons.** PERF-003 against the binary mode the debug information
+  states. MAINT-003 against the n8n version read from `/metrics` or stated by a debug
+  information, when it differs from the image tags.
+- **SEC-002 and the version.** With `N8N_RUNNERS_MODE=external` and `N8N_RUNNERS_ENABLED`
+  not set, the check passes only when the n8n version read is 2.x or later; on 1.x, or
+  with no version, it is `not_stated`. The sentence says "not set to false". Nobody
+  checked n8n itself for its default on 1.x, nor whether 2.x still reads the variable.
+- **`rests_on` names the container settings that were compared**, and is written for
+  every outcome: a check that lacks a source read values on the way (the mode, for a
+  queue check without Redis), and the entry tells something about them.
+- **SCAL-002** does not pass on worker Deployments when the env file or the debug
+  information says the instance is in regular mode.
+- **A property test** (`tests/test_sources_property.py`) holds the two rules above over
+  generated snapshots, since the same class of error came back twice in cases nobody had
+  listed. What it covers is in `docs/rules.md`.
+
+Findings, scores and the health report are unchanged by these too.
+
 ## Left to the builder
 
 - How rules state their outcome, and the internal names.

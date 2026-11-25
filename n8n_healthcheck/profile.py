@@ -22,6 +22,7 @@ from .rules._helpers import (
     VALUE_FROM,
     Env,
     command_words,
+    compared_scopes,
     concurrency_flag,
     container_env,
     env_flag,
@@ -838,24 +839,24 @@ def rests_on(info, snapshot: Snapshot, settings: list, facts: list, by_mode: boo
     Ids only, the ones `--withhold` takes; the values are those already in the file. A
     fact is named only when the file holds a value for it: a fact that is unknown reads
     another source than the rule did (the facts only a debug information fills, when the
-    rule read the environment), or nothing at all. A variable is named in the scope the
-    rule read it in: the env file when one was given, else the Kubernetes roles the rule
-    judges. A variable that is not set has no entry. `by_mode` adds the execution mode,
-    for a rule that does not apply because of it.
+    rule read the environment), or nothing at all. A variable is named in every scope the
+    rule read it in: the env file when one was given, and the Kubernetes roles the rule
+    judges, which next to an env file are the containers it is compared with (see
+    rules/_helpers.py, against_sources()). A variable that is not set has no entry.
+    `by_mode` adds the execution mode, for a rule that does not apply because of it.
     """
     known = {fact["id"] for fact in facts if fact["provenance"] != "unknown"}
     listed = {setting_id(setting) for setting in settings}
-    scopes = [scope for scope in info.scopes if (scope == "instance") == (snapshot.env is not None)]
     mode = by_mode and "EXECUTIONS_MODE" not in info.settings
     names = info.settings + (("EXECUTIONS_MODE",) if mode else ())
-    ids = [f"setting:{scope}:{name}" for name in names for scope in scopes]
+    ids = [
+        f"setting:{scope}:{name}"
+        for name in names
+        for scope in compared_scopes(name, info.scopes)
+        if scope != "instance" or snapshot.env is not None
+    ]
     wanted = info.facts + (("executions.mode",) if by_mode and "executions.mode" not in info.facts else ())
     return [item for item in wanted if item in known] + [item for item in ids if item in listed]
-
-
-# The reasons of a check that could not decide after it read a value: such an entry rests
-# on what it read, like one that decided. The other reasons read nothing.
-READ_REASONS = ("not_stated", "value_unreadable", "sources_disagree")
 
 
 def _check_entries(checks: list, snapshot: Snapshot, failed: tuple, settings: list, facts: list) -> list:
@@ -880,10 +881,11 @@ def _check_entries(checks: list, snapshot: Snapshot, failed: tuple, settings: li
                 if reason == "source_missing" and asked:
                     reason, needs = "source_failed", asked
                 entry.update(reason=reason, needs=needs)
-        # What made a rule not apply is named too, so that a withheld fact or setting
-        # names every check that tells something about it.
-        read = check.outcome != "not_assessed" or check.reason in READ_REASONS
-        entry["rests_on"] = rests_on(info, snapshot, settings, facts, check.by_mode) if read else []
+        # Whatever the outcome, so that a withheld fact or setting names every check that
+        # tells something about it: one that does not apply, and one that lacks a source,
+        # read values on the way there. Only a rule that failed to run read nothing.
+        raised = check.reason == "rule_error"
+        entry["rests_on"] = [] if raised else rests_on(info, snapshot, settings, facts, check.by_mode)
         entries.append(entry)
     return entries
 

@@ -15,11 +15,13 @@ from ._helpers import (
     image_versions,
     is_queue_mode,
     n8n_containers,
+    release,
     rule,
     shown,
     source_missing,
     undecided,
     unknown,
+    versions_stated,
 )
 
 # Tags that are moved to a new release by their publisher, so two pulls of the same
@@ -147,10 +149,10 @@ VERSION_SKEW = Variant(
     subject="n8n version of every process",
     passed=(
         "Every n8n process that was read is on the same version: the image tags in Kubernetes, "
-        "or the instances that n8n lists."
+        "or the instances that n8n lists. No other version was read for the instance."
     ),
     variants=(VERSION_SKEW,),
-    facts=("cluster.versions_aligned",),
+    facts=("cluster.versions_aligned", "n8n.version"),
 )
 def version_skew(snapshot: Snapshot) -> Finding | Outcome:
     by_tag = image_versions(snapshot.kubernetes)
@@ -173,11 +175,12 @@ def version_skew(snapshot: Snapshot) -> Finding | Outcome:
         # One version among the images: the same on every process only when each names one
         # (a digest or a custom tag may well be another release).
         named = [image_version(c.get("image")) is not None for _, c, _ in n8n_containers(snapshot.kubernetes or {})]
-        if from_images and all(named):
-            # The images name one version while n8n itself lists other ones.
-            listed = ((debug_info.of(snapshot) or {}).get("cluster") or {}).get("versions") or []
-            return SOURCES_DISAGREE if listed and set(listed) != set(by_tag) else PASSED
-        return PASSED if not from_images else NOT_STATED
+        if from_images and not all(named):
+            return NOT_STATED
+        # One version among the images, or among the instances n8n lists, while /metrics
+        # or the debug information states another one for the instance.
+        (version,) = by_tag
+        return SOURCES_DISAGREE if versions_stated(snapshot) - {release(version)} else PASSED
     return version_skew.info.finding(VERSION_SKEW, "warning", evidence)
 
 

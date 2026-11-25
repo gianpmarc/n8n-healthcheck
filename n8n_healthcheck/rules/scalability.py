@@ -12,6 +12,7 @@ from ._helpers import (
     PASSED_BY_DEFAULT,
     SOURCES_DISAGREE,
     UNREADABLE,
+    _same,
     command_words,
     concurrency_flag,
     container_env,
@@ -27,6 +28,7 @@ from ._helpers import (
     rule,
     shown,
     source_missing,
+    told,
     undecided,
     unknown,
     with_debug_info,
@@ -143,6 +145,7 @@ ONE_WORKER = Variant(
     ),
     variants=(ONE_WORKER,),
     facts=("worker.replicas", "executions.mode"),
+    settings=("EXECUTIONS_MODE",),
 )
 def single_worker(snapshot: Snapshot) -> Finding | Outcome:
     info = single_worker.info
@@ -160,7 +163,12 @@ def single_worker(snapshot: Snapshot) -> Finding | Outcome:
             # Kubernetes asks for enough replicas while n8n itself lists fewer workers.
             listed = (((debug_info.of(snapshot) or {}).get("cluster") or {}).get("instances") or {}).get("worker")
             fewer = isinstance(listed, int) and not isinstance(listed, bool) and 1 <= listed < MIN_WORKER_REPLICAS
-            return SOURCES_DISAGREE if fewer else PASSED
+            # Workers run in queue mode only, while the env file, which describes every
+            # process, or the debug information says the instance is in regular mode.
+            modes = [told(snapshot.env, "EXECUTIONS_MODE")] if snapshot.env is not None else []
+            modes.append((debug_info.of(snapshot) or {}).get("execution_mode"))
+            regular = any(mode is not None and not _same(mode, "queue") for mode in modes)
+            return SOURCES_DISAGREE if fewer or regular else PASSED
         names = ", ".join(f"{name} (replicas: {count})" for name, count in workers.items())
         evidence = f"Worker Deployments: {names}; {total} worker replica in total."
     else:

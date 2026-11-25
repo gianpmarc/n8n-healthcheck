@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import math
 import re
@@ -63,12 +64,13 @@ def rule(rule_id: str, area: str, *, subject: str, passed: str, variants=(), fac
         @functools.wraps(function)
         def assess(snapshot: Snapshot):
             result = function(snapshot)
-            if (
-                isinstance(result, Outcome)
-                and result.outcome in ("passed", "not_applicable")
-                and sources_disagree(snapshot, settings, scopes)
-            ):
-                return SOURCES_DISAGREE
+            if isinstance(result, Outcome) and result.outcome in ("passed", "not_applicable"):
+                # A rule that does not apply because of the mode read the mode, declared or not.
+                mode = result.by_mode and "EXECUTIONS_MODE" not in settings
+                names = tuple(settings) + (("EXECUTIONS_MODE",) if mode else ())
+                why = against_sources(snapshot, names, tuple(scopes))
+                # It still read the mode: the entry of the file names it (profile.rests_on()).
+                return dataclasses.replace(why, by_mode=result.by_mode) if why is not None else result
             return result
 
         finding_or_none.assess = assess
@@ -166,12 +168,15 @@ def debug_info_env(section: dict) -> dict:
         "EXECUTIONS_DATA_SAVE_ON_PROGRESS": section.get("save_progress"),
         "N8N_SECURE_COOKIE": False if insecure.get("secure_cookie") else None,
         "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES": False if insecure.get("file_access_blocked") else None,
+        "N8N_DEFAULT_BINARY_DATA_MODE": section.get("binary_mode"),
     }
     return {name: str(value).lower() for name, value in values.items() if value is not None}
 
 
-# The n8n default of the variables a debug information states, as debug_info_env() writes
-# them. The two security variables are left out: the text states them only as `false`.
+# The n8n default of the variables the rules read, written as debug_info_env() writes them.
+# A variable that is not set in an environment read in full states its default. The ones
+# left out have no default that holds on every version (the binary data mode, whether
+# the task runners are on): not set, they state only that they are not set.
 DEFAULTS = {
     "EXECUTIONS_MODE": "regular",
     "DB_TYPE": "sqlite",
@@ -179,7 +184,13 @@ DEFAULTS = {
     "N8N_CONCURRENCY_PRODUCTION_LIMIT": "-1",
     "EXECUTIONS_DATA_PRUNE": "true",
     "EXECUTIONS_DATA_SAVE_ON_PROGRESS": "false",
+    "N8N_SECURE_COOKIE": "true",
+    "N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES": "true",
+    "N8N_RUNNERS_MODE": "internal",
+    "N8N_METRICS": "false",
+    "OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS": "false",
 }
+NOT_SET = "<not set>"
 
 
 def _same(one, other) -> bool:
@@ -196,44 +207,92 @@ def _same(one, other) -> bool:
         return False
 
 
-def sources_disagree(snapshot: Snapshot, names: tuple, scopes: tuple) -> bool:
-    """True when two sources given in the run state different values for one of `names`.
+def told(env: dict, name: str, complete: bool = True) -> Optional[str]:
+    """What one environment states for `name`, or None when it cannot be told.
 
-    Two comparisons, each between sources that describe the same process. The env file
-    describes every process: it is compared with each Kubernetes container of the roles
-    in `scopes`, where both set the variable to a readable value. The debug information
-    reports the effective values of the main process: it is compared with the env file
-    and with each main container, where a variable that is not set in an environment
-    read in full counts as its n8n default. A value that cannot be read (a Secret, a
-    file, a redacted value, an environment read in part) is compared with nothing.
+    Its value when it is set and readable. Not set in an environment read in full: its
+    n8n default, or NOT_SET for a variable without one. It cannot be told when the value
+    is not readable (a Secret, a redacted value), when it is given through `<NAME>_FILE`,
+    or when it is not among the variables read of an environment read in part.
     """
+    if name in env:
+        return None if env[name] in (VALUE_FROM, REDACTED) else env[name]
+    if name + "_FILE" in env or not complete:
+        return None
+    return DEFAULTS.get(name, NOT_SET)
 
-    def readable(env: dict, name: str) -> bool:
-        return name in env and env[name] not in (VALUE_FROM, REDACTED)
 
+def compared_scopes(name: str, scopes: tuple) -> tuple:
+    """The scopes where a rule's variable is read: its own, and for the execution mode always main."""
+    return scopes + (("main",) if name == "EXECUTIONS_MODE" and "main" not in scopes else ())
+
+
+def against_sources(snapshot: Snapshot, names: tuple, scopes: tuple) -> Optional[Outcome]:
+    """Why a rule cannot pass, or not apply, on `names` given every source of the run; None when it can.
+
+    Two comparisons, each between sources that describe the same process, on what each
+    states (see told()): a variable that is not set states its n8n default. The env file
+    describes every process: it is compared with each Kubernetes container of the roles
+    in `scopes`. The debug information reports the effective values of the main process:
+    it is compared with the env file and with each main container, for a variable the
+    rule reads on main. Two containers are two
+    processes, not two sources, and are not compared with each other.
+
+    SOURCES_DISAGREE when two of them state different things. UNREADABLE when none does
+    and a container next to an env file cannot be told for a variable: the file says how
+    every process is set, and that container cannot be said to agree.
+    """
     containers = [
         (container.get("env") or {}, container.get("env_complete") is True, role)
         for _, container, role in n8n_containers(snapshot.kubernetes or {})
     ]
     text = debug_info_env(debug_info.of(snapshot) or {})
+    untold = False
     for name in names:
-        if snapshot.env is not None and readable(snapshot.env, name):
-            for env, _complete, role in containers:
-                if role in scopes and readable(env, name) and not _same(env[name], snapshot.env[name]):
-                    return True
-        if name not in text:
+        roles = compared_scopes(name, scopes)
+        file_says = told(snapshot.env, name) if snapshot.env is not None else None
+        if file_says is not None:
+            for env, complete, role in containers:
+                if role not in roles:
+                    continue
+                says = told(env, name, complete)
+                if says is None:
+                    untold = True
+                elif not _same(says, file_says):
+                    return SOURCES_DISAGREE
+        # The text describes the main process: it says nothing to a rule that reads the
+        # variable on the workers only.
+        if name not in text or "main" not in roles:
             continue
         mains = [(env, complete) for env, complete, role in containers if role == "main"]
         for env, complete in ([(snapshot.env, True)] if snapshot.env is not None else []) + mains:
-            if readable(env, name):
-                value = env[name]
-            elif name not in env and name + "_FILE" not in env and complete and name in DEFAULTS:
-                value = DEFAULTS[name]
-            else:
-                continue
-            if not _same(value, text[name]):
-                return True
-    return False
+            says = told(env, name, complete)
+            # Not set and without a default: the effective value the text reports cannot contradict it.
+            if says not in (None, NOT_SET) and not _same(says, text[name]):
+                return SOURCES_DISAGREE
+    return UNREADABLE if untold else None
+
+
+def n8n_major(snapshot: Snapshot) -> Optional[int]:
+    """The major version of n8n, read as the fact `n8n.version` of the profile reads it; None when it is not known."""
+    from .. import profile  # here, not at the top: profile imports this module
+
+    value = dict(profile.CATALOGUE)["n8n.version"](snapshot, ())["value"]
+    match = re.match(r"\d+", value) if isinstance(value, str) else None
+    return int(match.group()) if match else None
+
+
+def versions_stated(snapshot: Snapshot) -> set:
+    """The n8n versions (leading x.y.z) that /metrics and the debug information state for the instance."""
+    section = debug_info.of(snapshot) or {}
+    versions = [snapshot.n8n_version, section.get("n8n_version"), *((section.get("cluster") or {}).get("versions") or [])]
+    return {release(version) for version in versions if isinstance(version, str) and version}
+
+
+def release(version: str) -> str:
+    """The leading x.y.z of a version, so 2.40.1 and v2.40.1-build7 are one release; else the text as it is."""
+    match = _VERSION.match(version)
+    return match.group(1) if match else version
 
 
 def stated(snapshot: Snapshot, name: str) -> bool:
