@@ -374,6 +374,27 @@ class DocumentTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr[-2000:])
         self.assertIn("without a proxy configured", " ".join(DOCUMENT.split()))
 
+    def test_the_tests_reach_the_redirect_rule_the_collector_ships_not_one_of_their_own(self):
+        # Second review, N1: without_machine_proxy.py replaces the collector's opener for the test run. It
+        # builds the new one from the shipped one, so a collector that drops the redirect rule has none in
+        # the tests either, and the tests the document names for that rule fail.
+        code = (
+            "import urllib.request\n"
+            "from n8n_healthcheck.collectors import http\n"
+            "shipped = {type(h).__name__ for h in http._open.__self__.handlers}\n"
+            "if {dropped}: http._open = urllib.request.build_opener().open\n"
+            "import without_machine_proxy\n"
+            "handlers = http._open.__self__.handlers\n"
+            "print('_HttpOnlyRedirects' in shipped, any(type(h) is http._HttpOnlyRedirects for h in handlers),\n"
+            "      [h.proxies for h in handlers if isinstance(h, urllib.request.ProxyHandler)])\n"
+        )
+        proxy = "http://proxy.example.test:3128"
+        environment = {**os.environ, "PYTHONPATH": str(ROOT), "HTTP_PROXY": proxy, "http_proxy": proxy}
+        for dropped, expected in ((False, "True True []"), (True, "True False []")):
+            done = subprocess.run([sys.executable, "-c", code.replace("{dropped}", str(dropped))], cwd=TESTS, env=environment, capture_output=True, text=True, timeout=60)
+            self.assertEqual((done.returncode, done.stdout.strip()), (0, expected), done.stderr[-2000:])
+        self.assertNotIn("_HttpOnlyRedirects", (TESTS / "without_machine_proxy.py").read_text(encoding="utf-8"))
+
     def test_the_document_is_for_whoever_asked_and_names_no_internal_system(self):
         for text in (DOCUMENT, re.sub(r"<[^>]+>", "", INDEX_HTML)):
             self.assertNotIn("customer", text.lower())
