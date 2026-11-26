@@ -352,7 +352,7 @@ class PageSourceTest(unittest.TestCase):
         gate = js_function("canOpen")
         for line in (
             "if (!meta || running || checking) return false;",
-            "if (n >= 5 && !(report && report.profile)) return false;",
+            "if (n >= 5 && !(report && report.profile && reportCurrent())) return false;",
             "return n < 3 || debugChecked();",
         ):
             self.assertIn(line, gate)
@@ -1001,7 +1001,7 @@ class PageBehaviourTest(unittest.TestCase):
               edited.runs = page.sent.length;
               edited.view = page.view();
               edited.error = page.visible("e-debug") && page.$("e-debug").textContent;
-              // Checked again, the steps open again, with the report of the run before still there.
+              // Checked again, steps 3 and 4 open again. 5 and 6 do not: the report is of the text before.
               await page.pressDebug();
               await page.finishCheck(input.checked);
               return { open, edited, checks: page.sentChecks.length, again: [3, 4, 5, 6].map((n) => page.go(n)) };
@@ -1011,7 +1011,7 @@ class PageBehaviourTest(unittest.TestCase):
         self.assertEqual(got["open"], ["step-5", "step-6", "step-2"])
         self.assertEqual(got["edited"], {"shown": False, "label": "Check the text", "locked": ["step-2"] * 4, "saved": None, "files": 0, "filesAfter": 0, "runs": 1, "view": "step-2",
                                          "error": "The debug information has to be checked before a run. Press “Check the text”."})  # fmt: skip
-        self.assertEqual((got["checks"], got["again"]), (2, ["step-3", "step-4", "step-5", "step-6"]))
+        self.assertEqual((got["checks"], got["again"]), (2, ["step-3", "step-4", "step-4", "step-4"]))
 
     def test_the_notes_of_an_older_or_undated_text_are_shown_and_it_is_still_accepted(self):
         for label, text in (("no cluster section", pasted.NO_CLUSTER), ("no date", pasted.text((pasted.STAMP, "")))):
@@ -1201,6 +1201,99 @@ class PageBehaviourTest(unittest.TestCase):
             file=profile.to_json(built()), text=pasted.FULL,
         )
         self.assertEqual(got, {"during": {"view": "profile", "focus": "profile-title"}, "view": "step-3", "focus": "step-3-title", "left": 0, "kept": True})
+
+    def test_the_file_of_an_earlier_run_cannot_be_downloaded_after_the_inputs_changed(self):
+        # Review of 3148e1f, finding 1: the file the operator downloads is the one of the form as it is.
+        other = pasted.text(("n8nVersion: 3.3.0", "n8nVersion: 9.9.9"))
+        checked_other = json.dumps(web.check_debug_info(debug_info.parse(other)))
+        self.assertIn('"9.9.9"', checked_other)
+        got = run_page(
+            """async (page, input) => {
+              const state = async () => {
+                const seen = { on4: page.go(4), next: page.visible("next-4"), stale: page.visible("report-stale"), report: page.visible("view-report"),
+                               open: [5, 6].map((n) => page.go(n)) };
+                page.go(4);
+                seen.saved = (await page.download()) !== null;
+                page.$("profile-download").click();  // the button itself, whatever step is on screen
+                await page.settle();
+                seen.files = page.saved();
+                page.go(4);
+                return seen;
+              };
+              const seen = {};
+              await page.run(input.response);
+              seen.fresh = await state();
+
+              // 1. The debug information is changed and checked again, and no run follows.
+              page.go(2);
+              page.type("f-debug", input.other);
+              await page.pressDebug();
+              await page.finishCheck(input.checkedOther);
+              seen.read = page.$("debug-read-rows").textContent;
+              seen.otherText = await state();
+              await page.submit();
+              await page.finishRun(input.response);
+              seen.ranAgain = await state();
+
+              // 2. A source is changed, added or removed in step 3.
+              page.type("f-url", "https://n8n.example.test");
+              seen.sourceAdded = await state();
+              page.type("f-url", "");
+              seen.sourceRestored = await state();  // the form builds the same request again
+              page.type("f-env", "EXECUTIONS_MODE=regular");
+              seen.sourceChanged = await state();
+              page.type("f-kube-ctx", "a context without a namespace");  // a form that cannot be sent at all
+              seen.formInvalid = await state();
+              page.type("f-kube-ctx", "");
+              await page.submit();
+              await page.finishRun(input.response);
+              seen.ranThird = await state();
+
+              // 3. A later run does not end with a report.
+              await page.submit();
+              await page.failRun();
+              seen.failed = await state();
+              seen.banner = page.visible("form-error");
+              await page.submit();
+              await page.finishRun(input.response);
+              seen.ranFourth = await state();
+
+              // An API key is cleared by the page after its run: that is not a change. Typing one again is.
+              page.type("f-url", "https://n8n.example.test");
+              page.type("f-apikey", "n8n_api_synthetic");
+              await page.submit();
+              await page.finishRun(input.response);
+              seen.keyCleared = [page.$("f-apikey").value, await state()];
+              page.type("f-apikey", "n8n_api_synthetic");
+              seen.keyTyped = await state();
+              return { ...seen, runs: page.sent.length };
+            }""",
+            response=run_response(), other=other, checkedOther=checked_other,
+        )  # fmt: skip
+        current = lambda files: {"on4": "step-4", "next": True, "stale": False, "report": True, "open": ["step-5", "step-6"], "saved": True, "files": files}  # noqa: E731
+        earlier = lambda files: {"on4": "step-4", "next": False, "stale": True, "report": True, "open": ["step-4", "step-4"], "saved": False, "files": files}  # noqa: E731
+        self.assertEqual(got["fresh"], current(2))  # download() and the button: two files
+        self.assertIn("9.9.9", got["read"])
+        self.assertEqual(got["otherText"], earlier(2))  # the reviewer's steps: nothing more is saved
+        self.assertEqual(got["ranAgain"], current(4))
+        self.assertEqual(got["sourceAdded"], earlier(4))
+        self.assertEqual(got["sourceRestored"], current(6))
+        self.assertEqual(got["sourceChanged"], earlier(6))
+        self.assertEqual(got["formInvalid"], earlier(6))
+        self.assertEqual(got["ranThird"], current(8))
+        self.assertEqual((got["failed"], got["banner"]), (earlier(8), True))
+        self.assertEqual(got["ranFourth"], current(10))
+        self.assertEqual(got["keyCleared"], ["", current(12)])
+        self.assertEqual(got["keyTyped"], earlier(12))
+        self.assertEqual(got["runs"], 6)
+        # The earlier report is marked, in words, as an earlier run made from other inputs.
+        self.assertIn('id="report-stale" class="notice notice--stale" role="status" hidden>', INDEX_HTML)
+        self.assertIn("This is the report of an earlier run.", INDEX_HTML)
+        gate = js_function("canOpen")
+        self.assertIn("if (n >= 5 && !(report && report.profile && reportCurrent())) return false;", gate)
+        self.assertEqual(APP_JS.count("reportInputs = "), 3)  # declared; emptied when a run starts; set when its report arrives
+        for store in ("reportInputs)", "reportInputs,"):  # compared, and never shown, sent or stored
+            self.assertNotIn(store, APP_JS)
 
     def test_a_400_about_something_else_is_still_the_banner(self):
         got = run_page(

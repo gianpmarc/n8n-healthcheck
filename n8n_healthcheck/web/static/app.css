@@ -357,6 +357,7 @@ main { padding-block: var(--space-7); }
 .gain p + p, .readout .messages { margin-top: var(--space-2); }
 .source__gain { padding-top: var(--space-1); font-size: 0.9375rem; font-weight: 500; }
 #view-report { margin-top: var(--space-7); }
+.notice--stale { border: 2px dashed var(--border-strong); }
 .report-title { font-size: clamp(1.5rem, 1.2rem + 1.4vw, 2rem); }
 #open-block { margin-top: var(--space-7); }
 

@@ -124,6 +124,9 @@
   let checked = null; // what POST /api/debug-info answered for `checkedText`
   let checkedText = null; // the debug information that answer is about, exactly as it was pasted
   let runs = 0; // reports received since the page was loaded
+  // The request the form built when the report on screen was received, as text; null when
+  // there is no report or when a later run did not end with one. Never shown or stored.
+  let reportInputs = null;
   let envFile = null; // { name, size, text } — the chosen file, kept in memory only
   let timer = null;
   let report = null; // last 200 response of POST /api/run, plus finishedAt
@@ -216,6 +219,7 @@
     const lines = text.split("\n").filter((line) => line.trim()).length;
     $("env-chip-text").textContent = `${file.name} — ${formatBytes(file.size)}, ${plural(lines, "line")}. Kept in memory until you remove it or reload the page.`;
     showEnvFile(true);
+    renderStepper();
     $("env-chip-remove").focus();
     announce(`${file.name} loaded.`);
   }
@@ -229,6 +233,7 @@
   function removeEnvFile() {
     envFile = null;
     showEnvFile(false);
+    renderStepper();
     $("f-env-file").focus();
     announce("File removed.");
   }
@@ -386,10 +391,24 @@
   /** True when the server accepted the debug information that is in the field now. */
   const debugChecked = () => checked !== null && $("f-debug").value === checkedText;
 
-  /** Whether step `n` can be opened: 3 and 4 need the debug information, 5 and 6 the profile of a run. */
+  /** The request the form builds now, as text; null when it cannot be sent as it is. */
+  function formInputs() {
+    const { body, errors } = buildRequest();
+    return errors.length ? null : JSON.stringify(body);
+  }
+
+  /**
+   * True when the report on screen is the one of the form as it is now. It is not after
+   * the debug information or a source was changed, added or removed, and not after a
+   * later run that ended without a report: the file of step 6 would then be the file of
+   * another run than the one the operator believes they are sending.
+   */
+  const reportCurrent = () => report !== null && reportInputs !== null && reportInputs === formInputs();
+
+  /** Whether step `n` can be opened: 3 and 4 need the debug information, 5 and 6 the profile of the run of this form. */
   function canOpen(n) {
     if (!meta || running || checking) return false;
-    if (n >= 5 && !(report && report.profile)) return false;
+    if (n >= 5 && !(report && report.profile && reportCurrent())) return false;
     return n < 3 || debugChecked();
   }
 
@@ -402,7 +421,10 @@
     }
     const moving = running || checking;
     for (const id of ["back-2", "back-3", "next-3", "back-4", "next-4", "back-5", "next-5", "back-6"]) $(id).disabled = moving;
-    $("next-4").hidden = !(report && report.profile);
+    const current = reportCurrent();
+    $("next-4").hidden = !(report && report.profile && current);
+    // An earlier run's report stays readable, marked as what it is.
+    $("report-stale").hidden = report === null || current;
     $("debug-button-label").textContent = checking ? "Checking the text…" : debugChecked() ? "Continue" : "Check the text";
     $("debug-read").hidden = !debugChecked();
   }
@@ -585,6 +607,7 @@
     }
     if (step !== 4) showStep(4); // a run and its result are shown on step 4
 
+    reportInputs = null; // until this run ends with a report, the one on screen is an earlier run's
     setRunning(true);
     announce("Health check running. This can take up to a minute. A profile can be opened when it has finished.");
     let failure = null;
@@ -647,6 +670,8 @@
     for (const toggle of document.querySelectorAll('[data-toggle="f-apikey"]')) if ($("f-apikey").dataset.masked === "false") toggle.click();
     report = { ...data, finishedAt: new Date() };
     renderReport();
+    // What the form builds now, after the key was cleared: typing a key again is a change too.
+    reportInputs = formInputs();
     $("view-report").hidden = false;
     $("run-button-label").textContent = "Run again";
     renderStepper();
@@ -2059,7 +2084,8 @@
     $(id).addEventListener("click", () => go(target));
   }
   // A text that was edited is no longer the one the server read: steps 3 to 6 close until it is checked again.
-  $("f-debug").addEventListener("input", renderStepper);
+  // A source that was edited is no longer the one the report was made from: steps 5 and 6 close until a new run.
+  for (const input of document.querySelectorAll("#debug-form textarea, #sources-form input, #sources-form textarea")) input.addEventListener("input", renderStepper);
   // The browser's Back and Forward move between the steps; the entries hold a step number only.
   window.history.replaceState({ step }, "");
   window.addEventListener("popstate", (event) => {
