@@ -176,6 +176,21 @@ was withheld stays withheld when the new run still has it, and answers, reason a
 reference are kept. Today a new run clears them; a withheld entry coming back into the
 file unnoticed is the failure to avoid.
 
+Amended on 2026-11-26, after the review of 3148e1f (approved by the owner): "the new run
+still has it" is not enough for a setting, whose entry is named by its scope, so the
+same variable read from another source is another entry. For the entries that are new
+in a run: a setting whose variable the operator withheld is withheld under the new
+scope too; "Withhold all" of a group is remembered, so the new entries of that group
+arrive withheld; and the step names, with their number and their ids, the entries that
+are new in this run and not withheld. An entry the operator has already seen keeps what
+they chose for it. Facts and checks have the same ids in every run and keep their
+choice by id.
+
+For the same reason the report, and with it the file, belongs to the inputs it was made
+from. When the form no longer builds the request of the last run (the debug information
+or a source was changed, or a later run did not end with a report), steps 5 and 6 close
+and the report on screen is marked as the one of an earlier run.
+
 ### Step 6. Download and send
 
 The file name, the download button, and: send it to the person who asked you for it,

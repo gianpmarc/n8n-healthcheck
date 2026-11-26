@@ -133,6 +133,11 @@
   // The one entry that cannot be withheld (profile.ALWAYS_SHARED): it has no box, and no button adds it.
   const ALWAYS_SHARED = "n8n.version";
   const withheld = new Set(); // ids the operator chose to withhold; kept from one run to the next
+  // What makes a choice hold in a later run that lists other entries (see rememberChoices and carryChoices):
+  const withheldNames = new Set(); // the names of the settings withheld, under whatever scope
+  const allOf = { facts: false, settings: false }; // "Withhold all" of a group was pressed and not taken back
+  const known = new Set(); // every id a run has listed so far
+  let arrived = []; // the ids that are new in the run on screen; none for the first run
   const answers = new Map(); // fact id -> the answer chosen in "A few questions": a value, or a list of values
   const asked = new Map(); // fact id -> { inputs, note } of the question on screen
   const filters = { severity: "all", area: "all" };
@@ -668,6 +673,7 @@
     $("f-apikey").value = "";
     // And it is masked again, were it shown.
     for (const toggle of document.querySelectorAll('[data-toggle="f-apikey"]')) if ($("f-apikey").dataset.masked === "false") toggle.click();
+    rememberChoices();
     report = { ...data, finishedAt: new Date() };
     renderReport();
     // What the form builds now, after the key was cleared: typing a key again is a change too.
@@ -765,7 +771,8 @@
     $("share-status").textContent = "";
     $("download-status").textContent = "";
     if (data.profile) {
-      // What the operator chose for the run before stays: see renderQuestions() and renderShare().
+      // What the operator chose for the run before stays: see carryChoices(), renderQuestions() and renderShare().
+      carryChoices(data.profile, runs === 1);
       renderCoverage(data.coverage);
       renderQuestions();
       renderShare();
@@ -1740,6 +1747,48 @@
     $("coverage-action").hidden = bySource === 0;
   }
 
+  /**
+   * Before a new profile replaces the one on screen: what the operator chose in it, in the
+   * terms that hold for a run that lists other entries. A setting is remembered by its
+   * name, since the same variable read from another source is another entry.
+   */
+  function rememberChoices() {
+    if (!(report && report.profile)) return;
+    const profile = report.profile;
+    const held = new Set(profile.settings.filter((setting) => withheld.has(settingKey(setting))).map((setting) => setting.name));
+    for (const setting of profile.settings) {
+      if (held.has(setting.name)) withheldNames.add(setting.name);
+      else withheldNames.delete(setting.name); // listed, and withheld under no scope: the operator took it back
+    }
+    for (const id of entryIds(profile)) known.add(id);
+  }
+
+  /** The id of every entry of a profile that has a box: facts, settings and checks. */
+  function entryIds(profile) {
+    return [
+      ...profile.facts.map((fact) => fact.id).filter((id) => id !== ALWAYS_SHARED),
+      ...profile.settings.map(settingKey),
+      ...(checkEntries(profile) || []).map(checkKey),
+    ];
+  }
+
+  /**
+   * When a new profile arrives, for the entries no run listed before: a setting that was
+   * withheld is withheld under the scopes this run brings, and after "Withhold all" of a
+   * group its new entries are withheld too. An entry the operator has already seen keeps
+   * what they chose for it, row by row: a fact or a check has the same id in every run,
+   * and so has a setting under a scope that was listed before. What is new in this run
+   * is noted, so that the review can name what is new and not withheld.
+   */
+  function carryChoices(profile, first) {
+    arrived = first ? [] : entryIds(profile).filter((id) => !known.has(id));
+    const fresh = new Set(arrived);
+    for (const setting of profile.settings) {
+      if (fresh.has(settingKey(setting)) && (allOf.settings || withheldNames.has(setting.name))) withheld.add(settingKey(setting));
+    }
+    if (allOf.facts) for (const id of arrived) if (profile.facts.some((fact) => fact.id === id)) withheld.add(id);
+  }
+
   function renderShare() {
     const profile = currentProfile();
     const focused = document.activeElement && $("share-body").contains(document.activeElement) ? document.activeElement.id : "";
@@ -1754,6 +1803,10 @@
     const answered = asked.size ? `Answered: ${given} of ${plural(asked.size, "question")}. ` : "";
     const checks = checkEntries(profile);
     const checksWithheld = checks ? checks.filter((entry) => entry.outcome === "withheld").length : 0;
+    // Named, so that nothing enters the file unnoticed: what this run lists for the first time and is not withheld.
+    const loose = arrived.filter((id) => !withheld.has(id));
+    $("share-new").hidden = loose.length === 0;
+    $("share-new-text").textContent = loose.length ? `${loose.length} ${loose.length === 1 ? "entry" : "entries"}: ${loose.join(", ")}.` : "";
     $("share-kept").hidden = !(runs > 1 && (withheld.size > 0 || answers.size > 0 || $("f-reference").value !== "" || $("f-reason").value !== Object.keys(PROFILE_REASONS)[0]));
     $("share-summary").textContent = `${answered}Withheld: ${facts} of ${plural(profile.facts.length, "fact")}, ${settings} of ${plural(profile.settings.length, "setting")}, check outcome ${profile.check.withheld === true ? "withheld" : "included"}${checksWithheld ? ` (${checksWithheld} of ${plural(checks.length, "check")} withheld)` : ""}.`;
   }
@@ -2008,6 +2061,7 @@
       if (button.dataset.on === "true") withheld.add(key);
       else withheld.delete(key);
     }
+    allOf[button.dataset.bulk === "facts" ? "facts" : "settings"] = button.dataset.on === "true"; // remembered for a later run
     renderShare();
     $("share-status").textContent = `${button.textContent}: done.`;
   });

@@ -337,7 +337,11 @@ class PageSourceTest(unittest.TestCase):
         self.assertIn('fact.id === ALWAYS_SHARED\n          ? el("span", { class: "pdetail", id: "always-shared" }, "Always in the file")\n          : tick(`w-fact-${index}`, fact.id, ', sections)
         self.assertIn("report.profile.facts.map((fact) => fact.id).filter((id) => id !== ALWAYS_SHARED)", APP_JS)
         self.assertIn("if (!key || key === ALWAYS_SHARED) return;", APP_JS)
-        self.assertEqual(APP_JS.count("withheld.add("), 2)  # the checkbox and the bulk button, both behind the lines above
+        # The checkbox and the bulk button, both behind the lines above; and carryChoices(), which adds only
+        # entries with a box (entryIds() leaves the version out) that are new in a run.
+        self.assertEqual(APP_JS.count("withheld.add("), 4)
+        self.assertIn("...profile.facts.map((fact) => fact.id).filter((id) => id !== ALWAYS_SHARED),", js_function("entryIds"))
+        self.assertIn("arrived = first ? [] : entryIds(profile).filter((id) => !known.has(id));", js_function("carryChoices"))
 
     def test_the_six_steps_and_what_each_needs(self):
         self.assertEqual(re.findall(r'<section id="step-(\d)" class="step" aria-labelledby="step-\d-title"( hidden)?>', INDEX_HTML), [("1", ""), *[(str(n), " hidden") for n in range(2, 7)]])
@@ -1735,6 +1739,71 @@ class PageBehaviourTest(unittest.TestCase):
                 # The setting of the main container is not in the second run, and is withheld again when the third brings it back.
                 self.assertNotIn("setting:main:N8N_HOST", got["seen"][0]["ticked"])
                 self.assertIn("setting:main:N8N_HOST", got["seen"][1]["ticked"])
+
+    def test_a_withheld_setting_does_not_come_back_under_another_scope_in_a_later_run(self):
+        # Review of 3148e1f, finding 2. A setting's id holds its scope, so the same variable read from
+        # another source is another entry: it must not arrive in the file unnoticed.
+        env_only = run_response(dataclasses.replace(PLAIN, kubernetes=None))
+        with_kubernetes = run_response()
+        first, second = json.loads(env_only)["profile"], json.loads(with_kubernetes)["profile"]
+        self.assertEqual([profile.setting_id(s) for s in first["settings"]], ["setting:instance:EXECUTIONS_DATA_PRUNE", "setting:instance:EXECUTIONS_MODE", "setting:instance:WEBHOOK_URL"])
+        new = ["setting:main:EXECUTIONS_MODE", "setting:main:N8N_HOST"]
+        self.assertEqual([profile.setting_id(s) for s in second["settings"]][3:], new)
+        scenario = """async (page, input) => {
+          const read = async () => ({ summary: page.$("share-summary").textContent, kept: page.visible("share-kept"), fresh: page.visible("share-new") && page.$("share-new-text").textContent,
+                                      ticked: Object.entries(page.boxes()).filter(([id, box]) => box.checked && id.startsWith("setting")).map(([id]) => id),
+                                      saved: JSON.parse(await page.download()).settings });
+          const again = async (response) => { page.$("back-4").click(); await page.continueSources(); await page.run(response); };
+          await page.run(input.first);
+          for (const name of input.press) page.button(name).click();
+          for (const id of input.tick) page.toggle(page.boxes()[id]);
+          const before = await read();
+          await again(input.second);
+          const after = await read();
+          for (const id of input.untick) page.toggle(page.boxes()[id]);
+          const changed = await read();
+          await again(input.first);
+          await again(input.second);
+          return { before, after, changed, third: await read() };
+        }"""
+        state = lambda saved: {profile.setting_id(s): (s["state"], s["value"]) for s in saved}  # noqa: E731
+
+        # The reviewer's steps: "Withhold all settings", then a run that also reads Kubernetes.
+        got = run_page(scenario, first=env_only, second=with_kubernetes, press=["Withhold all settings"], tick=[], untick=[])
+        self.assertIn("3 of 3 settings", got["before"]["summary"])
+        self.assertIn("5 of 5 settings", got["after"]["summary"])
+        self.assertEqual(set(state(got["after"]["saved"]).values()), {("withheld", None)})
+        self.assertEqual((got["after"]["kept"], got["after"]["fresh"]), (True, False))  # nothing is new and not withheld
+
+        # One setting withheld: the same variable under the scope the later run brings is withheld too,
+        # and the other new entry, which the operator has not seen, is named with its count and its id.
+        got = run_page(scenario, first=env_only, second=with_kubernetes, press=[], tick=["setting:instance:EXECUTIONS_MODE"], untick=[])
+        self.assertEqual(got["after"]["ticked"], ["setting:instance:EXECUTIONS_MODE", "setting:main:EXECUTIONS_MODE"])
+        saved = state(got["after"]["saved"])
+        self.assertEqual((saved["setting:main:EXECUTIONS_MODE"], saved["setting:main:N8N_HOST"]), (("withheld", None), ("set", None)))
+        self.assertNotIn("queue", json.dumps([s for s in got["after"]["saved"] if s["name"] == "EXECUTIONS_MODE"]))
+        self.assertEqual(got["after"]["fresh"], "1 entry: setting:main:N8N_HOST.")
+        self.assertIn("2 of 5 settings", got["after"]["summary"])
+        # Later the entries are no longer new: nothing is named, and each row is as the operator left it.
+        self.assertEqual((got["third"]["fresh"], got["third"]["ticked"]), (False, got["after"]["ticked"]))
+
+        # A row the operator unticks in the later run stays unticked: it is their choice for that row.
+        got = run_page(scenario, first=env_only, second=with_kubernetes, press=[], tick=["setting:instance:EXECUTIONS_MODE"], untick=["setting:main:EXECUTIONS_MODE"])
+        self.assertEqual(got["changed"]["fresh"], "2 entries: setting:main:EXECUTIONS_MODE, setting:main:N8N_HOST.")
+        self.assertEqual(got["third"]["ticked"], ["setting:instance:EXECUTIONS_MODE"])
+        self.assertEqual(state(got["third"]["saved"])["setting:main:EXECUTIONS_MODE"], ("value", "queue"))
+
+        # "Withhold no settings" takes "Withhold all" back: the new entries arrive as any other, and are named.
+        got = run_page(scenario, first=env_only, second=with_kubernetes, press=["Withhold all settings", "Withhold no settings"], tick=[], untick=[])
+        self.assertEqual((got["after"]["ticked"], got["after"]["fresh"]), ([], "2 entries: setting:main:EXECUTIONS_MODE, setting:main:N8N_HOST."))
+
+        # Nothing was withheld at all: the new entries are still named.
+        got = run_page(scenario, first=env_only, second=with_kubernetes, press=[], tick=[], untick=[])
+        self.assertEqual((got["after"]["kept"], got["after"]["fresh"]), (False, "2 entries: setting:main:EXECUTIONS_MODE, setting:main:N8N_HOST."))
+        self.assertEqual(got["before"]["fresh"], False)  # the first run has nothing "new"
+        # Facts and checks have the same ids whatever the sources, so their choices hold by id.
+        self.assertEqual([f["id"] for f in first["facts"]], [f["id"] for f in second["facts"]])
+        self.assertEqual([c["rule_id"] for c in first["check"]["checks"]], [c["rule_id"] for c in second["check"]["checks"]])
 
     def test_open_a_profile_is_off_during_a_run_and_back_on_after_it_however_it_ends(self):
         saved_file = profile.to_json(built())
