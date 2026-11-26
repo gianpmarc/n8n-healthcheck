@@ -24,6 +24,7 @@ import n8n_healthcheck
 import test_debug_info as pasted  # a synthetic debug information; imported as a module so its tests run once
 import test_web_profile as page_tests  # the page harness; as a module, for the same reason
 import validate_0_2_0
+import without_machine_proxy  # noqa: F401  the stand-in servers are reached directly, whatever proxy this machine has
 from n8n_healthcheck import cli, debug_info, engine, profile, questions, report, usage
 from n8n_healthcheck.collectors import api, collect
 from n8n_healthcheck.models import Snapshot, Target
@@ -787,7 +788,7 @@ class ProfileTest(Base):
         self.assertEqual(len(profile.FACT_IDS), 32 + 14 + 13 + 8)
         self.assertFalse(set(USAGE_FACTS) & profile.FORMAT_1_FACT_IDS)
         self.assertEqual(len(profile.FORMAT_1_FACT_IDS), 32)
-        self.assertEqual((n8n_healthcheck.__version__, profile.build_profile(Snapshot(), [])["tool_version"]), ("0.6.0", "0.6.0"))
+        self.assertEqual((n8n_healthcheck.__version__, profile.build_profile(Snapshot(), [])["tool_version"]), ("0.7.0", "0.7.0"))
         self.assertEqual(profile.FORMAT_VERSION, 1)
         for fact_id in USAGE_FACTS:
             self.assertTrue(questions.sentence(fact_id).endswith("?"))
@@ -967,6 +968,11 @@ class RunTest(Base):
         self.key_file = self.path("key.txt")
         with open(self.key_file, "w", encoding="utf-8") as handle:
             handle.write(KEY + "\n")
+        # Since 0.7.0 --save-profile needs --debug-info: the runs that save a profile give this one,
+        # without the two insecure settings, so that these runs still end with no warning (exit code 0).
+        self.debug_file = self.path("debug.txt")
+        with open(self.debug_file, "w", encoding="utf-8") as handle:
+            handle.write(pasted.FULL.replace(pasted.SECURITY, ""))
 
     def path(self, name):
         return os.path.join(self.dir, name)
@@ -987,7 +993,7 @@ class RunTest(Base):
 
     def test_the_flag_reads_the_key_from_a_file_and_the_report_has_the_section(self):
         fake = self.leaky(insights=(200, summary(27, 5)))
-        code, out, err = self.run_cli(["--url", fake.url, "--api-key-file", self.key_file, "--save-snapshot", self.path("s.json"), "--save-profile", self.path("p.json")])
+        code, out, err = self.run_cli(["--url", fake.url, "--api-key-file", self.key_file, "--save-snapshot", self.path("s.json"), "--debug-info", self.debug_file, "--save-profile", self.path("p.json")])
         self.assertEqual((code, err), (0, ""))
         self.assertIn("## Usage\n", out)
         self.assertIn("- **Executions per day:** 3.86\n", out)
@@ -1081,7 +1087,7 @@ class RunTest(Base):
     def test_a_collector_that_breaks_never_shows_the_key(self):
         fake = self.fake()
         with mock.patch.object(api, "_executions", side_effect=RuntimeError(f"boom {KEY}")):
-            code, out, err = self.run_cli(["--url", fake.url, "--api-key-file", self.key_file, "--save-profile", self.path("p.json")])
+            code, out, err = self.run_cli(["--url", fake.url, "--api-key-file", self.key_file, "--debug-info", self.debug_file, "--save-profile", self.path("p.json")])
         self.assertEqual(code, 0)
         self.assertIn("api_key: not collected (boom <redacted>)", err)
         self.assertNotIn(MARK, err + out)
@@ -1107,7 +1113,7 @@ class RunTest(Base):
         for config in variants:
             with self.subTest(config=config):
                 fake = self.leaky(**config)
-                argv = ["--url", fake.url, "--api-key-file", self.key_file, "--save-snapshot", self.path("s.json"), "--save-profile", self.path("p.json"), "-o", self.path("r.md")]
+                argv = ["--url", fake.url, "--api-key-file", self.key_file, "--save-snapshot", self.path("s.json"), "--debug-info", self.debug_file, "--save-profile", self.path("p.json"), "-o", self.path("r.md")]
                 code, out, err = self.run_cli(argv)
                 self.assertEqual(code, 0)
                 self.assertGreater(len(fake.api_paths()), 0)
@@ -1157,7 +1163,8 @@ class RunTest(Base):
                 self.assertEqual({key for _, path, key in fake.requests if path.startswith("/api/")}, {KEY})
                 self.assert_clean(raw, log.getvalue())
         fake = self.leaky(insights=(200, summary(27, 5)))
-        result = json.loads(post({"url": fake.url, "api_key": KEY})[1])
+        # With a debug information, which a profile needs since 0.7.0.
+        result = json.loads(post({"url": fake.url, "api_key": KEY, "debug_info_text": pasted.FULL})[1])
         self.assertEqual([row["value"] for row in result["usage"]["rows"]], ["3.86", "18.5%", "4", "2"])
         self.assertEqual(result["profile"]["sources"]["api"], "collected")
         self.assertEqual(result["summary_notes"][-1], "Usage numbers were read through the n8n API.")
@@ -1211,6 +1218,7 @@ class PageTest(Base):
     def test_the_key_is_sent_with_the_url_and_is_not_kept_in_the_form(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               page.type("f-url", "https://n8n.example.test");
               page.type("f-apikey", "  " + input.key + " ");
               await page.submit();
@@ -1224,8 +1232,8 @@ class PageTest(Base):
             }""",
             key=KEY, response=self.response(self.read(insights=(200, summary(27, 5)), users=403)),
         )  # fmt: skip
-        self.assertEqual(got["sent"], {"url": "https://n8n.example.test", "api_key": KEY})
-        self.assertEqual((got["view"], got["key"], got["block"]), ("report", "", True))
+        self.assertEqual(got["sent"], {"debug_info_text": pasted.FULL, "url": "https://n8n.example.test", "api_key": KEY})
+        self.assertEqual((got["view"], got["key"], got["block"]), ("step-4", "", True))  # the report is on step 4
         self.assertEqual(got["basis"], "Executions over the last 7 days, as n8n's Insights counts them. Insights can lag behind by up to an hour.")
         self.assertEqual(
             got["tiles"],
@@ -1242,6 +1250,7 @@ class PageTest(Base):
     def test_without_a_key_there_is_no_usage_block(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               page.type("f-url", "https://n8n.example.test");
               await page.submit();
               const sent = JSON.parse(page.sent[0]);
@@ -1250,11 +1259,12 @@ class PageTest(Base):
             }""",
             response=self.response(None),
         )
-        self.assertEqual(got, {"sent": {"url": "https://n8n.example.test"}, "block": False, "tiles": 0})
+        self.assertEqual(got, {"sent": {"debug_info_text": pasted.FULL, "url": "https://n8n.example.test"}, "block": False, "tiles": 0})
 
     def test_a_key_without_a_url_is_stopped_on_the_page(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               page.type("f-apikey", input.key);
               page.type("f-env", "A=1");
               await page.submit();
@@ -1268,6 +1278,7 @@ class PageTest(Base):
     def test_the_error_that_asks_for_the_url_goes_when_the_url_is_typed(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               const state = () => [page.visible("e-apikey"), page.$("f-apikey").getAttribute("aria-invalid")];
               page.type("f-apikey", input.key);
               page.type("f-env", "A=1");
@@ -1291,6 +1302,7 @@ class PageTest(Base):
     def test_a_key_the_server_refuses_is_shown_next_to_its_field(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               page.type("f-url", "https://n8n.example.test");
               page.type("f-apikey", input.key);
               await page.submit();
@@ -1300,11 +1312,13 @@ class PageTest(Base):
             }""",
             key=KEY,
         )
-        self.assertEqual(got, {"view": "form", "error": "The API key must be a single line.", "focus": "f-apikey", "banner": False, "debug": False})
+        # Back on step 3, where the field is.
+        self.assertEqual(got, {"view": "step-3", "error": "The API key must be a single line.", "focus": "f-apikey", "banner": False, "debug": False})
 
     def test_a_refused_key_and_a_partial_result_are_shown_as_not_read(self):
         got = page_tests.run_page(
             """async (page, input) => {
+              await page.passDebug();  // steps 1 and 2: since 0.7.0 nothing runs before the debug information is checked
               page.type("f-url", "https://n8n.example.test");
               page.type("f-apikey", input.key);
               await page.submit();

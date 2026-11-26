@@ -11,6 +11,7 @@
   const MAX_DEBUG_INFO_BYTES = 64 * 1024; // same limit as the server's parser
   // The server gives up on each source after a few seconds, so a run ends well within this.
   const RUN_TIMEOUT_MS = 3 * 60 * 1000;
+  const CHECK_TIMEOUT_MS = 30 * 1000; // reading a pasted text collects nothing
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   const $ = (id) => document.getElementById(id);
@@ -118,13 +119,30 @@
 
   let meta = null; // GET /api/meta
   let running = false;
+  let step = 1; // the step on screen, 1 to 6
+  let checking = false; // POST /api/debug-info is under way
+  let checked = null; // what POST /api/debug-info answered for `checkedText`
+  let checkedText = null; // the debug information that answer is about, exactly as it was pasted
+  let runs = 0; // reports received since the page was loaded
+  // The request the form built when the report on screen was received, as text; null when
+  // there is no report or when a later run did not end with one. Never shown or stored.
+  let reportInputs = null;
   let envFile = null; // { name, size, text } — the chosen file, kept in memory only
   let timer = null;
   let report = null; // last 200 response of POST /api/run, plus finishedAt
-  const withheld = new Set(); // ids the reader chose to withhold from the profile of this run
+  // The one entry that cannot be withheld (profile.ALWAYS_SHARED): it has no box, and no button adds it.
+  const ALWAYS_SHARED = "n8n.version";
+  const withheld = new Set(); // ids the operator chose to withhold; kept from one run to the next
+  // What makes a choice hold in a later run that lists other entries (see rememberChoices and carryChoices):
+  const withheldNames = new Set(); // the names of the settings withheld, under whatever scope
+  const allOf = { facts: false, settings: false }; // "Withhold all" of a group was pressed and not taken back
+  const known = new Set(); // every id a run has listed so far
+  let arrived = []; // the ids that are new in the run on screen; none for the first run
   const answers = new Map(); // fact id -> the answer chosen in "A few questions": a value, or a list of values
   const asked = new Map(); // fact id -> { inputs, note } of the question on screen
   const filters = { severity: "all", area: "all" };
+
+  const STALE_REPORT = "This is the report of an earlier run. Run again to get the report and the file of what you entered.";
 
   function announce(text) {
     const region = $("announce");
@@ -156,7 +174,8 @@
       return;
     }
     applyMeta();
-    $("run-form").hidden = false;
+    $("nav-1").hidden = false;
+    renderStepper();
   }
 
   function applyMeta() {
@@ -207,6 +226,7 @@
     const lines = text.split("\n").filter((line) => line.trim()).length;
     $("env-chip-text").textContent = `${file.name} — ${formatBytes(file.size)}, ${plural(lines, "line")}. Kept in memory until you remove it or reload the page.`;
     showEnvFile(true);
+    renderStepper();
     $("env-chip-remove").focus();
     announce(`${file.name} loaded.`);
   }
@@ -220,6 +240,7 @@
   function removeEnvFile() {
     envFile = null;
     showEnvFile(false);
+    renderStepper();
     $("f-env-file").focus();
     announce("File removed.");
   }
@@ -242,6 +263,14 @@
   function clearErrors() {
     for (const id of ["e-debug", "e-url", "e-apikey", "e-env", "e-postgres", "e-redis", "e-kube"]) setFieldError(id, null);
     $("form-error").hidden = true;
+    $("debug-error").hidden = true;
+  }
+
+  /** Why a pasted debug information cannot be sent, or null. Whether it is one is for the server to say. */
+  function debugInfoProblem(text) {
+    if (!text.trim()) return "Paste the debug information to continue. The file cannot be made without it.";
+    const bytes = new TextEncoder().encode(text).length;
+    return bytes <= MAX_DEBUG_INFO_BYTES ? null : `This text is ${formatBytes(bytes)}; the limit is 64 KB. A debug information is a few KB: paste only the text copied from Help > About n8n > Debug information, without the rest of the ticket or chat.`;
   }
 
   function showFormError(title, text, canRetry) {
@@ -265,9 +294,9 @@
     // Sent as it was pasted: the server reads what it knows and discards the rest.
     const debugInfo = value("f-debug");
     if (debugInfo.trim()) {
-      const bytes = new TextEncoder().encode(debugInfo).length;
-      if (bytes <= MAX_DEBUG_INFO_BYTES) body.debug_info_text = debugInfo;
-      else errors.push({ errorId: "e-debug", focus: "f-debug", inputs: [$("f-debug")], message: `This text is ${formatBytes(bytes)}; the limit is 64 KB. A debug information is a few KB: paste only the text copied from Help > About n8n > Debug information, without the rest of the ticket or chat.` });
+      const problem = debugInfoProblem(debugInfo);
+      if (!problem) body.debug_info_text = debugInfo;
+      else errors.push({ errorId: "e-debug", focus: "f-debug", inputs: [$("f-debug")], message: problem });
     }
 
     const url = value("f-url").trim();
@@ -313,7 +342,7 @@
         message: `The request would be ${formatBytes(size)}; the limit is 1 MB. Shorten the environment text to the n8n variables only.`,
       });
     }
-    return { body, errors, empty: Object.keys(body).length === 0 };
+    return { body, errors };
   }
 
   function setRunning(on) {
@@ -321,8 +350,9 @@
     const button = $("run-button");
     if (on) button.setAttribute("aria-disabled", "true");
     else button.removeAttribute("aria-disabled");
-    $("run-button-label").textContent = on ? "Running health check…" : "Run health check";
+    $("run-button-label").textContent = on ? "Running health check…" : report ? "Run again" : "Run health check";
     $("run-progress").hidden = !on;
+    renderStepper(); // no other step can be opened while it runs
     // A run ends by showing its report or its error: no other view may be opened meanwhile.
     $("f-profile").disabled = on;
     $("h-profile").hidden = !on;
@@ -358,23 +388,247 @@
     }
   }
 
-  async function submit() {
-    if (running) return; // no double submit
-    clearErrors();
-    const { body, errors, empty } = buildRequest();
-    if (errors.length) {
-      for (const error of errors) setFieldError(error.errorId, error.message, error.inputs);
-      $(errors[0].focus).focus();
-      announce(`${plural(errors.length, "problem")} in the form. ${errors[0].message}`);
-      return;
-    }
-    if (empty) {
-      showFormError("Nothing to inspect yet.", "Fill in at least one source above, then run the health check.", false);
-      // The message sits next to the button; moving focus to a field would scroll it out of view.
-      $("form-error").focus();
-      return;
-    }
+  // ── The six steps ───────────────────────────────────────────────────
+  // One step is on screen at a time. A step is a view of this one page: nothing is
+  // loaded, and what was typed stays in its field. The browser's Back goes to the step
+  // before through the history, whose entries hold a step number and nothing else.
 
+  const STEP_COUNT = 6;
+
+  /** True when the server accepted the debug information that is in the field now. */
+  const debugChecked = () => checked !== null && $("f-debug").value === checkedText;
+
+  /** The request the form builds now, as text; null when it cannot be sent as it is. */
+  function formInputs() {
+    const { body, errors } = buildRequest();
+    return errors.length ? null : JSON.stringify(body);
+  }
+
+  /**
+   * True when the report on screen is the one of the form as it is now. It is not after
+   * the debug information or a source was changed, added or removed, and not after a
+   * later run that ended without a report: the file of step 6 would then be the file of
+   * another run than the one the operator believes they are sending.
+   */
+  const reportCurrent = () => report !== null && reportInputs !== null && reportInputs === formInputs();
+
+  /** Whether step `n` can be opened: 3 and 4 need the debug information, 5 and 6 the profile of the run of this form. */
+  function canOpen(n) {
+    if (!meta || running || checking) return false;
+    if (n >= 5 && !(report && report.profile && reportCurrent())) return false;
+    return n < 3 || debugChecked();
+  }
+
+  function renderStepper() {
+    $("step-closed").hidden = true; // what it said was about the state before this change
+    for (let n = 1; n <= STEP_COUNT; n += 1) {
+      const button = $(`go-${n}`);
+      button.disabled = n !== step && !canOpen(n);
+      if (n === step) button.setAttribute("aria-current", "step");
+      else button.removeAttribute("aria-current");
+    }
+    const moving = running || checking;
+    for (const id of ["back-2", "back-3", "next-3", "back-4", "next-4", "back-5", "next-5", "back-6"]) $(id).disabled = moving;
+    const current = reportCurrent();
+    $("next-4").hidden = !(report && report.profile && current);
+    // An earlier run's report stays readable, marked as what it is.
+    $("report-stale").hidden = report === null || current;
+    $("debug-button-label").textContent = checking ? "Checking the text…" : debugChecked() ? "Continue" : "Check the text";
+    $("debug-read").hidden = !debugChecked();
+  }
+
+  /** Put step `n` on screen and move the focus to its heading. `record` is false when the history already holds it. */
+  function showStep(n, record = true) {
+    const arriving = n !== step;
+    step = n;
+    for (let other = 1; other <= STEP_COUNT; other += 1) $(`step-${other}`).hidden = other !== n;
+    $("flow").hidden = false;
+    $("view-profile").hidden = true;
+    if (n === 4) renderRunSources();
+    if (n === 6) renderDownload();
+    renderStepper();
+    if (record) window.history.pushState({ step: n }, "");
+    window.scrollTo(0, 0);
+    $(`step-${n}-title`).focus({ preventScroll: true });
+    // The notice over an earlier run's report appears while this step is hidden, so it is said on arrival.
+    if (n === 4 && arriving && !$("report-stale").hidden) announce(STALE_REPORT);
+  }
+
+  /** Why step `n` cannot be opened now, for the browser's Back or Forward onto an entry of it. */
+  function closedBecause(n) {
+    if (running) return "a run is under way";
+    if (checking) return "the debug information is being checked";
+    if (n >= 3 && !debugChecked()) return "the debug information has to be checked first";
+    return "it needs a run made from what is in the form now";
+  }
+
+  /** Open step `n` if it can be opened; true when it was. */
+  function go(n) {
+    if (n === step || !canOpen(n)) return false;
+    showStep(n);
+    return true;
+  }
+
+  // Step 2: the debug information, checked by the server before anything else is asked.
+
+  function setChecking(on) {
+    checking = on;
+    const button = $("debug-button");
+    if (on) button.setAttribute("aria-disabled", "true");
+    else button.removeAttribute("aria-disabled");
+    renderStepper();
+  }
+
+  function showDebugError(title, text) {
+    $("debug-error-title").textContent = title;
+    $("debug-error-text").textContent = text;
+    $("debug-error").hidden = false;
+    $("debug-error").focus();
+  }
+
+  /** "Check the text", then "Continue": the first sends the text to the server, the second opens step 3. */
+  async function continueFromDebug() {
+    if (checking || running) return;
+    if (debugChecked()) {
+      go(3);
+      return;
+    }
+    clearErrors();
+    const text = $("f-debug").value;
+    const problem = debugInfoProblem(text);
+    if (problem) {
+      setFieldError("e-debug", problem, [$("f-debug")]);
+      $("f-debug").focus();
+      announce(problem);
+      return;
+    }
+    setChecking(true);
+    announce("Checking the debug information.");
+    let failure = null;
+    let refused = null; // the parser's sentence for a text it did not accept
+    let data = null;
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), CHECK_TIMEOUT_MS);
+    try {
+      const response = await fetch("/api/debug-info", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ debug_info_text: text }),
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
+        signal: abort.signal,
+      });
+      data = await response.json().catch(() => null);
+      if (response.status === 400 && data && data.field === "debug_info_text" && typeof data.error === "string") {
+        refused = `${capitalize(data.error)}.`;
+      } else if (!response.ok) {
+        failure = describeFailure(response.status, data && typeof data.error === "string" ? data.error : "");
+      } else if (!data || !Array.isArray(data.read) || !Array.isArray(data.notes) || !data.coverage || !data.coverage.waiting) {
+        failure = ["The server sent an answer this page could not read.", "Try again; if it keeps happening, the page and the server may be different versions — restart “n8n-healthcheck serve” and reload."];
+      }
+    } catch {
+      failure = abort.signal.aborted
+        ? ["The server did not answer in time.", "Check that “n8n-healthcheck serve” is still running, then try again. Your text is unchanged."]
+        : ["The server could not be reached.", "Check that “n8n-healthcheck serve” is still running, then try again. Your text is unchanged."];
+    }
+    clearTimeout(deadline);
+    if (!failure && !refused) {
+      checked = data;
+      checkedText = text;
+    }
+    setChecking(false);
+    if (refused) {
+      // The sentence is the parser's own and quotes nothing of the text. The operator stays on this step.
+      setFieldError("e-debug", refused, [$("f-debug")]);
+      $("f-debug").focus();
+      announce(`The debug information was not accepted. ${refused}`);
+      return;
+    }
+    if (failure) {
+      showDebugError(failure[0], failure[1]);
+      return;
+    }
+    renderDebugRead();
+    renderGain();
+    $("debug-read").focus();
+    announce("The debug information was read. Review what was read, then continue.");
+  }
+
+  /** What the server read from the text, and the report's own sentences about it. */
+  function renderDebugRead() {
+    $("debug-read-rows").replaceChildren(...checked.read.flatMap((row) => [el("dt", null, String(row.label)), el("dd", null, String(row.value))]));
+    $("debug-notes").hidden = checked.notes.length === 0;
+    $("debug-notes").replaceChildren(...checked.notes.map((line) => el("li", null, String(line))));
+  }
+
+  /** A count sent by the server, or 0 for anything that is not one. */
+  const whole = (value) => (Number.isInteger(value) && value > 0 ? value : 0);
+  /** "1 check needs" / "3 checks need". */
+  const checksThat = (number, verb) => `${plural(number, "check")} ${verb}${number === 1 ? "s" : ""}`;
+
+  // Step 3: what the rules decided on the debug information alone, and what waits for each source.
+  function renderGain() {
+    const coverage = checked.coverage;
+    $("gain-decided").textContent = `The debug information decides ${whole(coverage.decided)} of ${plural(whole(coverage.total), "check")}.`;
+    const unstated = whole(coverage.unstated);
+    $("gain-unstated").hidden = unstated === 0;
+    $("gain-unstated").textContent = `${checksThat(unstated, "need")} a source that states a setting the debug information does not show. Not counted under any source below, though a source may decide them too.`;
+    for (const [source, field] of [["url", "f-url"], ["env", "f-env"], ["postgres", "f-postgres"], ["redis", "f-redis"], ["kubernetes", "f-kube-ns"]]) {
+      const waiting = whole(coverage.waiting[source]);
+      // A source this machine cannot read (its fieldset is disabled) promises nothing.
+      $(`gain-${source}`).textContent = $(field).closest("fieldset").disabled ? ""
+        : waiting ? `At least ${plural(waiting, "check")} can be decided with this source.` : "No check names this source as the one it lacks.";
+    }
+  }
+
+  function continueFromSources() {
+    clearErrors();
+    const { errors } = buildRequest();
+    if (errors.length) {
+      showRequestErrors(errors);
+      return;
+    }
+    go(4);
+  }
+
+  /** Show the problems of buildRequest() next to their fields, on the step that holds the first of them. */
+  function showRequestErrors(errors) {
+    const home = errors[0].errorId === "e-debug" ? 2 : 3;
+    if (step !== home) showStep(home);
+    for (const error of errors) setFieldError(error.errorId, error.message, error.inputs);
+    $(errors[0].focus).focus();
+    announce(`${plural(errors.length, "problem")} in the form. ${errors[0].message}`);
+  }
+
+  // Step 4: the sources this run will read, by name. No value of the form is shown.
+  function renderRunSources() {
+    const { body } = buildRequest();
+    const names = ["the debug information"];
+    for (const [field, source] of [["url", "url"], ["api_key", "api"], ["env_text", "env"], ["postgres_dsn", "postgres"], ["redis_url", "redis"], ["kube_namespace", "kubernetes"]]) {
+      const known = meta && meta.sources.find((item) => item.id === source);
+      if (has(body, field)) names.push(known && known.label ? String(known.label) : source);
+    }
+    $("run-sources").textContent = `${names.join(", ")}.`;
+  }
+
+  async function submit() {
+    if (running || checking) return; // no double submit
+    clearErrors();
+    if (!debugChecked()) {
+      // Never reached through the page's own controls: step 4 opens only after the check.
+      showStep(2);
+      setFieldError("e-debug", "The debug information has to be checked before a run. Press “Check the text”.", [$("f-debug")]);
+      $("f-debug").focus();
+      return;
+    }
+    const { body, errors } = buildRequest();
+    if (errors.length) {
+      showRequestErrors(errors);
+      return;
+    }
+    if (step !== 4) showStep(4); // a run and its result are shown on step 4
+
+    reportInputs = null; // until this run ends with a report, the one on screen is an earlier run's
     setRunning(true);
     announce("Health check running. This can take up to a minute. A profile can be opened when it has finished.");
     let failure = null;
@@ -412,19 +666,21 @@
         : ["The server could not be reached.", "Check that “n8n-healthcheck serve” is still running, then try again. Your form is unchanged."];
     }
     clearTimeout(deadline);
+    // A debug information the run refused is no longer the checked one: steps 3 and 4 close again.
+    if (refused && refusedField === "debug_info_text") checked = null;
     setRunning(false);
 
     if (refused) {
       // Nothing was collected. The sentence is the server's own and quotes nothing of the text.
-      if ($("view-form").hidden) showView("form");
-      const [errorId, inputId, what] = refusedField === "api_key" ? ["e-apikey", "f-apikey", "API key"] : ["e-debug", "f-debug", "debug information"];
+      const [home, errorId, inputId, what] = refusedField === "api_key" ? [3, "e-apikey", "f-apikey", "API key"] : [2, "e-debug", "f-debug", "debug information"];
+      showStep(home);
       setFieldError(errorId, refused, [$(inputId)]);
       $(inputId).focus();
       announce(`The ${what} was not accepted. ${refused}`);
       return;
     }
     if (failure) {
-      if ($("view-form").hidden) showView("form"); // an error is never written to a hidden view
+      if (step !== 4) showStep(4); // an error is never written to a hidden step
       showFormError(failure[0], failure[1], true);
       $("form-error").focus();
       return;
@@ -433,15 +689,23 @@
     $("f-apikey").value = "";
     // And it is masked again, were it shown.
     for (const toggle of document.querySelectorAll('[data-toggle="f-apikey"]')) if ($("f-apikey").dataset.masked === "false") toggle.click();
+    rememberChoices();
     report = { ...data, finishedAt: new Date() };
     renderReport();
-    showView("report");
+    // What the form builds now, after the key was cleared: typing a key again is a change too.
+    reportInputs = formInputs();
+    $("view-report").hidden = false;
+    $("run-button-label").textContent = "Run again";
+    renderStepper();
+    $("report-title").focus();
   }
 
-  function showView(name) {
-    for (const view of ["form", "report", "profile"]) $(`view-${view}`).hidden = name !== view;
+  /** The saved profile that was opened, in place of the steps; false puts the steps back. */
+  function showProfile(on) {
+    $("flow").hidden = on;
+    $("view-profile").hidden = !on;
     window.scrollTo(0, 0);
-    $(`${name}-title`).focus({ preventScroll: true });
+    $(on ? "profile-title" : `step-${step}-title`).focus({ preventScroll: true });
   }
 
   // ── Report ──────────────────────────────────────────────────────────
@@ -464,7 +728,7 @@
           // With no data the API summary already says the check could not run and why;
           // when every check crashed it still reads "found 0 issues", so ours leads.
           lead: noData ? null : "No check was able to run on the data that was collected, so there is no result to rely on. See “Not assessed” below.",
-          note: noData ? "“Not assessed” and the messages from the collectors below have the details. Use “Run again” to correct the sources." : null,
+          note: noData ? "“Not assessed” and the messages from the collectors below have the details. Go back to step 3 to correct the sources, then run again." : null,
         };
     }
   }
@@ -519,9 +783,13 @@
     $("warnings-block").hidden = warnings.length === 0;
     $("warnings").replaceChildren(...warnings.map((line) => el("li", null, String(line))));
 
-    resetShare();
-    $("share-block").hidden = !data.profile;
+    runs += 1;
+    $("share-status").textContent = "";
+    $("download-status").textContent = "";
     if (data.profile) {
+      // What the operator chose for the run before stays: see carryChoices(), renderQuestions() and renderShare().
+      carryChoices(data.profile, runs === 1);
+      renderCoverage(data.coverage);
       renderQuestions();
       renderShare();
     }
@@ -706,7 +974,7 @@
           tag = "Unavailable on the n8n-healthcheck machine";
           why = `${source.hint} Run n8n-healthcheck where that tool is installed to include it.`;
         } else {
-          why = `${section.missing} Add it on the form and run again to include it.`;
+          why = `${section.missing} Add it in step 3 and run again to include it.`;
         }
         detail = "";
       } else if (entry.reason === "failed" || entry.reason === "from_kubernetes" || entry.reason === "disabled") {
@@ -1318,7 +1586,9 @@
             fact.source ? el("span", { class: "pdetail" }, `from ${fact.source}`) : null),
           fact.detail ? el("p", { class: "pdetail" }, fact.detail) : null,
           restedNote(fact.id)),
-        edit ? el("td", { class: "ptable__withhold" }, tick(`w-fact-${index}`, fact.id, `the fact ${fact.id}`)) : null);
+        edit ? el("td", { class: "ptable__withhold" }, fact.id === ALWAYS_SHARED
+          ? el("span", { class: "pdetail", id: "always-shared" }, "Always in the file")
+          : tick(`w-fact-${index}`, fact.id, `the fact ${fact.id}`)) : null);
     });
     const measured = profile.facts.filter((fact) => fact.provenance === "measured" || fact.provenance === "declared").length;
     const factsWithheld = profile.facts.filter((fact) => fact.provenance === "withheld").length;
@@ -1435,9 +1705,13 @@
     $("questions-list").replaceChildren(...open.map((question, index) => {
       const multi = question.kind === "multi";
       const inputs = [];
+      const kept = answers.get(question.id);
+      const chosen = multi ? (Array.isArray(kept) ? kept : []) : typeof kept === "string" ? kept : "";
       const option = (value, label, number) => {
         const input = el("input", {
-          type: multi ? "checkbox" : "radio", name: `q-${index}`, id: `q-${index}-${number}`, value, "data-question": question.id, checked: !multi && value === "",
+          type: multi ? "checkbox" : "radio", name: `q-${index}`, id: `q-${index}-${number}`, value, "data-question": question.id,
+          // Nothing is selected as an answer at the start; an answer given for the run before is still selected.
+          checked: multi ? chosen.includes(value) : value === chosen,
         });
         inputs.push(input);
         return el("label", { class: `choice${value === "" ? " choice--none" : ""}` }, input, el("span", null, label));
@@ -1457,14 +1731,78 @@
     }));
   }
 
-  /** A new run is a new profile: no choice, reason or reference of the run before carries over to it. */
-  function resetShare() {
-    withheld.clear();
-    answers.clear();
-    $("f-reason").value = Object.keys(PROFILE_REASONS)[0];
-    $("f-reference").value = "";
-    checkReference();
-    $("share-status").textContent = "";
+  /**
+   * How much the run decided, from the numbers the server counted on its own profile before
+   * anything was withheld. Shown on top of the review, with what each missing source would add.
+   */
+  function renderCoverage(coverage) {
+    const known = coverage && coverage.waiting && coverage.failed;
+    $("coverage-block").hidden = !known;
+    if (!known) return;
+    const total = whole(coverage.total);
+    const decided = whole(coverage.decided);
+    $("coverage-decided").textContent = decided === total ? `This run decided all ${plural(total, "check")}.` : `This run decided ${decided} of ${plural(total, "check")}.`;
+    $("coverage-rest").textContent = decided === total ? "No source would add a check." : "What the others need:";
+    const lines = [];
+    const sources = ["url", "env", "postgres", "redis", "kubernetes", "debug_info"];
+    for (const source of sources) {
+      const waiting = whole(coverage.waiting[source]);
+      if (waiting) lines.push(`${plural(waiting, "check")} can be decided with ${NEED_LABELS[source]}, which was not given.`);
+    }
+    for (const source of sources) {
+      const failed = whole(coverage.failed[source]);
+      if (failed) lines.push(`${checksThat(failed, "need")} ${NEED_LABELS[source]}, which was asked for and could not be read.`);
+    }
+    const bySource = lines.length;
+    if (whole(coverage.unstated)) lines.push(`${plural(whole(coverage.unstated), "check")} could not be decided: a source that was read does not state the setting, or holds a value that could not be read.`);
+    if (whole(coverage.disagree)) lines.push(`${plural(whole(coverage.disagree), "check")}: two sources of this run disagree on what the check reads.`);
+    if (whole(coverage.errors)) lines.push(`${plural(whole(coverage.errors), "check")} failed to run, which is a bug in n8n-healthcheck.`);
+    $("coverage-list").hidden = lines.length === 0;
+    $("coverage-list").replaceChildren(...lines.map((line) => el("li", null, line)));
+    $("coverage-note").hidden = bySource === 0;
+    $("coverage-action").hidden = bySource === 0;
+  }
+
+  /**
+   * Before a new profile replaces the one on screen: what the operator chose in it, in the
+   * terms that hold for a run that lists other entries. A setting is remembered by its
+   * name, since the same variable read from another source is another entry.
+   */
+  function rememberChoices() {
+    if (!(report && report.profile)) return;
+    const profile = report.profile;
+    const held = new Set(profile.settings.filter((setting) => withheld.has(settingKey(setting))).map((setting) => setting.name));
+    for (const setting of profile.settings) {
+      if (held.has(setting.name)) withheldNames.add(setting.name);
+      else withheldNames.delete(setting.name); // listed, and withheld under no scope: the operator took it back
+    }
+    for (const id of entryIds(profile)) known.add(id);
+  }
+
+  /** The id of every entry of a profile that has a box: facts, settings and checks. */
+  function entryIds(profile) {
+    return [
+      ...profile.facts.map((fact) => fact.id).filter((id) => id !== ALWAYS_SHARED),
+      ...profile.settings.map(settingKey),
+      ...(checkEntries(profile) || []).map(checkKey),
+    ];
+  }
+
+  /**
+   * When a new profile arrives, for the entries no run listed before: a setting that was
+   * withheld is withheld under the scopes this run brings, and after "Withhold all" of a
+   * group its new entries are withheld too. An entry the operator has already seen keeps
+   * what they chose for it, row by row: a fact or a check has the same id in every run,
+   * and so has a setting under a scope that was listed before. What is new in this run
+   * is noted, so that the review can name what is new and not withheld.
+   */
+  function carryChoices(profile, first) {
+    arrived = first ? [] : entryIds(profile).filter((id) => !known.has(id));
+    const fresh = new Set(arrived);
+    for (const setting of profile.settings) {
+      if (fresh.has(settingKey(setting)) && (allOf.settings || withheldNames.has(setting.name))) withheld.add(settingKey(setting));
+    }
+    if (allOf.facts) for (const id of arrived) if (profile.facts.some((fact) => fact.id === id)) withheld.add(id);
   }
 
   function renderShare() {
@@ -1476,9 +1814,24 @@
     const facts = profile.facts.filter((fact) => fact.provenance === "withheld").length;
     const settings = profile.settings.filter((setting) => setting.state === "withheld").length;
     for (const [id, question] of asked) question.note.hidden = !(answers.has(id) && withheld.has(id));
-    const answered = asked.size ? `Answered: ${answers.size} of ${plural(asked.size, "question")}. ` : "";
+    // An answer kept from a run before counts only while its question is still asked.
+    const given = [...asked.keys()].filter((id) => answers.has(id)).length;
+    const answered = asked.size ? `Answered: ${given} of ${plural(asked.size, "question")}. ` : "";
     const checks = checkEntries(profile);
     const checksWithheld = checks ? checks.filter((entry) => entry.outcome === "withheld").length : 0;
+    // The numbers on top are the run's. What is withheld of the checks here is said next to them.
+    const gone = profile.check.withheld === true ? "You withheld the check outcome below: the file tells its reader none of this."
+      : checksWithheld ? `You withheld ${checksWithheld} of the ${plural(checks.length, "check")} below: the file does not say how ${checksWithheld === 1 ? "it" : "they"} ended.` : "";
+    $("coverage-withheld").hidden = gone === "";
+    $("coverage-withheld").textContent = gone;
+    // Named, so that nothing enters the file unnoticed: what this run lists for the first time and is not withheld.
+    const loose = arrived.filter((id) => !withheld.has(id));
+    $("share-new").hidden = loose.length === 0;
+    $("share-new-text").textContent = loose.length ? `${loose.length} ${loose.length === 1 ? "entry" : "entries"}: ${loose.join(", ")}.` : "";
+    // "New" is against every run of this page, not only the last one; one entry is "it".
+    $("share-new-why").textContent = loose.length === 1 ? "No run before this one listed it, so you have not reviewed it yet: it is in the lists below."
+      : "No run before this one listed them, so you have not reviewed them yet: they are in the lists below.";
+    $("share-kept").hidden = !(runs > 1 && (withheld.size > 0 || answers.size > 0 || $("f-reference").value !== "" || $("f-reason").value !== Object.keys(PROFILE_REASONS)[0]));
     $("share-summary").textContent = `${answered}Withheld: ${facts} of ${plural(profile.facts.length, "fact")}, ${settings} of ${plural(profile.settings.length, "setting")}, check outcome ${profile.check.withheld === true ? "withheld" : "included"}${checksWithheld ? ` (${checksWithheld} of ${plural(checks.length, "check")} withheld)` : ""}.`;
   }
 
@@ -1491,14 +1844,37 @@
     return !problem;
   }
 
-  function downloadProfile() {
+  /** The name the file is saved under: the day the profile was taken. */
+  function profileFileName(profile) {
+    const day = /^\d{4}-\d{2}-\d{2}/.exec(String(profile.created_at));
+    return `n8n-profile-${day ? day[0] : "undated"}.json`;
+  }
+
+  // Step 6: the name of the file and what it holds, as step 5 left it.
+  function renderDownload() {
+    $("file-name").textContent = profileFileName(currentProfile());
+    $("file-holds").textContent = $("share-summary").textContent;
+    $("download-status").textContent = "";
+  }
+
+  function continueFromShare() {
     if (!checkReference()) {
       $("f-reference").focus();
       return;
     }
+    go(6);
+  }
+
+  function downloadProfile() {
+    // Step 6 opens only for the profile of a run, which only a run with a checked debug information has.
+    if (!canOpen(6)) return;
+    if (!checkReference()) {
+      showStep(5);
+      $("f-reference").focus();
+      return;
+    }
     const profile = currentProfile();
-    const day = /^\d{4}-\d{2}-\d{2}/.exec(String(profile.created_at));
-    download(`n8n-profile-${day ? day[0] : "undated"}.json`, "application/json", profileText(profile), "share-status");
+    download(profileFileName(profile), "application/json", profileText(profile), "download-status");
   }
 
   // Viewer ("Open a profile" on the start page).
@@ -1535,7 +1911,7 @@
     }
     $("profile-meta").textContent = `${file.name} · read in this browser, not uploaded`;
     $("profile-body").replaceChildren(callSheetSection(data), ...profileSections(data, false), sheetSection(data));
-    showView("profile");
+    showProfile(true);
     announce("Profile opened.");
   }
 
@@ -1667,12 +2043,14 @@
   }
 
   for (const [value, label] of Object.entries(PROFILE_REASONS)) $("f-reason").append(el("option", { value }, label));
+  $("f-reason").value = Object.keys(PROFILE_REASONS)[0]; // once, when the page loads: a new run does not put it back
   checkReference();
   $("f-reference").addEventListener("input", checkReference);
   $("share-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    downloadProfile();
+    continueFromShare();
   });
+  $("profile-download").addEventListener("click", () => downloadProfile());
   $("questions-list").addEventListener("change", (event) => {
     const input = event.target;
     const id = input.dataset.question;
@@ -1692,7 +2070,7 @@
   });
   $("share-body").addEventListener("change", (event) => {
     const key = event.target.dataset.withhold;
-    if (!key) return;
+    if (!key || key === ALWAYS_SHARED) return;
     if (event.target.checked) withheld.add(key);
     else withheld.delete(key);
     renderShare();
@@ -1701,21 +2079,25 @@
     const button = event.target.closest("button[data-bulk]");
     if (!button) return;
     const keys = button.dataset.bulk === "facts"
-      ? report.profile.facts.map((fact) => fact.id)
+      ? report.profile.facts.map((fact) => fact.id).filter((id) => id !== ALWAYS_SHARED)
       : report.profile.settings.map(settingKey);
     for (const key of keys) {
       if (button.dataset.on === "true") withheld.add(key);
       else withheld.delete(key);
     }
+    allOf[button.dataset.bulk === "facts" ? "facts" : "settings"] = button.dataset.on === "true"; // remembered for a later run
     renderShare();
     $("share-status").textContent = `${button.textContent}: done.`;
   });
   $("f-profile").addEventListener("change", openProfile);
   $("profile-print").addEventListener("click", () => window.print());
-  $("profile-close").addEventListener("click", () => {
+  function closeProfile() {
     $("profile-body").replaceChildren(); // nothing of the file is kept
     $("profile-meta").textContent = "";
-    showView("form");
+  }
+  $("profile-close").addEventListener("click", () => {
+    closeProfile();
+    showProfile(false);
   });
 
   // ── Report actions ──────────────────────────────────────────────────
@@ -1767,6 +2149,35 @@
     event.preventDefault();
     submit();
   });
+  $("debug-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    continueFromDebug();
+  });
+  $("sources-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    continueFromSources();
+  });
+  for (let n = 1; n <= STEP_COUNT; n += 1) $(`go-${n}`).addEventListener("click", () => go(n));
+  for (const [id, target] of [["next-1", 2], ["back-2", 1], ["back-3", 2], ["back-4", 3], ["next-4", 5], ["back-5", 4], ["back-6", 5], ["coverage-back", 3]]) {
+    $(id).addEventListener("click", () => go(target));
+  }
+  // A text that was edited is no longer the one the server read: steps 3 to 6 close until it is checked again.
+  // A source that was edited is no longer the one the report was made from: steps 5 and 6 close until a new run.
+  for (const input of document.querySelectorAll("#debug-form textarea, #sources-form input, #sources-form textarea")) input.addEventListener("input", renderStepper);
+  // The browser's Back and Forward move between the steps; the entries hold a step number only.
+  window.history.replaceState({ step }, "");
+  window.addEventListener("popstate", (event) => {
+    const wanted = event.state && Number.isInteger(event.state.step) ? event.state.step : 1;
+    if (!$("view-profile").hidden) closeProfile();
+    const open = wanted === step || canOpen(wanted);
+    showStep(open ? wanted : step, false);
+    if (open) return;
+    // The page stays where it is, and says so: a press that changes nothing on screen looks broken.
+    const text = `Step ${wanted} cannot be opened: ${closedBecause(wanted)}. You are still on step ${step}.`;
+    $("step-closed").textContent = text;
+    $("step-closed").hidden = false;
+    announce(text);
+  });
   $("form-retry").addEventListener("click", submit);
   $("meta-retry").addEventListener("click", loadMeta);
   $("f-env-file").addEventListener("change", chooseEnvFile);
@@ -1793,7 +2204,7 @@
   }
 
   // An inline error disappears as soon as its field is edited.
-  for (const input of document.querySelectorAll("#run-form input, #run-form textarea")) {
+  for (const input of document.querySelectorAll("#debug-form textarea, #sources-form input, #sources-form textarea")) {
     input.addEventListener("input", () => {
       // The error is the last id: a field may name its hint before it.
       const errorId = (input.getAttribute("aria-describedby") || "").split(" ").pop();
@@ -1807,10 +2218,6 @@
   $("act-json").addEventListener("click", () => download(`n8n-healthcheck-snapshot-${fileStamp(report.finishedAt)}.json`, "application/json", `${JSON.stringify(report.snapshot ?? null, null, 2)}\n`));
   $("act-copy").addEventListener("click", copyMarkdown);
   $("act-print").addEventListener("click", () => window.print());
-  $("act-again").addEventListener("click", () => {
-    clearErrors();
-    showView("form");
-  });
 
   $("severity-filter").addEventListener("click", (event) => {
     const button = event.target.closest("button[data-severity]");

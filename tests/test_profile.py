@@ -1347,7 +1347,9 @@ COLLECTED = Snapshot(
     env={"EXECUTIONS_MODE": "queue", "DB_POSTGRESDB_HOST": "db.internal.example", "N8N_PORT": "5678"},
     n8n_version=None,
 )
-SOURCES = ["--url", "https://n8n.example.com", "--env-file", "n8n.env", "--redis-url", "redis://cache.example:6379"]
+# --debug-info is required with --save-profile since 0.7.0. collect() is replaced in these tests, so the text is not read:
+# the snapshot, and with it the profile, is the one each test gives.
+SOURCES = ["--url", "https://n8n.example.com", "--env-file", "n8n.env", "--redis-url", "redis://cache.example:6379", "--debug-info", "debug.txt"]
 
 
 def warning_rule(snapshot):
@@ -1365,7 +1367,7 @@ class CliProfileTest(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch("n8n_healthcheck.rules.ALL_RULES", list(rules)):
             with mock.patch("n8n_healthcheck.collectors.collect", return_value=snapshot):
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch("n8n_healthcheck.cli.read_debug_info", return_value={}):
                     try:
                         code = cli.main(argv)
                     except SystemExit as exit_:  # a usage error
@@ -1421,7 +1423,8 @@ class CliProfileTest(unittest.TestCase):
             (SOURCES + save + ["--withhold", "worker.replica"], "nothing in the profile has the id 'worker.replica'"),
             (SOURCES + save + ["--withhold", "run"], "nothing in the profile has the id 'run'"),
             (SOURCES + save + ["--withhold", "setting:instance:N8N_NOT_SET"], "nothing in the profile has this id"),
-            (save, "nothing to inspect"),
+            # Since 0.7.0 a profile needs the debug information, and that is said before "nothing to inspect".
+            (save, "--save-profile needs --debug-info"),
         ):
             with self.subTest(argv=argv[len(SOURCES) :] if argv[:1] == SOURCES[:1] else argv):
                 report_path = os.path.join(self.dir, "report.md")

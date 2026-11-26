@@ -42,6 +42,9 @@ FORMAT_VERSION = 1
 
 REASONS = ("baseline", "pre_upgrade", "post_upgrade", "incident", "other")
 REFERENCE_MAX = 200
+# The one entry the operator cannot withhold: the command line and the page refuse it.
+# A file in which it is withheld (an earlier version wrote it) is still a valid profile.
+ALWAYS_SHARED = "n8n.version"
 SOURCE_STATES = ("collected", "disabled", "failed", "not_provided")
 # `declared` is an answer to an operator question (questions.py), set by apply_answers().
 PROVENANCES = ("measured", "declared", "unknown", "withheld")

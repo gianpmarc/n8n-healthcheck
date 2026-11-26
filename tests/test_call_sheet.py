@@ -965,7 +965,8 @@ class SheetTest(unittest.TestCase):
 class CliTest(unittest.TestCase):
     def run_cli(self, *argv, snapshot=RICH):
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch("n8n_healthcheck.collectors.collect", return_value=snapshot):
+        # --debug-info is required with --save-profile since 0.7.0; collect() is replaced, so the text is not read.
+        with mock.patch("n8n_healthcheck.collectors.collect", return_value=snapshot), mock.patch("n8n_healthcheck.cli.read_debug_info", return_value={}):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
                     code = cli.main(list(argv))
@@ -976,7 +977,7 @@ class CliTest(unittest.TestCase):
     def saved(self, *argv):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "profile.json")
-            code, out, err = self.run_cli("--url", "https://n8n.example.com", "--save-profile", path, *argv)
+            code, out, err = self.run_cli("--url", "https://n8n.example.com", "--debug-info", "debug.txt", "--save-profile", path, *argv)
             file = profile.load_profile(path) if os.path.exists(path) else None
         return code, out, err, file
 
@@ -984,7 +985,7 @@ class CliTest(unittest.TestCase):
         code, out, err, file = self.saved()
         self.assertEqual(code, 1)
         self.assertEqual([entry["rule_id"] for entry in file["check"]["checks"]], [rule.info.rule_id for rule in ALL_RULES])
-        self.assertEqual(file["tool_version"], "0.6.0")
+        self.assertEqual(file["tool_version"], "0.7.0")
         self.assertEqual(file["format_version"], 1)
         from n8n_healthcheck import report
 
@@ -1073,7 +1074,8 @@ class CliTest(unittest.TestCase):
 def run_response(snapshot=RICH):
     """The text POST /api/run answers with, from the real server code and the real rules."""
     with mock.patch("n8n_healthcheck.collectors.collect", return_value=snapshot):
-        return json.dumps(cli.json_safe(web.run_check({"url": "https://n8n.example.com"})), allow_nan=False)
+        # Since 0.7.0 a profile needs a debug information in the request; collect() is replaced, so the snapshot is the one given.
+        return json.dumps(cli.json_safe(web.run_check({"url": "https://n8n.example.com", "debug_info_text": page.READ})), allow_nan=False)
 
 
 class PageStyleTest(unittest.TestCase):

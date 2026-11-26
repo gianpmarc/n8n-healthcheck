@@ -102,7 +102,7 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         epilog="Exit codes: 0 no critical findings or warnings, 1 at least one warning, "
         "2 at least one critical finding, 3 the check could not run "
         "(usage error, unreadable or unwritable file, a text that is not a debug information, "
-        "a file that does not hold one API key, "
+        "a file that does not hold one API key, --save-profile without --debug-info, "
         "no requested source reachable, "
         "every rule failed to run). --show-profile, --show-questions and --show-sheet exit 0, or 3 "
         "when the file is not a usable profile.",
@@ -134,7 +134,7 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         "does not remove the setting it was read from or a check that rests on it: "
         "withhold those too (the tool names such checks when it saves the file).",
     )
-    group.add_argument("--save-profile", metavar="FILE", help="write the environment profile as JSON")
+    group.add_argument("--save-profile", metavar="FILE", help="write the environment profile as JSON; needs --debug-info")
     group.add_argument("--reason", choices=profile.REASONS, help="why the profile was taken (default: baseline)")
     group.add_argument("--reference", metavar="TEXT", help="free text stored in the profile; no secrets")
     group.add_argument(
@@ -143,7 +143,8 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
         default=[],
         metavar="ID",
         help="leave this entry out of the profile: a fact id, setting:<scope>:<NAME>, "
-        "check:<RULE_ID> for one check, or check for the whole outcome (repeatable)",
+        "check:<RULE_ID> for one check, or check for the whole outcome (repeatable). "
+        "The n8n version (n8n.version) cannot be withheld",
     )
     group.add_argument("--show-profile", metavar="FILE", help="print a saved profile as Markdown, then exit")
     group.add_argument(
@@ -189,11 +190,21 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
             "--save-profile cannot be combined with --snapshot: a saved snapshot does not "
             "record which sources failed or when it was taken"
         )
+    elif args.debug_info is None:
+        # Before anything is collected: the operator must not learn it after the run.
+        parser.error(
+            "--save-profile needs --debug-info: a profile always holds the n8n version, which is read "
+            "from the debug information. In n8n, open Help > About n8n > Debug information > Copy, "
+            'save the text to a file and pass --debug-info FILE ("-" reads it from standard input). '
+            "The report alone needs none"
+        )
     try:
         args.reference = profile.check_reference(args.reference or "")
     except profile.ProfileError as exc:
         parser.error(f"--reference: {exc}")
     for item in args.withhold:
+        if item == profile.ALWAYS_SHARED:
+            parser.error(f"--withhold: {item} cannot be withheld: the n8n version is always part of the profile")
         # A setting id can only be checked once the environment has been read.
         # Nor can the id of a check, which is one of the rules read at run time.
         if item not in profile.FACT_IDS and item != "check" and not item.startswith(("setting:", "check:")):
