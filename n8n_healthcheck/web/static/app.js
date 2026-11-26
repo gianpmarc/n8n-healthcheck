@@ -142,6 +142,8 @@
   const asked = new Map(); // fact id -> { inputs, note } of the question on screen
   const filters = { severity: "all", area: "all" };
 
+  const STALE_REPORT = "This is the report of an earlier run. Run again to get the report and the file of what you entered.";
+
   function announce(text) {
     const region = $("announce");
     region.textContent = "";
@@ -418,6 +420,7 @@
   }
 
   function renderStepper() {
+    $("step-closed").hidden = true; // what it said was about the state before this change
     for (let n = 1; n <= STEP_COUNT; n += 1) {
       const button = $(`go-${n}`);
       button.disabled = n !== step && !canOpen(n);
@@ -436,6 +439,7 @@
 
   /** Put step `n` on screen and move the focus to its heading. `record` is false when the history already holds it. */
   function showStep(n, record = true) {
+    const arriving = n !== step;
     step = n;
     for (let other = 1; other <= STEP_COUNT; other += 1) $(`step-${other}`).hidden = other !== n;
     $("flow").hidden = false;
@@ -446,6 +450,16 @@
     if (record) window.history.pushState({ step: n }, "");
     window.scrollTo(0, 0);
     $(`step-${n}-title`).focus({ preventScroll: true });
+    // The notice over an earlier run's report appears while this step is hidden, so it is said on arrival.
+    if (n === 4 && arriving && !$("report-stale").hidden) announce(STALE_REPORT);
+  }
+
+  /** Why step `n` cannot be opened now, for the browser's Back or Forward onto an entry of it. */
+  function closedBecause(n) {
+    if (running) return "a run is under way";
+    if (checking) return "the debug information is being checked";
+    if (n >= 3 && !debugChecked()) return "the debug information has to be checked first";
+    return "it needs a run made from what is in the form now";
   }
 
   /** Open step `n` if it can be opened; true when it was. */
@@ -1814,6 +1828,9 @@
     const loose = arrived.filter((id) => !withheld.has(id));
     $("share-new").hidden = loose.length === 0;
     $("share-new-text").textContent = loose.length ? `${loose.length} ${loose.length === 1 ? "entry" : "entries"}: ${loose.join(", ")}.` : "";
+    // "New" is against every run of this page, not only the last one; one entry is "it".
+    $("share-new-why").textContent = loose.length === 1 ? "No run before this one listed it, so you have not reviewed it yet: it is in the lists below."
+      : "No run before this one listed them, so you have not reviewed them yet: they are in the lists below.";
     $("share-kept").hidden = !(runs > 1 && (withheld.size > 0 || answers.size > 0 || $("f-reference").value !== "" || $("f-reason").value !== Object.keys(PROFILE_REASONS)[0]));
     $("share-summary").textContent = `${answered}Withheld: ${facts} of ${plural(profile.facts.length, "fact")}, ${settings} of ${plural(profile.settings.length, "setting")}, check outcome ${profile.check.withheld === true ? "withheld" : "included"}${checksWithheld ? ` (${checksWithheld} of ${plural(checks.length, "check")} withheld)` : ""}.`;
   }
@@ -2152,7 +2169,14 @@
   window.addEventListener("popstate", (event) => {
     const wanted = event.state && Number.isInteger(event.state.step) ? event.state.step : 1;
     if (!$("view-profile").hidden) closeProfile();
-    showStep(wanted === step || canOpen(wanted) ? wanted : step, false);
+    const open = wanted === step || canOpen(wanted);
+    showStep(open ? wanted : step, false);
+    if (open) return;
+    // The page stays where it is, and says so: a press that changes nothing on screen looks broken.
+    const text = `Step ${wanted} cannot be opened: ${closedBecause(wanted)}. You are still on step ${step}.`;
+    $("step-closed").textContent = text;
+    $("step-closed").hidden = false;
+    announce(text);
   });
   $("form-retry").addEventListener("click", submit);
   $("meta-retry").addEventListener("click", loadMeta);

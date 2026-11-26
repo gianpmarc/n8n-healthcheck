@@ -50,6 +50,7 @@
         <li><button type="button" class="stepper__step" id="go-6" data-step="6" disabled><span class="stepper__n" aria-hidden="true">6</span><span class="sr-only">Step 6: </span><span class="stepper__label">Download and send</span></button></li>
       </ol>
     </nav>
+    <p class="notice notice--stale" id="step-closed" hidden></p>
 
     <!-- Step 1 -->
     <section id="step-1" class="step" aria-labelledby="step-1-title">
@@ -379,7 +380,7 @@
         </ul>
 
         <p class="notice" id="share-kept" hidden>Kept from your previous run: what you withheld, your answers, the reason and the reference. A fact or a check you withheld stays withheld. A setting you withheld is also withheld under a source that states it for the first time in this run, and after “Withhold all” the entries that are new in this run are withheld too.</p>
-        <p class="notice notice--stale" id="share-new" role="status" hidden><strong class="lead-in">New in this run and not withheld.</strong> <span id="share-new-text"></span> They were not in the run before, so you have not reviewed them yet: they are in the lists below.</p>
+        <p class="notice notice--stale" id="share-new" role="status" hidden><strong class="lead-in">New in this run and not withheld.</strong> <span id="share-new-text"></span> <span id="share-new-why"></span></p>
 
         <form id="share-form" novalidate autocomplete="off">
           <div class="field-row">

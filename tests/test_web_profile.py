@@ -1183,6 +1183,81 @@ class PageBehaviourTest(unittest.TestCase):
         self.assertEqual((got["forward"], got["kept"]), (["step-2", "step-3", "step-4"], kept))
         self.assertEqual((got["closed"], got["unknown"], got["pushed"]), ("step-4", "step-1", 0))
 
+    def test_the_browsers_back_onto_a_closed_step_says_why_the_page_stays(self):
+        # Second review, nit 2: with steps 5 and 6 closed, Back onto an entry of one of them left the page as
+        # it was, with nothing to show that the press was taken.
+        got = run_page(
+            """async (page, input) => {
+              const said = async () => { await new Promise((resolve) => setTimeout(resolve, 80)); return page.$("announce").textContent; };
+              const closed = () => page.visible("step-closed") && page.$("step-closed").textContent;
+              const seen = {};
+              await page.run(input.response);
+              page.go(5); page.go(6); page.go(4);
+              seen.open = [page.popstate({ step: 5 }), closed()];  // an entry of a step that is open: the step, no notice
+              page.go(3);
+              page.type("f-url", "https://n8n.example.test");  // the report is no longer the one of the form
+              await page.continueSources();
+              seen.stale = [page.popstate({ step: 5 }), closed(), await said(), document.activeElement.id];
+              seen.again = [page.popstate({ step: 6 }), closed()];
+              seen.moved = [page.popstate({ step: 3 }), closed()];  // a press that moves takes the notice away
+              page.go(4);
+              seen.gone = [page.popstate({ step: 6 }), closed(), (page.go(3), closed())];
+              page.go(4);
+              page.popstate({ step: 5 });
+              await page.submit();
+              seen.ran = [closed(), (await page.finishRun(input.other), closed()), page.popstate({ step: 5 })];  // the run opens the step: the notice is no longer true
+              page.go(2);
+              page.type("f-debug", input.text + " ");  // no longer the text that was checked
+              seen.unchecked = [page.popstate({ step: 4 }), closed()];
+              page.type("f-debug", input.text);
+              page.go(4);
+              await page.submit();
+              seen.running = [page.popstate({ step: 1 }), closed()];
+              return seen;
+            }""",
+            response=run_response(), other=run_response(dataclasses.replace(PLAIN, kubernetes=None)), text=pasted.FULL,
+        )  # fmt: skip
+        stays = "Step 5 cannot be opened: it needs a run made from what is in the form now. You are still on step 4."
+        self.assertEqual(got["open"], ["step-5", False])
+        self.assertEqual(got["stale"], ["step-4", stays, stays, "step-4-title"])
+        self.assertEqual(got["again"], ["step-4", stays.replace("Step 5", "Step 6")])
+        self.assertEqual(got["moved"], ["step-3", False])
+        self.assertEqual(got["gone"], ["step-4", stays.replace("Step 5", "Step 6"), False])
+        self.assertEqual(got["ran"], [False, False, "step-5"])
+        self.assertEqual(got["unchecked"], ["step-2", "Step 4 cannot be opened: the debug information has to be checked first. You are still on step 2."])
+        self.assertEqual(got["running"], ["step-4", "Step 1 cannot be opened: a run is under way. You are still on step 4."])
+        self.assertIn('<p class="notice notice--stale" id="step-closed" hidden></p>', INDEX_HTML)
+
+    def test_the_notice_of_an_earlier_runs_report_is_said_on_arriving_at_step_four(self):
+        # Second review, nit 3: the notice becomes visible while step 4 is hidden, so its role="status" says
+        # nothing. It is announced when the step is shown, and the focus goes to the heading as for any step.
+        got = run_page(
+            """async (page, input) => {
+              const said = async () => { await new Promise((resolve) => setTimeout(resolve, 80)); return page.$("announce").textContent; };
+              const clear = async () => { await said(); page.$("announce").textContent = ""; };  // after what was being said
+              const seen = {};
+              await page.run(input.response);
+              page.go(3); await clear(); page.go(4);
+              seen.current = [page.visible("report-stale"), await said()];
+              page.go(3);
+              page.type("f-url", "https://n8n.example.test");
+              await clear(); await page.continueSources();
+              seen.byContinue = [page.view(), page.visible("report-stale"), await said(), document.activeElement.id];
+              page.go(3); await clear(); page.go(4);
+              seen.byList = await said();
+              page.go(3); await clear(); page.popstate({ step: 4 });
+              seen.byHistory = await said();
+              await clear(); page.popstate({ step: 4 });  // already on the step: not said again
+              seen.onIt = await said();
+              return seen;
+            }""",
+            response=run_response(),
+        )  # fmt: skip
+        stale = "This is the report of an earlier run. Run again to get the report and the file of what you entered."
+        self.assertEqual(got["current"], [False, ""])
+        self.assertEqual(got["byContinue"], ["step-4", True, stale, "step-4-title"])
+        self.assertEqual((got["byList"], got["byHistory"], got["onIt"]), (stale, stale, ""))
+
     def test_no_step_can_be_left_while_a_run_is_under_way(self):
         got = run_page(
             """async (page, input) => {
@@ -1840,6 +1915,7 @@ class PageBehaviourTest(unittest.TestCase):
         self.assertEqual([profile.setting_id(s) for s in second["settings"]][3:], new)
         scenario = """async (page, input) => {
           const read = async () => ({ summary: page.$("share-summary").textContent, kept: page.visible("share-kept"), fresh: page.visible("share-new") && page.$("share-new-text").textContent,
+                                      why: page.$("share-new-why").textContent,
                                       ticked: Object.entries(page.boxes()).filter(([id, box]) => box.checked && id.startsWith("setting")).map(([id]) => id),
                                       saved: JSON.parse(await page.download()).settings });
           const again = async (response) => { page.$("back-4").click(); await page.continueSources(); await page.run(response); };
@@ -1872,6 +1948,8 @@ class PageBehaviourTest(unittest.TestCase):
         self.assertEqual((saved["setting:main:EXECUTIONS_MODE"], saved["setting:main:N8N_HOST"]), (("withheld", None), ("set", None)))
         self.assertNotIn("queue", json.dumps([s for s in got["after"]["saved"] if s["name"] == "EXECUTIONS_MODE"]))
         self.assertEqual(got["after"]["fresh"], "1 entry: setting:main:N8N_HOST.")
+        # Second review, nit 1: one entry is "it", and "new" is against every run so far, not the last one.
+        self.assertEqual(got["after"]["why"], "No run before this one listed it, so you have not reviewed it yet: it is in the lists below.")
         self.assertIn("2 of 5 settings", got["after"]["summary"])
         # Later the entries are no longer new: nothing is named, and each row is as the operator left it.
         self.assertEqual((got["third"]["fresh"], got["third"]["ticked"]), (False, got["after"]["ticked"]))
@@ -1879,6 +1957,8 @@ class PageBehaviourTest(unittest.TestCase):
         # A row the operator unticks in the later run stays unticked: it is their choice for that row.
         got = run_page(scenario, first=env_only, second=with_kubernetes, press=[], tick=["setting:instance:EXECUTIONS_MODE"], untick=["setting:main:EXECUTIONS_MODE"])
         self.assertEqual(got["changed"]["fresh"], "2 entries: setting:main:EXECUTIONS_MODE, setting:main:N8N_HOST.")
+        self.assertEqual(got["changed"]["why"], "No run before this one listed them, so you have not reviewed them yet: they are in the lists below.")
+        self.assertNotIn("in the run before", INDEX_HTML + APP_JS)
         self.assertEqual(got["third"]["ticked"], ["setting:instance:EXECUTIONS_MODE"])
         self.assertEqual(state(got["third"]["saved"])["setting:main:EXECUTIONS_MODE"], ("value", "queue"))
 
