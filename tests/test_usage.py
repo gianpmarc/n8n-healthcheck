@@ -24,6 +24,7 @@ import n8n_healthcheck
 import test_debug_info as pasted  # a synthetic debug information; imported as a module so its tests run once
 import test_web_profile as page_tests  # the page harness; as a module, for the same reason
 import validate_0_2_0
+import without_machine_proxy  # noqa: F401  the stand-in servers are reached directly, whatever proxy this machine has
 from n8n_healthcheck import cli, debug_info, engine, profile, questions, report, usage
 from n8n_healthcheck.collectors import api, collect
 from n8n_healthcheck.models import Snapshot, Target

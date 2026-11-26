@@ -8,6 +8,7 @@ import unittest
 import urllib.error
 from unittest import mock
 
+import without_machine_proxy  # noqa: F401  the stand-in servers are reached directly, whatever proxy this machine has
 from n8n_healthcheck.collectors import collect, envfile, http, kubernetes, postgres, redis
 from n8n_healthcheck.collectors._util import redact
 from n8n_healthcheck.models import REDACTED, Target

@@ -14,6 +14,8 @@ import io
 import os
 import re
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -23,6 +25,7 @@ from unittest import mock
 
 import n8n_healthcheck
 import test_debug_info as pasted  # the synthetic debug information; imported as a module so its tests run once
+import without_machine_proxy  # noqa: F401  the stand-in servers are reached directly, whatever proxy this machine has
 from n8n_healthcheck import debug_info, profile
 from n8n_healthcheck.collectors import collect, postgres
 from n8n_healthcheck.models import Target
@@ -206,10 +209,10 @@ class ContactsOnlyWhatWasGivenTest(unittest.TestCase):
                 kube_context="synthetic-context",
                 debug_info=debug_info.parse(pasted.FULL),
             )
-            # No proxy of the machine running the tests: this is about where the tool itself connects.
-            with mock.patch.dict(os.environ, {}, clear=False), mock.patch("urllib.request.getproxies", return_value={}):
-                with mock.patch("socket.create_connection", side_effect=connect), mock.patch("subprocess.run", side_effect=run):
-                    snapshot, _ = quiet(target)
+            # Without the proxy of the machine running the tests (see without_machine_proxy.py): this is
+            # about where the tool itself connects.
+            with mock.patch("socket.create_connection", side_effect=connect), mock.patch("subprocess.run", side_effect=run):
+                snapshot, _ = quiet(target)
         self.assertEqual(snapshot.env, {"EXECUTIONS_MODE": "queue"})
         self.assertEqual(set(reached), {("n8n.example.test", 5678), ("cache.example.test", 6380)})
         self.assertEqual({args[0] for args in started}, {"psql", "kubectl"})
@@ -353,6 +356,23 @@ class DocumentTest(unittest.TestCase):
             source = (TESTS / file).read_text(encoding="utf-8")
             for test in re.findall(r"`(\w+)`", tests):
                 self.assertRegex(source, rf"\n    def {test}\(self", f"{file}: {test}")
+
+    def test_the_tests_the_document_names_pass_on_a_machine_with_a_proxy(self):
+        # Review of 3148e1f, finding 6: the document invites its reader to run the tests, whatever their machine.
+        # The two that reach a stand-in server or record where a run connects, in a process of their own that
+        # has the proxy variables set before anything is imported.
+        names = [
+            "test_claims.OnlyReadsTest.test_the_n8n_url_gets_three_get_requests_without_a_body",
+            "test_claims.ContactsOnlyWhatWasGivenTest.test_a_run_with_every_source_connects_to_the_hosts_given_and_starts_psql_and_kubectl",
+            "test_collectors",
+        ]
+        proxy = "http://proxy.example.test:3128"
+        environment = {**os.environ, "PYTHONPATH": str(ROOT), "HTTP_PROXY": proxy, "http_proxy": proxy, "HTTPS_PROXY": proxy, "ALL_PROXY": proxy}
+        environment.pop("NO_PROXY", None)
+        environment.pop("no_proxy", None)
+        done = subprocess.run([sys.executable, "-m", "unittest", *names], cwd=TESTS, env=environment, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        self.assertIn("without a proxy configured", " ".join(DOCUMENT.split()))
 
     def test_the_document_is_for_whoever_asked_and_names_no_internal_system(self):
         for text in (DOCUMENT, re.sub(r"<[^>]+>", "", INDEX_HTML)):

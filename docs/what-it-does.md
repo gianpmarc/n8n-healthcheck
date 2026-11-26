@@ -240,7 +240,8 @@ python3 -m unittest discover -s tests
 ```
 
 `tests/test_claims.py` holds the statements of this page that no earlier test held, and
-checks that every test named below exists.
+checks that every test named below exists. The tests pass with or without a proxy configured
+on the machine: they reach their own stand-in servers directly.
 
 | Statement | File | Tests |
 |---|---|---|
