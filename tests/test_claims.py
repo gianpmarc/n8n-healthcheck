@@ -303,6 +303,22 @@ class DocumentTest(unittest.TestCase):
             self.assertIn(sentence, text)
         self.assertEqual(profile.ALWAYS_SHARED, "n8n.version")
 
+    def test_the_first_step_says_what_the_tool_does_not_control_as_the_document_does(self):
+        # Review of 3148e1f, finding 5. Not a claim about the tool: what psql, kubectl and the resolver do is theirs.
+        text = re.sub(r"<[^>]+>", "", STEP_ONE)
+        self.assertIn(
+            "What the tool does not control: psql and kubectl connect and sign in as their own configuration says "
+            "(a credential helper may contact your provider's sign-in service), and names are looked up by this machine's resolver.",
+            text,
+        )
+        flat = " ".join(DOCUMENT.split())
+        self.assertIn("What the tool does not control: `psql` and `kubectl` are programs of your machine, and they connect and authenticate the way their own configuration says", flat)
+        self.assertIn("Names are resolved by your system's resolver.", flat)
+        # The tool passes kubectl no credential and psql only what the operator gave: the rest is their configuration.
+        kubernetes = (PACKAGE / "collectors" / "kubernetes.py").read_text(encoding="utf-8")
+        for flag in ("--token", "--kubeconfig", "--user", "--server", "--as"):
+            self.assertNotIn(flag, kubernetes)
+
     def test_what_the_file_never_contains_is_the_same_list_everywhere(self):
         for name, text in (("the first step", re.sub(r"<[^>]+>", "", STEP_ONE)), ("the document", DOCUMENT), ("the README", README)):
             with self.subTest(text=name):

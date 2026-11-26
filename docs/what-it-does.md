@@ -43,7 +43,7 @@ the binary data mode, the pruning settings, two security flags, and from the `cl
 section the number of instances by type, their versions and the names of failed checks.
 Each value is read by a strict reader that accepts a known word, a whole number, a
 boolean or a version and drops anything else. The instance id, the host ids and the
-browser's user agent in the text are never read. A text larger than 64 KB, one that is
+browser's user agent in the text are not taken from it: nothing of them is kept. A text larger than 64 KB, one that is
 not a debug information, or one that holds more than one, is refused with a fixed
 sentence that quotes nothing of it.
 
@@ -146,8 +146,10 @@ performance, maintainability, security) gets a score from 0 to 100 computed from
 findings. What each check reads and every sentence it can write: [rules.md](rules.md).
 
 On the page, step 3 shows how many of the 24 checks the debug information decides by
-itself and how many wait for each source, and step 5 shows the same for the run. These
-numbers are counted from what the checks stated; they are not estimates.
+itself and, for each source, at least how many more can be decided with it; step 5
+shows what the run decided. These numbers are counted from what the checks stated;
+they are not estimates. The number under a source is a lower bound: it counts the checks
+that name that source as one they lack, and a source can decide others too.
 
 ## What it writes
 
@@ -256,7 +258,7 @@ checks that every test named below exists.
 | The env file is only read; secret values are redacted | `test_claims.py` | `test_the_env_file_is_opened_to_be_read_and_left_as_it_was` |
 | Which names count as secrets | `test_collectors.py` | `test_redaction_allowlist_is_exact` |
 | The pasted env text: a private file, removed after the run | `test_web.py` | `test_env_text_goes_through_a_private_file_that_is_removed` |
-| The debug information: ids never read, nothing of it in any output | `test_debug_info.py` | `test_cluster_instances_are_counted_by_type_and_nothing_else_is_kept`, `test_no_marker_in_any_output_of_a_run`, `test_no_marker_in_an_error_message` |
+| The debug information: ids not taken from it, nothing of it in any output | `test_debug_info.py` | `test_cluster_instances_are_counted_by_type_and_nothing_else_is_kept`, `test_no_marker_in_any_output_of_a_run`, `test_no_marker_in_an_error_message` |
 | The debug information is never written to disk by the server | `test_web.py` | `test_a_debug_information_is_never_written_to_disk` |
 | A refused text is answered with a fixed sentence | `test_web.py` | `test_a_refused_debug_information_is_a_400_with_the_fixed_sentence` |
 | No profile without the debug information, on the command line | `test_guided_flow.py` | `test_a_profile_without_the_debug_information_is_refused_before_anything_is_collected`, `test_the_report_alone_needs_no_debug_information` |

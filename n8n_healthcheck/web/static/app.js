@@ -558,10 +558,12 @@
     $("gain-decided").textContent = `The debug information decides ${whole(coverage.decided)} of ${plural(whole(coverage.total), "check")}.`;
     const unstated = whole(coverage.unstated);
     $("gain-unstated").hidden = unstated === 0;
-    $("gain-unstated").textContent = `${checksThat(unstated, "need")} a source that states a setting the debug information does not show.`;
-    for (const source of ["url", "env", "postgres", "redis", "kubernetes"]) {
+    $("gain-unstated").textContent = `${checksThat(unstated, "need")} a source that states a setting the debug information does not show. Not counted under any source below, though a source may decide them too.`;
+    for (const [source, field] of [["url", "f-url"], ["env", "f-env"], ["postgres", "f-postgres"], ["redis", "f-redis"], ["kubernetes", "f-kube-ns"]]) {
       const waiting = whole(coverage.waiting[source]);
-      $(`gain-${source}`).textContent = waiting ? `${plural(waiting, "check")} can be decided with this source.` : "No check is waiting for this source.";
+      // A source this machine cannot read (its fieldset is disabled) promises nothing.
+      $(`gain-${source}`).textContent = $(field).closest("fieldset").disabled ? ""
+        : waiting ? `At least ${plural(waiting, "check")} can be decided with this source.` : "No check names this source as the one it lacks.";
     }
   }
 
@@ -1803,6 +1805,11 @@
     const answered = asked.size ? `Answered: ${given} of ${plural(asked.size, "question")}. ` : "";
     const checks = checkEntries(profile);
     const checksWithheld = checks ? checks.filter((entry) => entry.outcome === "withheld").length : 0;
+    // The numbers on top are the run's. What is withheld of the checks here is said next to them.
+    const gone = profile.check.withheld === true ? "You withheld the check outcome below: the file tells its reader none of this."
+      : checksWithheld ? `You withheld ${checksWithheld} of the ${plural(checks.length, "check")} below: the file does not say how ${checksWithheld === 1 ? "it" : "they"} ended.` : "";
+    $("coverage-withheld").hidden = gone === "";
+    $("coverage-withheld").textContent = gone;
     // Named, so that nothing enters the file unnoticed: what this run lists for the first time and is not withheld.
     const loose = arrived.filter((id) => !withheld.has(id));
     $("share-new").hidden = loose.length === 0;

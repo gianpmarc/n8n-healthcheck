@@ -58,7 +58,7 @@
 
       <ul class="assurances">
         <li><strong>It only reads.</strong> Nothing is changed on your instance, your database or your cluster.</li>
-        <li><strong>It runs here and contacts only what you point it at.</strong> The check runs on the machine where n8n-healthcheck was started. It contacts the n8n URL, the database, Redis, and the cluster of the kubectl context you choose. A redirect the n8n URL answers with is followed, and those requests use the proxy settings of this machine if it has any; the API key, when you give one, goes to that URL only, never to another host or through a proxy. The report and the file are sent nowhere.</li>
+        <li><strong>It runs here and contacts only what you point it at.</strong> The check runs on the machine where n8n-healthcheck was started. It contacts the n8n URL, the database, Redis, and the cluster of the kubectl context you choose. A redirect the n8n URL answers with is followed, and those requests use the proxy settings of this machine if it has any; the API key, when you give one, goes to that URL only, never to another host or through a proxy. What the tool does not control: <code>psql</code> and <code>kubectl</code> connect and sign in as their own configuration says (a credential helper may contact your provider's sign-in service), and names are looked up by this machine's resolver. The report and the file are sent nowhere.</li>
         <li><strong>You end with one file, which you review and send yourself.</strong> You can leave out any entry of it except the n8n version, which is always part of the file.</li>
       </ul>
 
@@ -113,7 +113,7 @@
         <div id="debug-read" class="notice readout" tabindex="-1" hidden>
           <p><strong class="lead-in">Read from the text.</strong> Nothing was collected from the instance yet.</p>
           <dl class="pdetails" id="debug-read-rows"></dl>
-          <p class="block__note">The instance ids, the host ids and the browser's user agent in the text were read and discarded: they are not kept, shown or written anywhere.</p>
+          <p class="block__note">The instance ids, the host ids and the browser's user agent in the text are not taken from it: nothing of them is kept, shown or written anywhere.</p>
           <ul class="messages" id="debug-notes" hidden></ul>
         </div>
 
@@ -138,7 +138,7 @@
 
       <div class="notice gain">
         <p><strong id="gain-decided"></strong> This is the result of running the checks on it alone, not a prediction.</p>
-        <p>Under each source below: how many of the other checks can be decided with it. A check that can be decided with more than one source is counted under each of them, so the numbers do not add up.</p>
+        <p>Under each source below: at least how many of the other checks can be decided with it. It is a lower bound, counted from the checks that name the source as one they lack. A check that can be decided with more than one source is counted under each of them, so the numbers do not add up.</p>
         <p id="gain-unstated" hidden></p>
       </div>
       <p class="block__note"><strong class="lead-in">Nothing kept.</strong> What you type is sent only to the n8n-healthcheck server you opened this page from. No form value is saved in the browser, and the server keeps nothing once the check ends. Reloading the page clears the form.</p>
@@ -362,10 +362,11 @@
       <p class="lead">The profile is one JSON file of facts about this environment, for the person who asked you for it. Review it here and withhold what you do not want to share.</p>
 
       <section aria-labelledby="coverage-title" class="block" id="coverage-block" hidden>
-        <h3 id="coverage-title">How much the file lets the reader assess</h3>
+        <h3 id="coverage-title">How much this run decided</h3>
         <p class="block__note"><strong class="lead-in" id="coverage-decided"></strong> <span id="coverage-rest"></span></p>
         <ul class="messages" id="coverage-list" hidden></ul>
         <p class="block__note" id="coverage-note" hidden>A check that can be decided with more than one source is counted under each of them, so these numbers do not add up.</p>
+        <p class="block__note" id="coverage-withheld" role="status" hidden></p>
         <p class="block__note" id="coverage-action" hidden><button type="button" class="btn btn--small" id="coverage-back">Back to step 3 to add a source</button></p>
       </section>
 

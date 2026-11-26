@@ -10,7 +10,7 @@ If you downloaded the repository as a ZIP, macOS may refuse to open the launcher
 
 ## The page
 
-The page guides you through six steps. Step 2, "Debug information", is the only required one: it takes the text n8n shows under Help > About n8n > Debug information > Copy, pasted as it is. It needs no access to the instance, so it works from the container without any of the network notes below, and it can be the only thing you give. The instance id, the host ids and the browser's user agent in it are read and discarded: [Debug information](../README.md#debug-information). Every source of step 3 is optional.
+The page guides you through six steps. Step 2, "Debug information", is the only required one: it takes the text n8n shows under Help > About n8n > Debug information > Copy, pasted as it is. It needs no access to the instance, so it works from the container without any of the network notes below, and it can be the only thing you give. The instance id, the host ids and the browser's user agent in it are not taken from it: [Debug information](../README.md#debug-information). Every source of step 3 is optional.
 
 ## After a run: the environment profile
 

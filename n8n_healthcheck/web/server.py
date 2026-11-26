@@ -105,7 +105,7 @@ def meta() -> dict:
                 "debug_info",
                 "Debug information",
                 "The text n8n gives under Help > About n8n > Debug information > Copy. "
-                "The instance ids, host ids and the browser's user agent in it are read and discarded.",
+                "The instance ids, host ids and the browser's user agent in it are not taken from it.",
             ),
             source("url", "n8n URL", "Base URL of the n8n instance; reads its health endpoints and /metrics."),
             # Not a fieldset of its own: the key is a field of the "n8n URL" source.

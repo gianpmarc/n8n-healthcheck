@@ -250,7 +250,7 @@ class ServerTest(unittest.TestCase):
             ],
         )
         self.assertEqual(result["coverage"], web.check_debug_info(debug_info.parse(pasted.FULL))["coverage"])
-        # The ids of the text were read and discarded: nothing of them is answered or logged.
+        # Nothing of the ids of the text is answered or logged.
         self.assertNotIn(pasted.MARK, raw)
         self.assertNotIn(pasted.MARK, self.log.getvalue())
         self.assertIn('"POST /api/debug-info" 200', self.log.getvalue())

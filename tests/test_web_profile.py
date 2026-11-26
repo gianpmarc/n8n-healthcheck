@@ -214,7 +214,7 @@ class PageSourceTest(unittest.TestCase):
         )
         self.assertEqual(web.meta()["sources"][0]["id"], "debug_info")
         hint = web.meta()["sources"][0]["hint"]
-        for said in ("Help > About n8n > Debug information > Copy", "instance ids, host ids and the browser's user agent", "discarded"):
+        for said in ("Help > About n8n > Debug information > Copy", "instance ids, host ids and the browser's user agent", "are not taken from it"):
             self.assertIn(said, hint)
         field = re.search(r'<textarea id="f-debug"[^>]*>', INDEX_HTML).group(0)
         # Labelled, tied to its error, and never sent to a spelling service or kept by the browser.
@@ -376,7 +376,9 @@ class PageSourceTest(unittest.TestCase):
         self.assertIn("Adds four usage numbers and no check:", between_ids("step-3", "step-4"))
         # Step 4 says where the report stays; step 2 says what happens to the ids of the text.
         self.assertIn("The report stays with you.</strong> It quotes raw values of your instance as evidence, unlike the file you share", between_ids("step-4", "step-5"))
-        self.assertIn("The instance ids, the host ids and the browser's user agent in the text were read and discarded", between_ids("step-2", "step-3"))
+        # Not "read and discarded" (review of 3148e1f): the parser takes the values it knows and nothing else.
+        self.assertIn("The instance ids, the host ids and the browser's user agent in the text are not taken from it: nothing of them is kept, shown or written anywhere.", between_ids("step-2", "step-3"))
+        self.assertNotIn("read and discarded", INDEX_HTML + web.meta()["sources"][0]["hint"])
         # "Open a profile" is a secondary entry of the first screen.
         self.assertIn('id="open-block"', between_ids("step-1", "step-2"))
 
@@ -899,6 +901,11 @@ def run_response(snapshot=PLAIN, debug=True):
             return json.dumps(cli.json_safe(web.run_check(fields)), allow_nan=False)
 
 
+def test_response():
+    """A run with the real rules, so that the profile lists the 24 checks: the debug information alone."""
+    return json.dumps(cli.json_safe(web.run_check({"debug_info_text": READ})), allow_nan=False)
+
+
 def run_page(scenario, raw=True, **data):
     """Load app.js in tests/page_harness.js and run `scenario`, an async JavaScript function of (page, input)."""
     data = dict(data)
@@ -977,10 +984,10 @@ class PageBehaviourTest(unittest.TestCase):
         coverage = json.loads(CHECKED)["coverage"]
         self.assertEqual((got["third"]["view"], got["third"]["focus"]), ("step-3", "step-3-title"))
         self.assertEqual(got["third"]["decided"], f"The debug information decides {coverage['decided']} of 24 checks.")
-        self.assertEqual(got["third"]["unstated"], f"{coverage['unstated']} check needs a source that states a setting the debug information does not show.")
+        self.assertEqual(got["third"]["unstated"], f"{coverage['unstated']} check needs a source that states a setting the debug information does not show. Not counted under any source below, though a source may decide them too.")
         self.assertEqual(coverage["unstated"], 1)
         self.assertEqual(got["third"]["gains"], [
-            f"{count} check{'' if count == 1 else 's'} can be decided with this source." for count in (coverage["waiting"][source] for source in ("url", "env", "postgres", "redis", "kubernetes"))
+            f"At least {count} check{'' if count == 1 else 's'} can be decided with this source." for count in (coverage["waiting"][source] for source in ("url", "env", "postgres", "redis", "kubernetes"))
         ])  # fmt: skip
         self.assertEqual(got["fourth"], {"view": "step-4", "sources": "the debug information.", "runs": 0, "locked": ["step-4"] * 2})
         # The text goes to the server as it was pasted, once to be read and once with the run, and alone.
@@ -1298,6 +1305,88 @@ class PageBehaviourTest(unittest.TestCase):
         self.assertEqual(APP_JS.count("reportInputs = "), 3)  # declared; emptied when a run starts; set when its report arrives
         for store in ("reportInputs)", "reportInputs,"):  # compared, and never shown, sent or stored
             self.assertNotIn(store, APP_JS)
+
+    def test_the_numbers_of_step_three_are_a_lower_bound_and_say_so(self):
+        # Review of 3148e1f, finding 3 and a nit. With a text that has no cluster section the environment
+        # decides more checks than the ones that name it: the step says "at least", and why.
+        read = debug_info.parse(pasted.NO_CLUSTER)
+        checked = web.check_debug_info(read)
+        alone = checked["coverage"]
+        with mock.patch("n8n_healthcheck.collectors.collect", return_value=Snapshot(env={"EXECUTIONS_MODE": "queue"}, debug_info=read)):
+            with_env = web.run_check({"env_text": "EXECUTIONS_MODE=queue\n", "debug_info_text": read})["coverage"]
+        # The number under a source is not what a given file adds: that depends on what the file states.
+        self.assertNotEqual(with_env["decided"] - alone["decided"], alone["waiting"]["env"])
+        self.assertGreater(alone["unstated"], 1)
+        got = run_page(
+            """async (page, input) => {
+              page.$("f-postgres").parent.disabled = true;  // psql is not on this machine: the source cannot be used
+              page.go(2);
+              page.type("f-debug", input.text);
+              await page.pressDebug();
+              await page.finishCheck(input.checked);
+              return { unstated: page.$("gain-unstated").textContent, gains: ["url", "env", "postgres", "redis", "kubernetes"].map((source) => page.$("gain-" + source).textContent) };
+            }""",
+            text=pasted.NO_CLUSTER, checked=json.dumps(checked),
+        )  # fmt: skip
+        waiting = alone["waiting"]
+        self.assertEqual(got["gains"], [
+            f"At least {waiting['url']} checks can be decided with this source.",
+            f"At least {waiting['env']} checks can be decided with this source.",
+            "",  # a source that cannot be used advertises nothing
+            f"At least {waiting['redis']} checks can be decided with this source.",
+            f"At least {waiting['kubernetes']} checks can be decided with this source.",
+        ])  # fmt: skip
+        self.assertGreater(waiting["postgres"], 0)
+        self.assertEqual(got["unstated"], f"{alone['unstated']} checks need a source that states a setting the debug information does not show. Not counted under any source below, though a source may decide them too.")
+        intro = between_ids("gain-decided", "gain-unstated")
+        self.assertIn("at least how many of the other checks can be decided with it. It is a lower bound, counted from the checks that name the source as one they lack.", intro)
+        # No source is named by any check: the line says that, and promises nothing.
+        nothing = {**checked, "coverage": {**alone, "waiting": dict.fromkeys(waiting, 0)}}
+        got = run_page(
+            """async (page, input) => {
+              page.go(2);
+              page.type("f-debug", input.text);
+              await page.pressDebug();
+              await page.finishCheck(input.checked);
+              return page.$("gain-env").textContent;
+            }""",
+            text=pasted.NO_CLUSTER, checked=json.dumps(nothing),
+        )  # fmt: skip
+        self.assertEqual(got, "No check names this source as the one it lacks.")
+
+    def test_the_numbers_of_step_five_are_the_runs_and_say_what_was_withheld_of_them(self):
+        # Review of 3148e1f, finding 4: the heading is about the run, and a line follows what is withheld in the step.
+        self.assertIn('<h3 id="coverage-title">How much this run decided</h3>', INDEX_HTML)
+        self.assertNotIn("lets the reader assess", INDEX_HTML)
+        got = run_page(
+            """async (page, input) => {
+              await page.run(input.response);
+              page.go(5);
+              const line = () => [page.visible("coverage-withheld"), page.$("coverage-withheld").textContent, page.$("coverage-decided").textContent];
+              const seen = { none: line() };
+              const ids = Object.keys(page.boxes()).filter((id) => id.startsWith("check:"));
+              page.toggle(page.boxes()[ids[0]]);
+              seen.one = line();
+              page.toggle(page.boxes()[ids[1]]);
+              seen.two = line();
+              page.toggle(page.boxes()["check"]);
+              seen.whole = line();
+              page.toggle(page.boxes()["check"]);
+              page.toggle(page.boxes()[ids[0]]);
+              page.toggle(page.boxes()[ids[1]]);
+              seen.back = line();
+              return { ...seen, checks: ids.length };
+            }""",
+            response=test_response(),
+        )
+        decided = got["none"][2]
+        self.assertRegex(decided, r"^This run decided \d+ of 24 checks\.$")
+        self.assertEqual(got["checks"], 24)
+        self.assertEqual(got["none"], [False, "", decided])
+        self.assertEqual(got["one"], [True, "You withheld 1 of the 24 checks below: the file does not say how it ended.", decided])
+        self.assertEqual(got["two"], [True, "You withheld 2 of the 24 checks below: the file does not say how they ended.", decided])
+        self.assertEqual(got["whole"], [True, "You withheld the check outcome below: the file tells its reader none of this.", decided])
+        self.assertEqual(got["back"], [False, "", decided])
 
     def test_a_400_about_something_else_is_still_the_banner(self):
         got = run_page(
